@@ -1,0 +1,16 @@
+# dracula -- vivid on near-black. The most saturated theme here; good on a
+# dedicated monitoring screen, loud as a second terminal.
+fg       = #f8f8f2
+dim      = #6272a4
+border   = #44475a
+title    = #ffffff
+accent   = #8be9fd
+accent2  = #bd93f9
+ok       = #50fa7b
+warn     = #f1fa8c
+crit     = #ff5555
+rx       = #50fa7b
+tx       = #8be9fd
+g_low    = #50fa7b
+g_mid    = #f1fa8c
+g_high   = #ff5555

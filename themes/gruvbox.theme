@@ -1,0 +1,16 @@
+# gruvbox -- warm and high contrast. Holds up well over a laggy SSH session
+# where subtle colour differences get lost.
+fg       = #ebdbb2
+dim      = #7c6f64
+border   = #3c3836
+title    = #fbf1c7
+accent   = #83a598
+accent2  = #d3869b
+ok       = #b8bb26
+warn     = #fabd2f
+crit     = #fb4934
+rx       = #b8bb26
+tx       = #83a598
+g_low    = #b8bb26
+g_mid    = #fabd2f
+g_high   = #fb4934

@@ -1,0 +1,56 @@
+{
+  "name": "hyn-view",
+  "version": "1.0.0",
+  "description": "Network-first, ultra-low-overhead terminal system monitor for Ubuntu Server. Pure bash, zero runtime dependencies, themeable, with scheduled speed tests and read-only Highway (hw-os) node tracking.",
+  "bin": {
+    "hyn": "bin/hyn",
+    "hyn-view": "bin/hyn"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "themes/",
+    "scripts/",
+    "test/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "bash test/selfcheck.sh",
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "keywords": [
+    "monitor",
+    "htop",
+    "btop",
+    "network",
+    "bandwidth",
+    "speedtest",
+    "tui",
+    "ubuntu",
+    "server",
+    "sysadmin",
+    "highway",
+    "hwaynetwork",
+    "node-operator",
+    "proc",
+    "bash"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AryanVBW/HYN-view.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AryanVBW/HYN-view/issues"
+  },
+  "homepage": "https://github.com/AryanVBW/HYN-view#readme",
+  "author": "aryanvbw (https://github.com/AryanVBW)",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "linux"
+  ],
+  "dependencies": {}
+}

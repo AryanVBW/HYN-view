@@ -1,0 +1,16 @@
+# solar -- Solarized Dark. Deliberately narrow contrast range; the most
+# comfortable option for long sessions on a bright screen.
+fg       = #93a1a1
+dim      = #586e75
+border   = #073642
+title    = #eee8d5
+accent   = #2aa198
+accent2  = #268bd2
+ok       = #859900
+warn     = #b58900
+crit     = #dc322f
+rx       = #859900
+tx       = #2aa198
+g_low    = #859900
+g_mid    = #b58900
+g_high   = #dc322f

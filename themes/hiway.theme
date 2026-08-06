@@ -1,0 +1,16 @@
+# hiway -- default. Cool slate with a cyan signal colour, tuned so that the
+# only saturated things on screen are the numbers that mean something.
+fg       = #c3d0e0
+dim      = #55637a
+border   = #26314a
+title    = #e6edf7
+accent   = #22d3ee
+accent2  = #7c8cf8
+ok       = #34d399
+warn     = #fbbf24
+crit     = #fb7185
+rx       = #34d399
+tx       = #22d3ee
+g_low    = #34d399
+g_mid    = #fbbf24
+g_high   = #fb7185

@@ -1,0 +1,666 @@
+#!/usr/bin/env bash
+# hyn-view -- network-first system monitor for Ubuntu Server
+#
+# Entry point: resolves its own install location, loads the library, then either
+# runs the interactive loop or handles a one-shot subcommand.
+#
+# Requires bash 4.3+ for namerefs and associative arrays. Ubuntu 22.04 ships
+# 5.1 and 24.04 ships 5.2, so this is not a practical limit on the target.
+
+set -uo pipefail
+
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3))); then
+  printf 'hyn: needs bash 4.3 or newer (found %s)\n' "${BASH_VERSION:-unknown}" >&2
+  exit 1
+fi
+
+# Resolve through symlinks: npm installs the command as a symlink in the global
+# bin dir, so $0 is not where the library lives.
+_self=${BASH_SOURCE[0]}
+while [[ -L $_self ]]; do
+  _target=$(readlink "$_self")
+  if [[ $_target == /* ]]; then
+    _self=$_target
+  else
+    _self=$(cd -P "${_self%/*}" 2>/dev/null && printf '%s/%s' "$PWD" "$_target")
+  fi
+done
+HYN_ROOT=$(cd -P "${_self%/*}/.." 2>/dev/null && pwd) || {
+  printf 'hyn: cannot locate install directory\n' >&2
+  exit 1
+}
+HYN_LIB="$HYN_ROOT/lib"
+export HYN_LIB HYN_ROOT
+
+for _m in core ui net collect highway speedtest panels; do
+  # shellcheck source=/dev/null
+  source "$HYN_LIB/$_m.sh" || {
+    printf 'hyn: failed to load %s\n' "$HYN_LIB/$_m.sh" >&2
+    exit 1
+  }
+done
+unset _m _self _target
+
+# ---------------------------------------------------------------------------
+# state
+# ---------------------------------------------------------------------------
+VIEW=dash
+RESIZED=0
+QUIT=0
+STATUS_MSG='' STATUS_UNTIL=0
+IFACE_OVERRIDE=''
+
+on_winch() { RESIZED=1; }
+on_quit() { QUIT=1; }
+
+boot() {
+  cfg_load
+  color_detect
+  theme_load "${CFG[theme]}"
+  ui_init
+  collect_init
+  panels_enabled
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# sampling
+# ---------------------------------------------------------------------------
+TICK=0
+LAST_MS=0
+
+sample_all() {
+  local now ms
+  now_ms_v; now=$NOW_MS
+  ms=$((now - LAST_MS))
+  ((LAST_MS == 0)) && ms=0
+  LAST_MS=$now
+  ((TICK++))
+
+  net_sample "$ms"
+  [[ -n $IFACE_OVERRIDE ]] && NET_WAN=$IFACE_OVERRIDE
+  net_snmp "$ms"
+  net_sockstat
+  cpu_sample "$ms"
+  mem_sample
+  sys_sample
+  disk_sample "$ms"
+  psi_sample
+  thermal_read
+
+  # Staggered work: each of these is either a fork or a large read, so they run
+  # on their own cadence rather than every tick.
+  local tcp_iv=${CFG[tcp_states_interval]}
+  [[ $tcp_iv =~ ^[0-9]+$ ]] || tcp_iv=5
+  ((tcp_iv < 1)) && tcp_iv=1
+  if cfg_on tcp_states && ((TICK % tcp_iv == 1 || TICK == 1)); then net_tcp_states; fi
+
+  local lat_iv=${CFG[latency_interval]}
+  [[ $lat_iv =~ ^[0-9]+$ ]] || lat_iv=10
+  ((lat_iv < 2)) && lat_iv=2
+  if ((TICK == 1 || TICK % lat_iv == 0)); then net_latency_spawn; fi
+  net_latency_read
+
+  if cfg_on public_ip && ((TICK == 1 || TICK % 1800 == 0)); then net_pubip_spawn; fi
+  net_pubip_read
+
+  ((TICK % 30 == 1)) && cpu_freq
+
+  if [[ $VIEW == proc || $VIEW == dash ]]; then
+    local rows=${CFG[proc_rows]}
+    [[ $rows =~ ^[0-9]+$ ]] || rows=8
+    [[ $VIEW == proc ]] && rows=$((TERM_ROWS))
+    proc_sample "$ms" "$rows" "${CFG[proc_sort]}"
+  fi
+
+  cfg_on highway_track && hw_sample "$ms"
+  ((TICK % 15 == 1)) && sys_failed_units
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# keys
+# ---------------------------------------------------------------------------
+set_status() {
+  STATUS_MSG=$1
+  STATUS_UNTIL=$((${EPOCHSECONDS:-0} + ${2:-4}))
+  return 0
+}
+
+cycle_theme() {
+  local -a list=()
+  local t cur=$THEME_NAME i=0 next
+  while read -r t; do list+=("$t"); done < <(theme_list)
+  ((${#list[@]} == 0)) && return 0
+  for i in "${!list[@]}"; do
+    [[ ${list[i]} == "$cur" ]] && break
+  done
+  next=${list[(i + 1) % ${#list[@]}]}
+  CFG[theme]=$next
+  theme_load "$next"
+  _GRAD=()
+  fb_invalidate
+  set_status "theme: $next"
+  return 0
+}
+
+cycle_iface() {
+  local i=0 n=${#NET_IFACES[@]}
+  ((n == 0)) && return 0
+  for i in "${!NET_IFACES[@]}"; do
+    [[ ${NET_IFACES[i]} == "$NET_WAN" ]] && break
+  done
+  IFACE_OVERRIDE=${NET_IFACES[(i + 1) % n]}
+  NET_WAN=$IFACE_OVERRIDE
+  set_status "interface: $NET_WAN"
+  return 0
+}
+
+adjust_interval() {
+  local dir=$1 cur=${CFG[interval]}
+  parse_fixed3_v "$cur"
+  local ms=$FIX3
+  if ((dir > 0)); then ms=$((ms + 250)); else ms=$((ms - 250)); fi
+  ((ms < 250)) && ms=250
+  ((ms > 10000)) && ms=10000
+  fmt_fixed_v "$ms" 1000 2
+  CFG[interval]=$FMT_OUT
+  set_status "refresh: ${CFG[interval]}s"
+  return 0
+}
+
+handle_key() {
+  local k=$1
+  case $k in
+    q | Q) QUIT=1 ;;
+    $'\003') QUIT=1 ;;
+    1) VIEW=dash; fb_invalidate ;;
+    2) VIEW=net; fb_invalidate ;;
+    3) VIEW=proc; fb_invalidate ;;
+    4) VIEW=node; fb_invalidate ;;
+    h | H | '?') VIEW=help; fb_invalidate ;;
+    t | T) cycle_theme ;;
+    u | U)
+      if [[ ${CFG[net_unit]} == bits ]]; then CFG[net_unit]=bytes; else CFG[net_unit]=bits; fi
+      set_status "units: ${CFG[net_unit]}" ;;
+    m | M)
+      if [[ ${CFG[proc_sort]} == cpu ]]; then CFG[proc_sort]=mem; else CFG[proc_sort]=cpu; fi
+      set_status "sort: ${CFG[proc_sort]}" ;;
+    i | I) cycle_iface ;;
+    r | R) fb_invalidate; set_status 'redrawn' ;;
+    s | S)
+      # Detached so a 20 second measurement cannot freeze the UI. The result
+      # lands in the history file and the panel picks it up on its own.
+      { st_run 1 >/dev/null 2>&1; } &
+      set_status 'speed test running in background…' 30 ;;
+    +) adjust_interval 1 ;;
+    -) adjust_interval -1 ;;
+    $'\033')
+      # Drain the rest of an escape sequence so arrow keys are not read as
+      # individual command letters.
+      read -rsn2 -t 0.02 _ 2>/dev/null || true ;;
+  esac
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# help view
+# ---------------------------------------------------------------------------
+render_help() {
+  local w=$TERM_COLS h=$TERM_ROWS
+  local -a P=()
+  header_line "$w"
+  fb_reset
+  fb_add "$HDR_OUT"
+  panel_open P "$w" 'KEYS' 'h to return'
+  panel_row P "$w" "$(kv '1 2 3 4' 'dashboard / network / processes / node' 14)"
+  panel_row P "$w" "$(kv 't' "cycle theme (now: $THEME_NAME)" 14)"
+  panel_row P "$w" "$(kv 'u' "toggle bits / bytes (now: ${CFG[net_unit]})" 14)"
+  panel_row P "$w" "$(kv 'm' "sort processes by cpu / mem (now: ${CFG[proc_sort]})" 14)"
+  panel_row P "$w" "$(kv 'i' 'cycle monitored interface' 14)"
+  panel_row P "$w" "$(kv 's' 'run a speed test now (background)' 14)"
+  panel_row P "$w" "$(kv '+ -' "refresh interval (now: ${CFG[interval]}s)" 14)"
+  panel_row P "$w" "$(kv 'r' 'force full redraw' 14)"
+  panel_row P "$w" "$(kv 'q' 'quit' 14)"
+  panel_close P "$w"
+  fb_addmany "${P[@]}"
+
+  local -a P2=()
+  panel_open P2 "$w" 'PATHS' ''
+  panel_row P2 "$w" "$(kv 'config' "$HYN_ETC/config" 12)"
+  panel_row P2 "$w" "$(kv 'themes' "$HYN_ETC/themes, $HYN_ROOT/themes" 12)"
+  panel_row P2 "$w" "$(kv 'state' "$(state_dir)" 12)"
+  panel_row P2 "$w" "$(kv 'colors' "depth $COLOR_DEPTH, theme $THEME_NAME" 12)"
+  panel_close P2 "$w"
+  fb_addmany "${P2[@]}"
+
+  while ((${#FB[@]} < h - 1)); do fb_add ''; done
+  footer_line "$w"
+  FB[h - 1]=$FTR_OUT
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# main loop
+# ---------------------------------------------------------------------------
+run_tui() {
+  [[ -t 1 ]] || die "not a terminal -- use 'hyn snapshot' for scripts and cron"
+  term_setup
+  trap 'term_restore' EXIT
+  trap 'on_quit' INT TERM HUP
+  trap 'on_winch' WINCH
+
+  local iv key
+  # Prime the counters so the first visible frame shows real rates rather than
+  # since-boot averages.
+  sample_all
+  iv=${CFG[interval]}
+
+  while ((QUIT == 0)); do
+    if ((RESIZED)); then
+      RESIZED=0
+      term_size
+      fb_invalidate
+    fi
+    sample_all
+    case $VIEW in
+      net) render_net_full ;;
+      proc) render_proc_full ;;
+      node) render_node_full ;;
+      help) render_help ;;
+      *) render_dash ;;
+    esac
+    if [[ -n $STATUS_MSG ]]; then
+      if ((${EPOCHSECONDS:-0} < STATUS_UNTIL)); then
+        fit_v " ${C[accent]}${C[bold]}$STATUS_MSG${C[reset]}" "$TERM_COLS"
+        FB[TERM_ROWS - 1]=$FIT_OUT
+      else
+        STATUS_MSG=''
+      fi
+    fi
+    fb_flush
+
+    iv=${CFG[interval]}
+    [[ $iv =~ ^[0-9]+([.][0-9]+)?$ ]] || iv=1
+    # read doubles as the sleep: one syscall for both waiting and input, so
+    # keys feel instant without a busy poll.
+    if read -rsn1 -t "$iv" key 2>/dev/null; then
+      handle_key "$key"
+    fi
+  done
+  term_restore
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# one-shot subcommands
+# ---------------------------------------------------------------------------
+cmd_snapshot() {
+  local json=0 a
+  for a in "$@"; do [[ $a == --json ]] && json=1; done
+  # Two samples a second apart: rates are deltas and a single read cannot
+  # produce them. Reporting since-boot averages as "current" would be a lie.
+  sample_all
+  sleep 1
+  sample_all
+  local iface=${NET_WAN:-none}
+
+  if ((json)); then
+    net_retrans_permille
+    st_history_read 1
+    printf '{\n'
+    printf '  "host": "%s",\n' "$HOSTNAME_S"
+    printf '  "kernel": "%s",\n' "$KERNEL"
+    printf '  "uptime_s": %s,\n' "$UPTIME_S"
+    printf '  "load": [%s, %s, %s],\n' "${LOAD1:-0}" "${LOAD5:-0}" "${LOAD15:-0}"
+    printf '  "cpu": {"pct": %s, "user": %s, "sys": %s, "iowait": %s, "steal": %s, "cores": %s},\n' \
+      "$CPU_PCT" "$CPU_USER" "$CPU_SYS" "$CPU_IOWAIT" "$CPU_STEAL" "$CPU_COUNT"
+    printf '  "memory": {"total": %s, "used": %s, "pct": %s, "swap_used": %s},\n' \
+      "$MEM_TOTAL" "$MEM_USED" "$MEM_PCT" "$SWAP_USED"
+    printf '  "network": {"iface": "%s", "rx_bps": %s, "tx_bps": %s, "rx_total": %s, "tx_total": %s,\n' \
+      "$iface" "${NET_RXR[$iface]:-0}" "${NET_TXR[$iface]:-0}" "${NET_RX[$iface]:-0}" "${NET_TX[$iface]:-0}"
+    printf '    "rx_err": %s, "tx_err": %s, "rx_drop": %s, "tx_drop": %s,\n' \
+      "${NET_RERR[$iface]:-0}" "${NET_TERR[$iface]:-0}" "${NET_RDROP[$iface]:-0}" "${NET_TDROP[$iface]:-0}"
+    printf '    "retrans_per_s": %s, "retrans_permille": %s, "listen_drops": %s,\n' \
+      "${SNMPR[Tcp.RetransSegs]:-0}" "$NET_RETRANS_PM" "${SNMPR[TcpExt.ListenDrops.raw]:-0}"
+    printf '    "tcp_estab": %s, "tcp_timewait": %s, "conntrack_pct": %s},\n' \
+      "${TCPST[ESTAB]:-0}" "${TCPST[TIME_WAIT]:-0}" "${CT_PCT:-0}"
+    printf '  "latency_us": {'
+    local first=1 k
+    for k in "${!LAT_MS[@]}"; do
+      ((first)) || printf ', '
+      first=0
+      printf '"%s": %s' "$k" "${LAT_MS[$k]}"
+    done
+    printf '},\n'
+    printf '  "speedtest": {"ts": %s, "down_bps": %s, "up_bps": %s, "latency_us": %s, "note": "%s"},\n' \
+      "$ST_LAST_TS" "$ST_LAST_DOWN" "$ST_LAST_UP" "$ST_LAST_LAT" "$ST_LAST_NOTE"
+    printf '  "highway": {"present": %s, "health": "%s", "why": "%s", "version": "%s", "latest": "%s",\n' \
+      "$HW_PRESENT" "$HW_HEALTH" "$HW_HEALTH_WHY" "$HW_VERSION" "$HW_LATEST"
+    printf '    "units_active": %s, "units_failed": %s, "pid": %s, "rss": %s, "cpu_tenths": %s,\n' \
+      "$HW_ACTIVE" "$HW_FAILED" "$HW_PID" "$HW_RSS" "$HW_CPU"
+    printf '    "tunnel": "%s", "journal_err_1h": %s, "update_available": %s}\n' \
+      "$HW_NEBULA" "$HW_JOURNAL_ERR" "$HW_UPDATE"
+    printf '}\n'
+    return 0
+  fi
+
+  printf '%s  %s  %s\n' "$HOSTNAME_S" "$DISTRO" "$KERNEL"
+  printf 'uptime   %s   load %s %s %s\n' "$(fmt_dur "$UPTIME_S")" "${LOAD1:-?}" "${LOAD5:-?}" "${LOAD15:-?}"
+  printf 'cpu      %s%%  usr %s sys %s io %s steal %s  (%s cores)\n' \
+    "$CPU_PCT" "$CPU_USER" "$CPU_SYS" "$CPU_IOWAIT" "$CPU_STEAL" "$CPU_COUNT"
+  printf 'memory   %s / %s (%s%%)   swap %s\n' \
+    "$(fmt_size "$MEM_USED")" "$(fmt_size "$MEM_TOTAL")" "$MEM_PCT" "$(fmt_size "$SWAP_USED")"
+  printf 'net %-6s down %s  up %s   total %s / %s\n' "$iface" \
+    "$(fmt_rate "${NET_RXR[$iface]:-0}")" "$(fmt_rate "${NET_TXR[$iface]:-0}")" \
+    "$(fmt_size "${NET_RX[$iface]:-0}")" "$(fmt_size "${NET_TX[$iface]:-0}")"
+  net_retrans_permille
+  printf 'net err  rx %s tx %s   drop rx %s tx %s   retrans %s/s\n' \
+    "${NET_RERR[$iface]:-0}" "${NET_TERR[$iface]:-0}" \
+    "${NET_RDROP[$iface]:-0}" "${NET_TDROP[$iface]:-0}" "${SNMPR[Tcp.RetransSegs]:-0}"
+  local k
+  for k in "${!LAT_MS[@]}"; do
+    printf 'ping %-8s %s ms  loss %s%%\n' "$k" "$(fmt_fixed "${LAT_MS[$k]}" 1000 2)" "${LAT_LOSS[$k]}"
+  done
+  st_history_read 1
+  if ((ST_LAST_DOWN > 0)); then
+    printf 'speedtest down %s  up %s  %s ago\n' \
+      "$(fmt_rate "$ST_LAST_DOWN")" "$(fmt_rate "$ST_LAST_UP")" \
+      "$(fmt_dur $((${EPOCHSECONDS:-0} - ST_LAST_TS)))"
+  fi
+  if ((HW_PRESENT)); then
+    printf 'highway  %s (%s)  version %s  latest %s\n' \
+      "$HW_HEALTH" "$HW_HEALTH_WHY" "${HW_VERSION:-unknown}" "${HW_LATEST:-unknown}"
+    ((HW_PID > 0)) && printf 'highway  pid %s  rss %s  cpu %s%%  tunnel %s\n' \
+      "$HW_PID" "$(fmt_size "$HW_RSS")" "$(fmt_fixed "$HW_CPU" 10 1)" "${HW_NEBULA:-none}"
+  fi
+  if ((${#FAILED_UNITS[@]} > 0)); then
+    printf 'failed   %s\n' "${FAILED_UNITS[*]}"
+  fi
+  return 0
+}
+
+cmd_speedtest() {
+  local json=0 force=1 a
+  for a in "$@"; do
+    case $a in
+      --json) json=1 ;;
+      --respect-guard) force=0 ;;
+    esac
+  done
+  ((json == 0)) && printf 'hyn: measuring (provider: %s)…\n' "$(st_provider)" >&2
+  st_run "$force"
+  local rc=$?
+  st_print "$json"
+  return $rc
+}
+
+cmd_history() {
+  local json=0 n=20 a
+  for a in "$@"; do
+    case $a in
+      --json) json=1 ;;
+      [0-9]*) n=$a ;;
+    esac
+  done
+  st_history_read 1 || { printf 'hyn: no speed test history yet\n' >&2; return 1; }
+  local total=${#ST_H_TS[@]} start=$((${#ST_H_TS[@]} - n)) i
+  ((start < 0)) && start=0
+  if ((json)); then
+    printf '['
+    local first=1
+    for ((i = start; i < total; i++)); do
+      ((first)) || printf ','
+      first=0
+      printf '\n  {"ts": %s, "down_bps": %s, "up_bps": %s, "latency_us": %s, "note": "%s"}' \
+        "${ST_H_TS[i]}" "${ST_H_DOWN[i]}" "${ST_H_UP[i]}" "${ST_H_LAT[i]}" "${ST_H_NOTE[i]}"
+    done
+    printf '\n]\n'
+    return 0
+  fi
+  printf '%-20s %12s %12s %10s  %s\n' 'WHEN' 'DOWN' 'UP' 'PING' 'NOTE'
+  for ((i = start; i < total; i++)); do
+    printf -v when '%(%Y-%m-%d %H:%M)T' "${ST_H_TS[i]}"
+    printf '%-20s %12s %12s %10s  %s\n' "$when" \
+      "$(fmt_rate "${ST_H_DOWN[i]}")" "$(fmt_rate "${ST_H_UP[i]}")" \
+      "$(fmt_fixed "${ST_H_LAT[i]}" 1000 1)ms" "${ST_H_NOTE[i]}"
+  done
+  return 0
+}
+
+cmd_theme() {
+  local sub=${1:-list}
+  case $sub in
+    list)
+      local t
+      while read -r t; do
+        if [[ $t == "${CFG[theme]}" ]]; then printf '* %s\n' "$t"; else printf '  %s\n' "$t"; fi
+      done < <(theme_list)
+      ;;
+    current | show) printf '%s\n' "${CFG[theme]}" ;;
+    set)
+      local name=${2:-}
+      [[ -n $name ]] || die 'usage: hyn theme set <name>'
+      theme_path "$name" >/dev/null || die "unknown theme: $name (try: hyn theme list)"
+      config_set theme "$name"
+      printf 'hyn: theme set to %s\n' "$name"
+      ;;
+    preview)
+      local name=${2:-${CFG[theme]}} i
+      theme_load "$name" || die "unknown theme: $name"
+      printf '%stheme %s%s\n' "${C[accent]}${C[bold]}" "$name" "${C[reset]}"
+      for i in 0 10 25 40 55 70 85 100; do
+        printf '  %3d%% %s\n' "$i" "$(bar "$i" 40)"
+      done
+      printf '  %sok%s  %swarn%s  %scrit%s  %srx%s  %stx%s  %sdim%s\n' \
+        "${C[ok]}" "${C[reset]}" "${C[warn]}" "${C[reset]}" "${C[crit]}" "${C[reset]}" \
+        "${C[rx]}" "${C[reset]}" "${C[tx]}" "${C[reset]}" "${C[dim]}" "${C[reset]}"
+      ;;
+    *) die "usage: hyn theme [list|set <name>|current|preview <name>]" ;;
+  esac
+  return 0
+}
+
+config_file_rw() {
+  # Root edits the system config so the change applies to the service and every
+  # operator on the box; an unprivileged user gets their own.
+  if is_root; then
+    printf '%s' "$HYN_ETC/config"
+  else
+    printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/hyn-view/config"
+  fi
+}
+
+config_set() {
+  local k=$1 v=$2 f
+  _cfg_allowed "$k" || die "unknown config key: $k (see 'hyn config show')"
+  f=$(config_file_rw)
+  mkdir -p "${f%/*}" 2>/dev/null || die "cannot create ${f%/*}"
+  local -a out=()
+  local line found=0
+  if [[ -r $f ]]; then
+    while IFS= read -r line || [[ -n $line ]]; do
+      if [[ ${line%%=*} == "$k" && $line == *=* ]]; then
+        out+=("$k=$v")
+        found=1
+      else
+        out+=("$line")
+      fi
+    done <"$f"
+  fi
+  ((found == 0)) && out+=("$k=$v")
+  printf '%s\n' "${out[@]}" >"$f.tmp" && mv -f "$f.tmp" "$f" || die "cannot write $f"
+  return 0
+}
+
+cmd_config() {
+  local sub=${1:-show}
+  case $sub in
+    path) config_file_rw; printf '\n' ;;
+    show)
+      local k
+      for k in $(printf '%s\n' "${!CFG[@]}" | sort); do
+        printf '%-26s %s\n' "$k" "${CFG[$k]}"
+      done
+      ;;
+    get) [[ -n ${2:-} ]] || die 'usage: hyn config get <key>'; printf '%s\n' "${CFG[$2]:-}" ;;
+    set)
+      [[ -n ${2:-} && $# -ge 3 ]] || die 'usage: hyn config set <key> <value>'
+      config_set "$2" "$3"
+      printf 'hyn: %s = %s (in %s)\n' "$2" "$3" "$(config_file_rw)"
+      ;;
+    edit)
+      local f
+      f=$(config_file_rw)
+      mkdir -p "${f%/*}" 2>/dev/null
+      [[ -f $f ]] || printf '# hyn-view config -- see `hyn config show` for keys\n' >"$f"
+      "${EDITOR:-vi}" "$f"
+      ;;
+    *) die 'usage: hyn config [show|get <k>|set <k> <v>|path|edit]' ;;
+  esac
+  return 0
+}
+
+cmd_doctor() {
+  local ok=0 warn=0
+  _chk() {
+    local state=$1 label=$2 detail=${3:-}
+    local mark
+    case $state in
+      ok) mark="${C[ok]}ok  ${C[reset]}"; ((ok++)) ;;
+      warn) mark="${C[warn]}warn${C[reset]}"; ((warn++)) ;;
+      *) mark="${C[crit]}fail${C[reset]}"; ((warn++)) ;;
+    esac
+    printf '  [%s] %-28s %s\n' "$mark" "$label" "$detail"
+  }
+  printf '%shyn-view %s -- environment check%s\n\n' "${C[bold]}" "$HYN_VERSION" "${C[reset]}"
+
+  _chk ok 'bash' "$BASH_VERSION"
+  if [[ -r $HYN_PROC/stat ]]; then _chk ok 'procfs' "$HYN_PROC"; else _chk fail 'procfs' "$HYN_PROC missing -- Linux only"; fi
+  if [[ -r $HYN_PROC/net/dev ]]; then _chk ok 'net counters' '/proc/net/dev'; else _chk fail 'net counters' 'unavailable'; fi
+  if [[ -r $HYN_PROC/net/snmp ]]; then _chk ok 'tcp counters' '/proc/net/snmp'; else _chk warn 'tcp counters' 'no retransmit stats'; fi
+  if [[ -d $HYN_PROC/pressure ]]; then _chk ok 'psi' '/proc/pressure'; else _chk warn 'psi' 'kernel without CONFIG_PSI'; fi
+  if net_conntrack; then _chk ok 'conntrack' "$CT_COUNT/$CT_MAX"; else _chk warn 'conntrack' 'module not loaded'; fi
+  case $COLOR_DEPTH in
+    24) _chk ok 'colour' 'truecolor' ;;
+    256) _chk ok 'colour' '256' ;;
+    16) _chk warn 'colour' '16 -- gradients will band' ;;
+    *) _chk warn 'colour' 'disabled' ;;
+  esac
+  if cfg_on ascii; then _chk warn 'glyphs' 'ASCII fallback (no UTF-8 locale)'; else _chk ok 'glyphs' "unicode (${LC_ALL:-${LANG:-default}})"; fi
+  # Explicit if/else rather than `have x && _chk ok || _chk warn`: in that form a
+  # non-zero return from the success branch silently runs the failure branch too.
+  if have curl; then _chk ok 'curl' 'present'; else _chk warn 'curl' 'missing -- no speed test or update check'; fi
+  if have ping; then _chk ok 'ping' 'present'; else _chk warn 'ping' 'missing -- latency falls back to TCP connect'; fi
+  if have systemctl; then _chk ok 'systemd' 'present'; else _chk warn 'systemd' 'missing -- no unit tracking'; fi
+  local sd
+  sd=$(state_dir)
+  if mkdir -p "$sd" 2>/dev/null && [[ -w $sd ]]; then _chk ok 'state dir' "$sd"; else _chk fail 'state dir' "$sd not writable"; fi
+
+  printf '\n%sHighway node%s\n' "${C[bold]}" "${C[reset]}"
+  hw_binary 1
+  if ((HW_PRESENT)); then
+    _chk ok 'binary' "$HW_BIN ($(fmt_size "$HW_SIZE"))"
+    hw_units 1
+    if ((HW_UNIT_COUNT > 0)); then
+      _chk ok 'units' "${HW_UNITS[*]}"
+    else
+      _chk warn 'units' "no units match '${CFG[highway_units]}'"
+    fi
+    if hw_version; then
+      _chk ok 'version' "$HW_VERSION (via $HW_VERSION_SRC)"
+    else
+      _chk warn 'version' 'not readable without executing the binary (see highway_version_probe)'
+    fi
+  else
+    _chk warn 'binary' "not found at $HW_BIN"
+  fi
+  printf '\n%sSpeed test%s\n' "${C[bold]}" "${C[reset]}"
+  _chk ok 'provider' "$(st_provider)"
+  if st_history_read 1 && ((${#ST_H_TS[@]} > 0)); then
+    _chk ok 'history' "${#ST_H_TS[@]} results in $(st_file)"
+  else
+    _chk warn 'history' 'empty -- run: hyn speedtest'
+  fi
+  if have systemctl && systemctl list-unit-files 'hyn-speedtest.timer' --no-legend --plain 2>/dev/null | grep -q hyn; then
+    _chk ok 'timer' "$(systemctl is-active hyn-speedtest.timer 2>/dev/null)"
+  else
+    _chk warn 'timer' 'not installed -- run: sudo hyn setup'
+  fi
+
+  if ((${#CFG_WARNINGS[@]} > 0)); then
+    printf '\n%sconfig notes%s\n' "${C[bold]}" "${C[reset]}"
+    local m
+    for m in "${CFG_WARNINGS[@]}"; do printf '  - %s\n' "$m"; done
+  fi
+  printf '\n%d ok, %d to look at\n' "$ok" "$warn"
+  return 0
+}
+
+cmd_help() {
+  # printf rather than a heredoc: bash 5.3 feeds heredocs through a pipe, and on
+  # platforms with a small initial pipe buffer (macOS starts at 512 bytes) a
+  # heredoc this size deadlocks before `cat` is even exec'd. Linux pipes are
+  # 64 KiB so it would work there, but `hyn help` should never be able to hang.
+  printf '%s\n' \
+    "hyn-view $HYN_VERSION -- network-first system monitor for Ubuntu Server" \
+    '' \
+    'usage: hyn [command] [options]' \
+    '' \
+    '  (no command)          interactive dashboard' \
+    '  net                   open on the network view' \
+    '  proc | top            open on the process view' \
+    '  node                  open on the Highway node view' \
+    '' \
+    '  snapshot [--json]     one-shot reading, for cron, alerting and ssh' \
+    '  speedtest [--json] [--respect-guard]' \
+    '                        measure throughput now and record it' \
+    '  history [N] [--json]  recorded speed test results' \
+    '' \
+    '  theme list | set <name> | current | preview <name>' \
+    '  config show | get <k> | set <k> <v> | path | edit' \
+    '  doctor                check the environment and the node' \
+    '  setup                 install config, state dir and speed test timer (root)' \
+    '  uninstall             remove them again (root)' \
+    '  version | help' \
+    '' \
+    'keys in the dashboard: 1-4 views, t theme, u units, m sort, i interface,' \
+    's speed test, +/- refresh, h help, q quit' \
+    '' \
+    "config:  $HYN_ETC/config  (or ~/.config/hyn-view/config)" \
+    "state:   $(state_dir)"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# dispatch
+# ---------------------------------------------------------------------------
+main() {
+  boot
+  local cmd=${1:-}
+  [[ -n $cmd ]] && shift || true
+  case $cmd in
+    '' | dash | dashboard) run_tui ;;
+    net | network) VIEW=net; run_tui ;;
+    proc | top | ps) VIEW=proc; run_tui ;;
+    node | highway | hyn) VIEW=node; run_tui ;;
+    snapshot | once) cmd_snapshot "$@" ;;
+    speedtest | speed | st) cmd_speedtest "$@" ;;
+    history | hist) cmd_history "$@" ;;
+    theme | themes) cmd_theme "$@" ;;
+    config | cfg) cmd_config "$@" ;;
+    doctor | check) cmd_doctor "$@" ;;
+    setup | install-service)
+      source "$HYN_LIB/setup.sh" || die 'cannot load setup helpers'
+      setup_run "$@" ;;
+    uninstall | remove)
+      source "$HYN_LIB/setup.sh" || die 'cannot load setup helpers'
+      setup_uninstall "$@" ;;
+    version | --version | -v) printf 'hyn-view %s\n' "$HYN_VERSION" ;;
+    help | --help | -h) cmd_help ;;
+    *) die "unknown command: $cmd (try 'hyn help')" ;;
+  esac
+  return $?
+}
+
+main "$@"

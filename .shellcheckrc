@@ -1,0 +1,42 @@
+# shellcheck configuration for hyn-view
+#
+# Each of these is disabled for a specific structural reason, not to silence
+# noise. If you add a disable here, say why.
+
+# SC1090/SC1091: bin/hyn sources $HYN_LIB/*.sh, resolved at runtime from the
+# install location. There is no static path for shellcheck to follow.
+disable=SC1090,SC1091
+
+# SC2034 "appears unused": this is a sourced library, not a set of standalone
+# scripts. Collectors in collect.sh / net.sh / highway.sh set globals that
+# panels.sh reads. Every one of these is used, just not in the file that
+# assigns it.
+disable=SC2034
+
+# SC2206 "quote to prevent word splitting/globbing": the unquoted `f=($rest)`
+# splits are deliberate and load-bearing. They are the fork-free way to split a
+# /proc line into fields -- `read -ra <<<` uses a here-string, which on bash 5.3
+# means a pipe and a subshell on the hot path.
+#
+# Globbing is not a hazard at these sites because every one of them splits a
+# field run that the kernel generates and that contains only digits, dots and
+# the single-letter process state. Note in particular that the /proc/<pid>/stat
+# parse in collect.sh splits only the part AFTER the last ')', so the
+# attacker-controlled comm field is never inside the split -- and it cannot
+# smuggle content past that point, because the kernel emits no ')' after the
+# closing one.
+#
+# If you add a split over a field that is not kernel-generated numerics, do not
+# rely on this: quote it, or wrap it in set -f / set +f.
+disable=SC2206
+
+# SC2178 "used as an array but now assigned a string": shellcheck does not model
+# `local -n` namerefs. ui.sh binds `local -n _po=$1` and then appends to it as
+# the array it points at, which is correct and is how the panel composition
+# works at all.
+disable=SC2178
+
+# SC2154 "referenced but not assigned": triggered by config and theme KEY NAMES
+# passed as plain words, e.g. `cfg_on ascii` and `${CFG[net_unit]}`. These are
+# keys in an associative array, not variables.
+disable=SC2154

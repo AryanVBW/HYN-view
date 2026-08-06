@@ -1,0 +1,16 @@
+# nord -- the Arctic palette. Low contrast on purpose; easy on a screen you
+# leave open all day.
+fg       = #d8dee9
+dim      = #616e88
+border   = #3b4252
+title    = #eceff4
+accent   = #88c0d0
+accent2  = #81a1c1
+ok       = #a3be8c
+warn     = #ebcb8b
+crit     = #bf616a
+rx       = #a3be8c
+tx       = #88c0d0
+g_low    = #a3be8c
+g_mid    = #ebcb8b
+g_high   = #bf616a
