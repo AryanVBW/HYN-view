@@ -10,14 +10,12 @@
     "bin/",
     "lib/",
     "themes/",
-    "scripts/",
     "test/",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "bash test/selfcheck.sh",
-    "postinstall": "node scripts/postinstall.js"
+    "test": "bash test/selfcheck.sh"
   },
   "keywords": [
     "monitor",
