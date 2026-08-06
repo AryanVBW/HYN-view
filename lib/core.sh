@@ -10,7 +10,11 @@
 # HYN_PROC / HYN_SYS exist so test/selfcheck.sh can point the readers at a
 # fixture tree and assert on known numbers. Never hardcode /proc below.
 
-HYN_VERSION="1.0.0"
+HYN_VERSION="1.1.0"
+HYN_AUTHOR='Vivek W (AryanVBW)'
+HYN_AUTHOR_URL='https://github.com/AryanVBW'
+HYN_COPYRIGHT="(c) 2026 Vivek W (AryanVBW)"
+HYN_PKG='hyn-view'
 
 # Globbing is left at its default. An earlier version enabled extglob for vlen's
 # escape-stripping pattern, which had a nasty side effect: with extglob on, "*("
@@ -33,10 +37,22 @@ HYN_VERSION="1.0.0"
 # sourced -- a monitoring tool should not be an arbitrary-code loader just
 # because someone can drop a file in /etc.
 declare -A CFG=(
+  # 'best' for the richest visuals, 'performance' for the cheapest. Sets graph,
+  # interval and row counts together; anything you set explicitly still wins.
+  [profile]=best
   [theme]=hiway
   [interval]=1.0
   [net_unit]=bits
   [graph]=braille
+  # Colour graph rows by height, so a plot reads as a gradient rather than a
+  # single flat colour. Costs h colour lookups per graph, all cached.
+  [graph_gradient]=on
+  # Time axis and min/avg/peak annotation under the network graph.
+  [graph_axis]=on
+  [graph_stats]=on
+  [net_history_detail]=on
+  # Show the connection identity (SSID / connection name / local address).
+  [net_identity]=on
   [wan_iface]=auto
   [hide_iface]='lo,docker0,veth,br-,virbr,tap,dummy'
   # Order is priority: on a short terminal the panels at the end are the ones
@@ -63,6 +79,73 @@ declare -A CFG=(
   [highway_update_check]=on
   [highway_version_probe]=off
   [highway_units]='highway*,hw-*,nebula*,mosaic*'
+
+  # --- notification delivery -------------------------------------------------
+  # Empty until `sudo hyn setup` configures it; nothing is sent by default.
+  [notify_channels]=''
+  [notify_to]=''
+  [notify_from]='onboarding@resend.dev'
+  [notify_from_name]='hyn-view'
+  [notify_max_per_day]=50
+  [notify_timeout]=15
+  [smtp_host]=''
+  [smtp_port]=587
+  [telegram_chat_id]=''
+  [ntfy_topic]=''
+  [ntfy_server]='https://ntfy.sh'
+  [webhook_url]=''
+  [heartbeat_url]=''
+
+  # --- alerting --------------------------------------------------------------
+  [alert_enabled]=on
+  [alert_min_severity]=warn
+  [alert_interval_min]=5
+  [alert_repeat_hours]=6
+  [alert_notify_resolved]=on
+  # Set any threshold to 0 to disable that rule entirely.
+  [alert_mem_pct]=90
+  [alert_mem_crit_pct]=96
+  [alert_swap_pct]=60
+  [alert_disk_pct]=85
+  [alert_disk_crit_pct]=93
+  # Load as a percentage of one core: 400 means load 4.0 per core.
+  [alert_load_per_core]=400
+  [alert_steal_pct]=15
+  [alert_iowait_pct]=35
+  [alert_temp_c]=85
+  [alert_net_err_rate]=10
+  # Retransmits in per-mille of segments sent: 50 is 5%.
+  [alert_retrans_pm]=50
+  [alert_listen_drops]=1
+  [alert_conntrack_pct]=85
+  [alert_latency_ms]=250
+  [alert_loss_pct]=15
+  # Warn when a speed test comes back below this percentage of the best ever.
+  [alert_speed_min_pct]=50
+  [alert_fd_pct]=80
+  [alert_hw_restarts]=3
+  [alert_hw_journal_err]=5
+
+  # --- daily report ----------------------------------------------------------
+  [report_enabled]=on
+  [report_at]='08:00'
+  [report_hours]=24
+  [report_busy_cpu_pct]=80
+  [report_busy_mem_pct]=85
+  [record_interval_min]=5
+  [metrics_keep_days]=8
+
+  # --- self update -----------------------------------------------------------
+  # off     never look
+  # check   (default) look on launch, tell you, change nothing
+  # install look on launch and install a newer version automatically
+  #
+  # 'check' is the default deliberately. 'install' means this tool runs
+  # `npm i -g` as root, unattended, on a production node: a bad release or a
+  # compromised registry account would land straight on the box, and a monitor
+  # that breaks itself at 3am is worse than one that is a version behind.
+  [auto_update]=check
+  [update_check_hours]=12
   [color_depth]=auto
   [ascii]=off
 )
@@ -105,15 +188,79 @@ cfg_load() {
   for k in "${!tmp[@]}"; do
     if _cfg_allowed "$k"; then
       CFG[$k]=${tmp[$k]}
+      # Remembered so profile_apply knows not to overwrite a deliberate choice.
+      CFG_EXPLICIT[$k]=1
     else
       CFG_WARNINGS+=("unknown config key: $k")
     fi
   done
+  profile_apply
 }
 declare -a CFG_WARNINGS=()
+declare -A CFG_EXPLICIT=()
 
 cfg() { printf '%s' "${CFG[$1]}"; }
 cfg_on() { [[ ${CFG[$1]} == on || ${CFG[$1]} == true || ${CFG[$1]} == yes || ${CFG[$1]} == 1 ]]; }
+
+# ---------------------------------------------------------------------------
+# semver comparison
+# ---------------------------------------------------------------------------
+# ver_gt <a> <b> -- true when a is strictly newer than b. Numeric per component,
+# so 0.1.9 correctly sorts BEFORE 0.1.75, which string comparison gets wrong and
+# which is exactly the range real projects live in.
+ver_gt() {
+  local a=${1#v} b=${2#v} i x y
+  [[ -n $a && -n $b ]] || return 1
+  local -a pa=() pb=()
+  local oIFS=$IFS
+  IFS='.'
+  # shellcheck disable=SC2206
+  pa=($a); pb=($b)
+  IFS=$oIFS
+  for i in 0 1 2; do
+    x=${pa[i]:-0} y=${pb[i]:-0}
+    x=${x%%-*} y=${y%%-*}
+    [[ $x =~ ^[0-9]+$ ]] || x=0
+    [[ $y =~ ^[0-9]+$ ]] || y=0
+    ((x > y)) && return 0
+    ((x < y)) && return 1
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# visual profiles
+# ---------------------------------------------------------------------------
+# `profile` is a preset over several keys, so an operator picks an intent rather
+# than tuning six settings. It only fills in keys the config file did NOT set
+# explicitly -- otherwise choosing a profile would silently discard a deliberate
+# `graph=` line, which is the kind of surprise that makes presets useless.
+profile_apply() {
+  local p=${CFG[profile]}
+  _pdef() { [[ -v CFG_EXPLICIT[$1] ]] || CFG[$1]=$2; }
+  case $p in
+    best | quality | rich)
+      _pdef graph braille
+      _pdef graph_gradient on
+      _pdef graph_axis on
+      _pdef graph_stats on
+      _pdef interval 1.0
+      _pdef proc_rows 10
+      _pdef net_history_detail on
+      ;;
+    performance | perf | lite | fast)
+      _pdef graph block
+      _pdef graph_gradient off
+      _pdef graph_axis off
+      _pdef graph_stats off
+      _pdef interval 2.0
+      _pdef proc_rows 6
+      _pdef net_history_detail off
+      ;;
+  esac
+  unset -f _pdef
+  return 0
+}
 
 # ---------------------------------------------------------------------------
 # capability probes (cached; `command -v` is a builtin so this stays fork-free)
@@ -436,6 +583,74 @@ state_dir() { state_dir_v; printf '%s' "$STATE_DIR"; }
 
 die() { printf 'hyn: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'hyn: %s\n' "$*" >&2; }
+
+# ---------------------------------------------------------------------------
+# config writing
+# ---------------------------------------------------------------------------
+# Lives here rather than in bin/hyn because the setup wizard writes config too.
+config_file_rw() {
+  # Root edits the system config so the change applies to the timers and to
+  # every operator on the box; an unprivileged user gets their own.
+  if is_root; then
+    printf '%s' "$HYN_ETC/config"
+  else
+    printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/hyn-view/config"
+  fi
+}
+
+# Rewrites one key in place, preserving comments and everything else in the file.
+config_set() {
+  local k=$1 v=$2 f
+  _cfg_allowed "$k" || { warn "unknown config key: $k"; return 1; }
+  f=$(config_file_rw)
+  mkdir -p "${f%/*}" 2>/dev/null || { warn "cannot create ${f%/*}"; return 1; }
+  local -a out=()
+  local line found=0
+  if [[ -r $f ]]; then
+    while IFS= read -r line || [[ -n $line ]]; do
+      if [[ $line == "$k="* || $line == "$k "*=* ]]; then
+        out+=("$k=$v")
+        found=1
+      else
+        out+=("$line")
+      fi
+    done <"$f"
+  fi
+  ((found == 0)) && out+=("$k=$v")
+  printf '%s\n' "${out[@]}" >"$f.tmp" && mv -f "$f.tmp" "$f" || { warn "cannot write $f"; return 1; }
+  CFG[$k]=$v
+  return 0
+}
+
+# Secrets go to their own root-only file. Keeping them out of the 0644 config is
+# the whole point, so this never touches config_set.
+secret_set() {
+  local k=$1 v=$2 f
+  f="$HYN_ETC/secrets"
+  mkdir -p "$HYN_ETC" 2>/dev/null || { warn "cannot create $HYN_ETC"; return 1; }
+  local -a out=()
+  local line found=0
+  if [[ -r $f ]]; then
+    while IFS= read -r line || [[ -n $line ]]; do
+      if [[ $line == "$k="* ]]; then
+        out+=("$k=$v"); found=1
+      else
+        out+=("$line")
+      fi
+    done <"$f"
+  else
+    out+=('# hyn-view secrets. Mode 0600, root only. Do not commit this file.')
+  fi
+  ((found == 0)) && out+=("$k=$v")
+  # Create with restrictive permissions BEFORE writing, so the key is never
+  # briefly world-readable.
+  local tmp="$f.tmp"
+  : >"$tmp" && chmod 600 "$tmp" || { warn "cannot create $tmp"; return 1; }
+  printf '%s\n' "${out[@]}" >"$tmp" && mv -f "$tmp" "$f" || { warn "cannot write $f"; return 1; }
+  chmod 600 "$f" 2>/dev/null
+  SEC[$k]=$v
+  return 0
+}
 
 # clamp <v> <lo> <hi>
 clamp() { local v=$1; (($1 < $2)) && v=$2; (($1 > $3)) && v=$3; printf '%d' "$v"; }

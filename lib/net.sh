@@ -531,3 +531,154 @@ net_addr() {
   return 0
 }
 net_addr_flush() { _ADDR_CACHE=(); }
+
+
+# ---------------------------------------------------------------------------
+# connection identity
+# ---------------------------------------------------------------------------
+# What network is this box actually on: SSID if wireless, NetworkManager
+# connection name if there is one, local address and CIDR, gateway, DNS.
+#
+# All of it changes rarely, and some of it needs a subprocess, so this runs on a
+# 30s cadence and caches. Nothing here is on the per-tick path.
+declare -A IF_IP=() IF_TYPE=() IF_SSID=() IF_MAC=() IF_SPEED=() IF_STATE=()
+NET_SSID='' NET_CONN='' NET_LOCAL_IP='' NET_GW='' NET_DNS='' NET_DOMAIN=''
+NET_IDENT_LAST=0
+
+# Wireless interfaces have a `wireless` directory (or a phy80211 link) under
+# /sys/class/net/<if>. That test is reliable and needs no tooling, unlike
+# guessing from a name like wlan0/wlp3s0/ath0.
+net_iface_type() {
+  # Two statements: bash expands every word of a `local` before any of its
+  # assignments take effect, so referencing $ifn in the same `local` reads it as
+  # unset and aborts the function under set -u.
+  local ifn=$1
+  local base="$HYN_SYS/class/net/$ifn"
+  if [[ -d $base/wireless || -L $base/phy80211 ]]; then printf wifi; return 0; fi
+  [[ -r $base/tun_flags ]] && { printf tunnel; return 0; }
+  [[ -d $base/bridge ]] && { printf bridge; return 0; }
+  [[ -d $base/bonding ]] && { printf bond; return 0; }
+  [[ $ifn == lo ]] && { printf loopback; return 0; }
+  # A `device` symlink means a real bus device behind the interface. `speed` is
+  # a second signal: some drivers expose it where the device link is not what
+  # you would expect, and no virtual interface (veth, dummy, bridge) has it.
+  [[ -L $base/device || -r $base/speed ]] && { printf ethernet; return 0; }
+  printf virtual
+}
+
+# SSID. iwgetid is the cheapest; iw and nmcli are the fallbacks, because Ubuntu
+# Server images vary in which of the three is present.
+_net_ssid() {
+  local ifn=$1 s=''
+  if have iwgetid; then
+    s=$(iwgetid -r "$ifn" 2>/dev/null) && [[ -n $s ]] && { printf '%s' "$s"; return 0; }
+  fi
+  if have iw; then
+    local line
+    while IFS= read -r line; do
+      case $line in
+        *SSID:*) s=${line#*SSID: }; break ;;
+      esac
+    done < <(iw dev "$ifn" link 2>/dev/null)
+    [[ -n $s ]] && { printf '%s' "$s"; return 0; }
+  fi
+  if have nmcli; then
+    local act ssid dev
+    while IFS=: read -r act ssid dev; do
+      [[ $act == yes && $dev == "$ifn" ]] && { printf '%s' "$ssid"; return 0; }
+    done < <(nmcli -t -f active,ssid,device dev wifi 2>/dev/null)
+  fi
+  return 1
+}
+
+# NetworkManager / netplan connection name, when there is one. Purely
+# informational, but it is what an operator recognises: "office-lan", not "enp3s0".
+_net_conn_name() {
+  have nmcli || return 1
+  local name dev
+  while IFS=: read -r name dev; do
+    [[ $dev == "$1" ]] && [[ -n $name ]] && { printf '%s' "$name"; return 0; }
+  done < <(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null)
+  return 1
+}
+
+# Resolvers. systemd-resolved puts a stub in resolv.conf, so ask resolvectl
+# first for the real upstreams and fall back to the file.
+_net_dns() {
+  local out='' line ip
+  if have resolvectl; then
+    while IFS= read -r line; do
+      case $line in
+        *'DNS Servers:'*)
+          line=${line#*: }
+          out=${line//[[:space:]]/,}
+          break ;;
+      esac
+    done < <(resolvectl status 2>/dev/null)
+    [[ -n $out ]] && { printf '%s' "${out%,}"; return 0; }
+  fi
+  while read -r line ip _; do
+    [[ $line == nameserver ]] || continue
+    out+="${out:+,}$ip"
+  done <"/etc/resolv.conf" 2>/dev/null
+  printf '%s' "$out"
+  return 0
+}
+
+# ip -o addr in one call for every interface, rather than one call per interface.
+_net_addrs_all() {
+  have ip || return 1
+  local idx dev rest cidr
+  while read -r idx dev _ cidr rest; do
+    [[ -n $dev ]] || continue
+    dev=${dev%:}
+    [[ -n ${IF_IP[$dev]:-} ]] && continue
+    IF_IP[$dev]=$cidr
+  done < <(ip -4 -o addr show 2>/dev/null | awk '{print $1, $2, $3, $4, $5}')
+  return 0
+}
+
+net_identity() {
+  local force=${1:-0} now=${EPOCHSECONDS:-0}
+  cfg_on net_identity || return 0
+  ((force == 0 && NET_IDENT_LAST > 0 && now - NET_IDENT_LAST < 30)) && return 0
+  NET_IDENT_LAST=$now
+
+  IF_IP=() IF_TYPE=() IF_SSID=() IF_MAC=() IF_SPEED=() IF_STATE=()
+  _net_addrs_all
+  local ifn
+  for ifn in "${NET_IFACES[@]}"; do
+    IF_TYPE[$ifn]=$(net_iface_type "$ifn")
+    net_link "$ifn"
+    IF_MAC[$ifn]=$LINK_MAC
+    IF_SPEED[$ifn]=$LINK_SPEED
+    IF_STATE[$ifn]=$LINK_STATE
+    if [[ ${IF_TYPE[$ifn]} == wifi ]]; then
+      IF_SSID[$ifn]=$(_net_ssid "$ifn" || printf '')
+    fi
+  done
+
+  local wan=${NET_WAN:-}
+  NET_LOCAL_IP=${IF_IP[$wan]:-}
+  NET_SSID=${IF_SSID[$wan]:-}
+  NET_CONN=$(_net_conn_name "$wan" || printf '')
+  NET_GW=$(net_gateway_ip || printf '')
+  NET_DNS=$(_net_dns)
+  return 0
+}
+
+# A one-line description of what we are connected to, for the panel title.
+NET_IDENT_LABEL=''
+net_ident_label() {
+  local wan=${NET_WAN:-}
+  NET_IDENT_LABEL=''
+  [[ -n $wan ]] || return 1
+  if [[ -n $NET_SSID ]]; then
+    NET_IDENT_LABEL="wifi:$NET_SSID"
+  elif [[ -n $NET_CONN && $NET_CONN != "$wan" ]]; then
+    NET_IDENT_LABEL="$NET_CONN"
+  else
+    NET_IDENT_LABEL="${IF_TYPE[$wan]:-link}"
+  fi
+  return 0
+}

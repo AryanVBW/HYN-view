@@ -41,6 +41,13 @@ falsy() {
 }
 section() { printf '\n%s\n' "$1"; }
 
+# True when a rule id is in the currently-firing set.
+frame_has_alert() {
+  local want=$1 i
+  for i in "${!AL_ID[@]}"; do [[ ${AL_ID[i]} == "$want" ]] && return 0; done
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # fixture tree
 # ---------------------------------------------------------------------------
@@ -193,7 +200,7 @@ HYN_ROOT="$ROOT"
 export HYN_LIB HYN_ROOT
 export TERM=xterm-256color COLORTERM=truecolor
 
-for m in core ui net collect highway speedtest panels; do
+for m in core ui net collect highway speedtest notify alerts report update panels; do
   # shellcheck source=/dev/null
   source "$HYN_LIB/$m.sh" || { printf 'cannot source %s\n' "$m" >&2; exit 1; }
 done
@@ -684,8 +691,27 @@ h_off=${#P_NET[@]}
 CFG[graph]=braille
 truthy 'braille is the tallest graph' '((h_braille > h_block))'
 truthy 'block is taller than none'    '((h_block > h_off))'
-eq 'block mode uses 3 graph rows' "$((h_off + 3))" "$h_block"
-eq 'braille uses 2*h+1 graph rows'  "$((h_off + 13))" "$h_braille"
+# block: rx line + scale axis + tx line + time axis = 4
+eq 'block mode adds 4 graph rows' "$((h_off + 4))" "$h_block"
+
+# The tx plot's HEIGHT scales with its share of the shared maximum: the scale
+# stays shared (so a dot height means the same rate in both plots and they remain
+# comparable) but rows that could only ever be blank are given back to the
+# layout. Assert the property, not a magic total.
+CFG[graph]=braille
+HRX_eth0=(); HTX_eth0=()
+for i in $(seq 1 300); do HRX_eth0+=(1000); HTX_eth0+=(250); done
+panel_net P_NET 140 6
+h_quarter=${#P_NET[@]}
+HTX_eth0=()
+for i in $(seq 1 300); do HTX_eth0+=(1000); done
+panel_net P_NET 140 6
+h_equal=${#P_NET[@]}
+# equal traffic: 6 rx + axis + 6 tx + time axis = 14
+eq 'symmetric traffic uses 2h+2 rows' "$((h_off + 14))" "$h_equal"
+# a quarter of the scale needs ceil(6/4)=2 tx rows: 6 + axis + 2 + time axis = 10
+eq 'light upload uses fewer tx rows' "$((h_off + 10))" "$h_quarter"
+truthy 'asymmetric graph is shorter' '((h_quarter < h_equal))'
 
 CFG[graph]=off
 FB_PREV=(); render_dash
@@ -712,6 +738,419 @@ eq 'unchanged frame writes nothing' '' "$out"
 FB[3]='changed'
 out=$(fb_flush)
 truthy 'changed frame writes something' '[[ -n $out ]]'
+
+# ---------------------------------------------------------------------------
+section 'version comparison and profiles'
+# ---------------------------------------------------------------------------
+truthy 'newer patch is newer'       'ver_gt 1.0.1 1.0.0'
+truthy 'newer minor is newer'       'ver_gt 1.1.0 1.0.9'
+truthy 'newer major is newer'       'ver_gt 2.0.0 1.9.9'
+falsy  'equal is not newer'         'ver_gt 1.0.0 1.0.0'
+falsy  'older is not newer'         'ver_gt 1.0.0 1.0.1'
+truthy 'v prefix tolerated'         'ver_gt v1.0.1 v1.0.0'
+# The comparison that string sorting gets wrong, and the range real projects
+# actually live in.
+truthy '0.1.75 is newer than 0.1.9' 'ver_gt 0.1.75 0.1.9'
+falsy  '0.1.9 is not newer than 0.1.75' 'ver_gt 0.1.9 0.1.75'
+falsy  'garbage is not newer'       'ver_gt "" 1.0.0'
+
+# A profile fills in defaults but must never overwrite a deliberate setting.
+CFG[profile]=performance; CFG_EXPLICIT=(); profile_apply
+eq 'performance sets block graph' 'block' "${CFG[graph]}"
+eq 'performance slows refresh'    '2.0'   "${CFG[interval]}"
+eq 'performance drops gradient'   'off'   "${CFG[graph_gradient]}"
+CFG[profile]=best; CFG_EXPLICIT=(); profile_apply
+eq 'best sets braille graph'      'braille' "${CFG[graph]}"
+eq 'best enables gradient'        'on'      "${CFG[graph_gradient]}"
+eq 'best uses 1s refresh'         '1.0'     "${CFG[interval]}"
+# Explicit beats preset.
+CFG[profile]=best; CFG[graph]=block; CFG_EXPLICIT=([graph]=1); profile_apply
+eq 'explicit graph survives the profile' 'block' "${CFG[graph]}"
+CFG_EXPLICIT=(); CFG[profile]=best; profile_apply
+
+# ---------------------------------------------------------------------------
+section 'graph presentation'
+# ---------------------------------------------------------------------------
+declare -a GG=(1 2 3 4 5 6 7 8)
+# Gradient mode must colour rows differently; flat mode must not.
+braille_plot GG 4 4 8 "${C[rx]}" 0 1
+g_top=${BR_OUT[0]%%$'\u2800'*}; g_bot=${BR_OUT[3]%%$'\u2800'*}
+falsy 'gradient colours rows differently' '[[ ${BR_OUT[0]:0:12} == ${BR_OUT[3]:0:12} ]]'
+braille_plot GG 4 4 8 "${C[rx]}" 0 0
+truthy 'flat mode uses one colour' '[[ ${BR_OUT[0]:0:12} == ${BR_OUT[3]:0:12} ]]'
+braille_plot GG 4 4 8 '' 0 1
+eq 'gradient keeps the row count' '4' "${#BR_OUT[@]}"
+for i in "${!BR_OUT[@]}"; do vlen "${BR_OUT[i]}"; ((VLEN == 4)) || bad "gradient row $i width is $VLEN not 4"; done
+ok
+
+time_axis_v 60 1 2
+vlen "$TIME_AXIS"; eq 'time axis fills its width' '60' "$VLEN"
+contains 'time axis marks now' 'now' "$TIME_AXIS"
+contains 'time axis marks the span' '-2m' "$TIME_AXIS"
+time_axis_v 12 1 2
+vlen "$TIME_AXIS"; eq 'narrow axis degrades to a rule' '12' "$VLEN"
+
+declare -a ST2=(10 20 30 40)
+arr_stats_v ST2 4
+eq 'stats min' '10' "$ARR_MIN"
+eq 'stats avg' '25' "$ARR_AVG"
+eq 'stats max' '40' "$ARR_MAX"
+arr_stats_v ST2 2
+eq 'stats honour the window' '35' "$ARR_AVG"
+
+# ---------------------------------------------------------------------------
+section 'connection identity'
+# ---------------------------------------------------------------------------
+eq 'ethernet detected'  'ethernet' "$(net_iface_type eth0)"
+mkdir -p "$FS/class/net/wlan0/wireless"
+printf 'up\n' >"$FS/class/net/wlan0/operstate"
+eq 'wireless detected'  'wifi'     "$(net_iface_type wlan0)"
+mkdir -p "$FS/class/net/tun0"; printf '0x0001\n' >"$FS/class/net/tun0/tun_flags"
+eq 'tunnel detected'    'tunnel'   "$(net_iface_type tun0)"
+mkdir -p "$FS/class/net/br0/bridge"
+eq 'bridge detected'    'bridge'   "$(net_iface_type br0)"
+eq 'loopback detected'  'loopback' "$(net_iface_type lo)"
+# Gateway decode is already covered; identity must survive absent tooling.
+NET_IDENT_LAST=0
+net_identity 1
+truthy 'identity run does not fail without iw/nmcli' 'true'
+NET_WAN=eth0
+net_ident_label
+truthy 'identity label is populated' '[[ -n $NET_IDENT_LABEL ]]'
+IF_SSID=([eth0]='MyNetwork-5G')
+NET_SSID='MyNetwork-5G'
+net_ident_label
+contains 'ssid used as the label' 'MyNetwork-5G' "$NET_IDENT_LABEL"
+NET_SSID=''
+
+# ---------------------------------------------------------------------------
+section 'attribution'
+# ---------------------------------------------------------------------------
+eq 'author constant' 'Vivek W (AryanVBW)' "$HYN_AUTHOR"
+contains 'copyright names the author' 'Vivek W (AryanVBW)' "$HYN_COPYRIGHT"
+TERM_COLS=140 TERM_ROWS=45
+footer_line 140
+contains 'footer carries the credit' 'Vivek W (AryanVBW)' "$FTR_OUT"
+vlen "$FTR_OUT"; truthy 'footer fits the width' '((VLEN <= 140))'
+# Even at 80 columns the credit survives; the key hints are what get dropped.
+footer_line 80
+contains 'credit survives at 80 cols' 'AryanVBW' "$FTR_OUT"
+vlen "$FTR_OUT"; truthy 'narrow footer still fits' '((VLEN <= 80))'
+UPD_AVAILABLE=1 UPD_LATEST=9.9.9
+footer_line 140
+contains 'update badge shown in footer' '9.9.9' "$FTR_OUT"
+UPD_AVAILABLE=0 UPD_LATEST=''
+
+# ---------------------------------------------------------------------------
+section 'self update'
+# ---------------------------------------------------------------------------
+uf="$TMP/var/update-check"
+printf '%s\n9.9.9\n' "${EPOCHSECONDS:-0}" >"$uf"
+truthy 'update cache reads'        'update_read'
+eq 'latest from cache' '9.9.9' "$UPD_LATEST"
+eq 'update flagged available' '1' "$UPD_AVAILABLE"
+printf '%s\n0.0.1\n' "${EPOCHSECONDS:-0}" >"$uf"
+update_read
+eq 'older release not flagged' '0' "$UPD_AVAILABLE"
+printf '%s\n%s\n' "${EPOCHSECONDS:-0}" "$HYN_VERSION" >"$uf"
+update_read
+eq 'same version not flagged' '0' "$UPD_AVAILABLE"
+rm -f "$uf"
+falsy 'missing cache reports nothing' 'update_read'
+# auto_update=off must not even try.
+CFG[auto_update]=off
+update_check_async
+falsy 'off means no cache is written' '[[ -f $uf ]]'
+CFG[auto_update]=check
+update_detect_method
+truthy 'install method is classified' '[[ -n $UPD_METHOD ]]'
+
+# ---------------------------------------------------------------------------
+section 'notification safety'
+# ---------------------------------------------------------------------------
+json_escape_v 'plain'; eq 'json plain' 'plain' "$JSON_OUT"
+json_escape_v 'say "hi"'; eq 'json quotes' 'say \"hi\"' "$JSON_OUT"
+json_escape_v 'back\slash'; eq 'json backslash' 'back\\slash' "$JSON_OUT"
+json_escape_v $'two\nlines'; eq 'json newline' 'two\nlines' "$JSON_OUT"
+json_escape_v $'tab\there'; eq 'json tab' 'tab\there' "$JSON_OUT"
+# A journal line is attacker-influenced text that ends up inside a JSON string.
+json_escape_v $'evil","x":"pwned'; contains 'json injection neutralised' '\"' "$JSON_OUT"
+falsy 'no raw quote survives escaping' '[[ $JSON_OUT == *[^\\]\"* ]]'
+json_escape_v $'ctrl\x01char'; eq 'json strips control chars' 'ctrlchar' "$JSON_OUT"
+
+truthy 'accepts a normal address'   'valid_email ops@example.com'
+truthy 'accepts plus addressing'    'valid_email ops+hyn@example.co.uk'
+falsy  'rejects missing domain'     'valid_email ops@'
+falsy  'rejects missing tld'        'valid_email ops@example'
+falsy  'rejects no at sign'         'valid_email example.com'
+falsy  'rejects empty'              'valid_email ""'
+# Header injection: a newline in an address would let a crafted value add its
+# own SMTP headers.
+falsy  'rejects embedded newline'   'valid_email "$(printf "a@b.com\nBcc: x@y.com")"'
+falsy  'rejects embedded CR'        'valid_email "$(printf "a@b.com\rX: y")"'
+
+valid_email_list 'a@b.com, c@d.com'
+eq 'parses a recipient list' '2' "${#VALID_TO[@]}"
+valid_email_list 'a@b.com,broken,c@d.com' 2>/dev/null
+eq 'drops invalid recipients' '2' "${#VALID_TO[@]}"
+falsy 'rejects an all-invalid list' 'valid_email_list "nope,alsonope" 2>/dev/null'
+
+truthy 'accepts an api-key charset'  'valid_token re_AbC123-_.=+/'
+falsy  'rejects a key with a space'  'valid_token "abc def"'
+falsy  'rejects a key with a quote'  'valid_token '"'"'ab"cd'"'"''
+falsy  'rejects a key with newline'  'valid_token "$(printf "a\nb")"'
+
+# redact must scrub any configured secret out of text bound for a log.
+SEC=([resend_api_key]='re_supersecretvalue123') SECRETS_LOADED=1
+out=$(redact 'curl failed using re_supersecretvalue123 oops')
+falsy 'redact removes the secret' '[[ $out == *supersecret* ]]'
+contains 'redact leaves a marker' '<redacted>' "$out"
+SEC=() SECRETS_LOADED=1
+
+# ---------------------------------------------------------------------------
+section 'alert engine'
+# ---------------------------------------------------------------------------
+# Hysteresis: a value parked between the fire and clear thresholds must hold its
+# previous state. Without this, a disk sitting at exactly 85% mails every cycle.
+_reset_alerts() {
+  AL_ID=() AL_SEV=() AL_MSG=() AL_NEW=() AL_VAL=() AL_RESOLVED=()
+  AL_CRIT=0 AL_WARN=0 AL_INFO=0 AL_FIRING=0
+  _AL_SEEN=()
+}
+
+_reset_alerts; _AL_PREV_STATE=()
+_check_num t_mem warn 91 90 82 'mem'
+eq 'fires above the threshold' '1' "$AL_FIRING"
+eq 'marked as new'             '1' "${AL_NEW[0]}"
+
+_reset_alerts; _AL_PREV_STATE=([t_mem]=firing)
+_check_num t_mem warn 85 90 82 'mem'
+eq 'stays firing between thresholds' '1' "$AL_FIRING"
+eq 'not new on the second run'       '0' "${AL_NEW[0]}"
+
+_reset_alerts; _AL_PREV_STATE=([t_mem]=firing); _AL_PREV_NOTIFIED=([t_mem]=1000)
+_check_num t_mem warn 81 90 82 'mem'
+eq 'clears below the clear threshold' '0' "$AL_FIRING"
+eq 'reports one recovery'             '1' "${#AL_RESOLVED[@]}"
+
+# A rule that never notified should not announce a recovery nobody heard about.
+_reset_alerts; _AL_PREV_STATE=([t_mem]=firing); _AL_PREV_NOTIFIED=([t_mem]=0)
+_check_num t_mem warn 10 90 82 'mem'
+eq 'silent recovery when never notified' '0' "${#AL_RESOLVED[@]}"
+
+_reset_alerts; _AL_PREV_STATE=()
+_check_num t_off warn 99 0 0 'disabled rule'
+eq 'threshold 0 disables the rule' '0' "$AL_FIRING"
+falsy 'disabled rule is not even evaluated' '[[ -v _AL_SEEN[t_off] ]]'
+
+_reset_alerts; _AL_PREV_STATE=()
+_check_num t_junk warn 'not-a-number' 90 80 'x'
+eq 'non-numeric value is ignored' '0' "$AL_FIRING"
+
+_reset_alerts; _AL_PREV_STATE=()
+_check_bool t_down crit 1 'iface down'
+eq 'boolean rule fires' '1' "$AL_CRIT"
+_reset_alerts; _AL_PREV_STATE=()
+_check_bool t_down crit 0 'iface down'
+eq 'boolean rule quiet when false' '0' "$AL_FIRING"
+
+eq 'severity ranks crit highest' '3' "$(_sev_rank crit)"
+truthy 'warn outranks info' '(( $(_sev_rank warn) > $(_sev_rank info) ))'
+
+# Full rule sweep against the fixture. Memory is 50% and disk 38/71, so the
+# resource rules must stay quiet; then push memory up and watch it fire.
+mem_sample; sys_sample
+MOUNTS=(/ /var); MP_PCT=([/]=38 [/var]=71)
+MP_AVAIL=([/]=100000000 [/var]=50000000); MP_SIZE=([/]=200000000 [/var]=160000000)
+MP_USED=([/]=76000000 [/var]=110000000)
+CPU_STEAL=0 CPU_IOWAIT=0 CPU_PCT=10 LOAD1=0.42 CPU_COUNT=2
+NET_RETRANS_PM=0 CT_PCT=6 FAILED_UNITS=() REBOOT_REQ=0 HW_PRESENT=0
+LAT_MS=([1.1.1.1]=8200) LAT_LOSS=([1.1.1.1]=0)
+ST_LAST_DOWN=0
+CFG[highway_track]=off
+_AL_PREV_STATE=()
+alerts_evaluate
+eq 'healthy fixture fires nothing' '0' "$AL_FIRING"
+
+MEM_PCT=97
+_AL_PREV_STATE=()
+alerts_evaluate
+truthy 'high memory fires'      '(( AL_FIRING >= 1 ))'
+truthy 'and it is critical'     '(( AL_CRIT >= 1 ))'
+MEM_PCT=50
+
+MP_PCT=([/]=38 [/var]=97)
+_AL_PREV_STATE=()
+alerts_evaluate
+truthy 'full disk fires critical' '(( AL_CRIT >= 1 ))'
+al_disk=0
+for i in "${!AL_ID[@]}"; do [[ ${AL_ID[i]} == diskcrit_* ]] && al_disk=1; done
+eq 'disk rule is per-mount' '1' "$al_disk"
+MP_PCT=([/]=38 [/var]=71)
+
+# Latency and loss come from the probe cache, and loss is critical because a
+# relay node that cannot be reached is not earning.
+LAT_MS=([1.1.1.1]=900000) LAT_LOSS=([1.1.1.1]=40)
+_AL_PREV_STATE=()
+alerts_evaluate
+truthy 'high latency fires' 'frame_has_alert latency_high'
+truthy 'packet loss fires'  'frame_has_alert packet_loss'
+LAT_MS=([1.1.1.1]=8200) LAT_LOSS=([1.1.1.1]=0)
+
+# Highway rules
+CFG[highway_track]=on
+HW_PRESENT=1 HW_FAILED=1 HW_UNIT_COUNT=1 HW_ACTIVE=0 HW_JOURNAL_ERR=0
+HW_UNITS=(highway.service) HW_RESTARTS=([highway.service]=0) HW_NEBULA=nebula1
+HW_UPDATE=0 HW_PID=1000
+_AL_PREV_STATE=()
+alerts_evaluate
+truthy 'failed highway unit fires'  'frame_has_alert hw_failed'
+truthy 'inactive highway unit fires' 'frame_has_alert hw_inactive'
+HW_FAILED=0 HW_ACTIVE=1 HW_RESTARTS=([highway.service]=9)
+_AL_PREV_STATE=()
+alerts_evaluate
+truthy 'crash-looping unit fires' 'frame_has_alert hw_restarts'
+HW_RESTARTS=([highway.service]=0)
+HW_NEBULA=''
+_AL_PREV_STATE=()
+alerts_evaluate
+truthy 'missing mesh tunnel fires' 'frame_has_alert hw_tunnel_down'
+HW_NEBULA=nebula1
+CFG[highway_track]=off
+
+# Notification gating: below min severity nothing goes out.
+CFG[notify_channels]=stdout
+CFG[alert_min_severity]=crit
+_reset_alerts; _AL_PREV_STATE=(); _AL_PREV_NOTIFIED=()
+_check_bool t_warn warn 1 'a warning'
+alerts_notify 0 >"$TMP/notif.txt" 2>&1; out=$(cat "$TMP/notif.txt")
+eq 'warn suppressed when min is crit' '0' "$AL_NOTIFY"
+CFG[alert_min_severity]=warn
+_reset_alerts; _AL_PREV_STATE=(); _AL_PREV_NOTIFIED=()
+_check_bool t_warn warn 1 'a warning'
+alerts_notify 0 >"$TMP/notif.txt" 2>&1; out=$(cat "$TMP/notif.txt")
+eq 'warn delivered when min is warn' '1' "$AL_NOTIFY"
+contains 'digest names the host' 'test-node' "$out"
+
+# Cooldown: still firing, already notified a minute ago, must stay quiet.
+_reset_alerts
+_AL_PREV_STATE=([t_warn]=firing)
+_AL_PREV_NOTIFIED=([t_warn]=$((${EPOCHSECONDS:-0} - 60)))
+CFG[alert_repeat_hours]=6
+_check_bool t_warn warn 1 'a warning'
+alerts_notify 0 >"$TMP/notif.txt" 2>&1; out=$(cat "$TMP/notif.txt")
+eq 'no re-notify inside the cooldown' '0' "$AL_NOTIFY"
+# ...and speaks up again once the repeat window has passed.
+_reset_alerts
+_AL_PREV_STATE=([t_warn]=firing)
+_AL_PREV_NOTIFIED=([t_warn]=$((${EPOCHSECONDS:-0} - 7 * 3600)))
+_check_bool t_warn warn 1 'a warning'
+alerts_notify 0 >"$TMP/notif.txt" 2>&1; out=$(cat "$TMP/notif.txt")
+eq 'renotifies after the cooldown' '1' "$AL_NOTIFY"
+
+# One message, not one per rule.
+_reset_alerts; _AL_PREV_STATE=(); _AL_PREV_NOTIFIED=()
+_check_bool t_a crit 1 'problem one'
+_check_bool t_b warn 1 'problem two'
+_check_bool t_c warn 1 'problem three'
+alerts_notify 0 >"$TMP/notif.txt" 2>&1; out=$(cat "$TMP/notif.txt")
+# A pipe, not a here-string: bash 5.3 routes <<< through a pipe, and on macOS
+# the initial pipe buffer is 512 bytes, so a here-string of a multi-KB digest
+# deadlocks before grep is exec'd.
+eq 'three problems, one digest' '1' "$(printf '%s\n' "$out" | grep -c '^--- \[')"
+contains 'digest subject counts them' '3 issues' "$out"
+contains 'digest leads with severity' 'CRITICAL' "$out"
+contains 'digest lists each problem' 'problem three' "$out"
+
+# The daily send cap is the backstop against a flapping rule burning quota.
+CFG[notify_max_per_day]=2
+rm -f "$TMP/var/notify-budget"
+notify_send info 'one' 'body' >/dev/null 2>&1
+notify_send info 'two' 'body' >/dev/null 2>&1
+falsy 'third send blocked by daily cap' 'notify_send info three body >/dev/null 2>&1'
+CFG[notify_max_per_day]=50
+rm -f "$TMP/var/notify-budget"
+
+# ---------------------------------------------------------------------------
+section 'daily report'
+# ---------------------------------------------------------------------------
+# Hand-built metric rows: cpu 10/20/30, mem 50/60/70, disk 80->82 over 24h,
+# and rx_total climbing by 2000 bytes.
+mf="$TMP/var/metrics.tsv"
+now=${EPOCHSECONDS:-0}
+: >"$mf"
+printf '%s\t10\t1\t2\t50\t0\t420\t80\t100\t50\t1000\t500\t5\t8200\t6\t1\t1000\t10\t100\t0\n' $((now - 86400)) >>"$mf"
+printf '%s\t20\t2\t4\t60\t0\t840\t81\t200\t60\t2000\t700\t7\t9000\t7\t1\t2000\t20\t150\t0\n' $((now - 43200)) >>"$mf"
+printf '%s\t30\t3\t6\t70\t0\t1260\t82\t300\t70\t3000\t900\t9\t9500\t8\t1\t3000\t30\t200\t0\n' "$now" >>"$mf"
+CFG[record_interval_min]=5
+truthy 'aggregation succeeds' 'report_aggregate 24'
+eq 'row count'        '3'    "$R_ROWS"
+eq 'cpu average'      '20'   "${R[cpu_avg]}"
+eq 'cpu peak'         '30'   "${R[cpu_max]}"
+eq 'memory average'   '60'   "${R[mem_avg]}"
+eq 'memory peak'      '70'   "${R[mem_max]}"
+eq 'steal peak'       '3'    "${R[steal_max]}"
+eq 'load average'     '840'  "${R[load_avg]}"
+eq 'disk now'         '82'   "${R[disk_now]}"
+eq 'disk 24h change'  '2'    "${R[disk_delta]}"
+eq 'bytes received'   '2000' "${R[rx_bytes]}"
+eq 'bytes sent'       '400'  "${R[tx_bytes]}"
+eq 'peak rx rate'     '300'  "${R[rx_peak]}"
+eq 'processes peak'   '200'  "${R[procs_max]}"
+# 18 points of headroom growing 2 points/day is 9 days.
+eq 'days until full'  '9'    "${R[disk_days]}"
+
+# A counter that goes backwards means a reboot or NIC reset. The day's transfer
+# must not come out negative.
+printf '%s\t10\t0\t0\t50\t0\t100\t82\t10\t10\t50\t20\t0\t0\t0\t1\t0\t0\t10\t0\n' $((now + 1)) >>"$mf"
+report_aggregate 24
+truthy 'transfer never goes negative' '(( ${R[rx_bytes]} >= 0 ))'
+
+# Rows older than the window are excluded.
+printf '%s\t99\t0\t0\t99\t0\t100\t99\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\n' $((now - 200000)) >>"$mf"
+report_aggregate 24
+falsy 'stale rows excluded from peak' '(( ${R[cpu_max]} == 99 ))'
+
+# Alert log feeds the report's alert section.
+: >"$TMP/var/alert-log"
+printf '%s\tcrit\tdisk_full\tDisk /var critically full\n' $((now - 3600)) >>"$TMP/var/alert-log"
+printf '%s\twarn\tmem_high\tMemory at 91%%\n' $((now - 1800)) >>"$TMP/var/alert-log"
+report_alerts 24
+eq 'alert log rows'  '2' "${#RA_TS[@]}"
+eq 'critical counted' '1' "$RA_CRIT"
+eq 'warning counted'  '1' "$RA_WARN"
+
+# The report itself must render, and must contain the sections that make it
+# worth reading rather than just not crashing.
+rep=$(report_text 24)
+contains 'report names the host'     'test-node'   "$rep"
+contains 'report has a verdict'      'ATTENTION'   "$rep"
+contains 'report has performance'    'PERFORMANCE' "$rep"
+contains 'report has storage'        'STORAGE'     "$rep"
+contains 'report has network'        'NETWORK'     "$rep"
+contains 'report has alerts'         'ALERTS'      "$rep"
+contains 'report shows disk trend'   'projection'  "$rep"
+contains 'report lists a real alert' 'critically full' "$rep"
+truthy  'report is substantial'      '(( $(printf "%s\n" "$rep" | wc -l) > 25 ))'
+
+reph=$(report_html 24)
+contains 'html report has a wrapper' '<div'      "$reph"
+contains 'html report names host'    'test-node' "$reph"
+falsy 'html escapes stray angle brackets' '[[ $(html_escape "<b>") == *"<b>"* ]]'
+eq 'html_escape converts ampersand' 'a&amp;b' "$(html_escape 'a&b')"
+
+# Verdict must reflect severity, not just say something cheerful.
+RA_CRIT=0 RA_WARN=0 RA_TS=()
+R[disk_days]=0 R[hw_up_pct]=100
+contains 'healthy verdict' 'HEALTHY' "$(_verdict)"
+RA_WARN=2
+contains 'warning verdict' 'MOSTLY HEALTHY' "$(_verdict)"
+RA_CRIT=1
+contains 'critical verdict' 'ATTENTION' "$(_verdict)"
+RA_CRIT=0 RA_WARN=0
+R[disk_days]=3
+contains 'disk projection verdict' 'PLAN AHEAD' "$(_verdict)"
+R[disk_days]=0
 
 # ---------------------------------------------------------------------------
 printf '\n'

@@ -14,6 +14,73 @@ SVC_NAME='hyn-speedtest'
 SVC_PATH="/etc/systemd/system/$SVC_NAME.service"
 TMR_PATH="/etc/systemd/system/$SVC_NAME.timer"
 
+# Shared hardening for every timer unit. These are monitoring one-shots: they
+# read /proc, write one state directory, and talk to one API. Everything else
+# root can normally do is taken away.
+_unit_hardening() {
+  cat <<EOF
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=$HYN_VAR
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+EOF
+}
+
+# generic_unit <description> <exec> <extra-service-lines>
+_generic_service() {
+  local desc=$1 exec=$2 extra=${3:-}
+  cat <<EOF
+[Unit]
+Description=$desc
+Documentation=https://github.com/AryanVBW/HYN-view
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$exec
+Nice=15
+IOSchedulingClass=idle
+CPUSchedulingPolicy=batch
+TimeoutStartSec=180
+$(_unit_hardening)
+$extra
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+_generic_timer() {
+  local desc=$1 spec=$2 unit=$3 jitter=${4:-60} extra=${5:-}
+  cat <<EOF
+[Unit]
+Description=$desc
+Documentation=https://github.com/AryanVBW/HYN-view
+
+[Timer]
+$spec
+RandomizedDelaySec=$jitter
+AccuracySec=30s
+Persistent=true
+Unit=$unit
+$extra
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
 setup_config_template() {
   cat <<EOF
 # hyn-view configuration
@@ -21,6 +88,11 @@ setup_config_template() {
 # Reload happens on next start; there is no daemon to restart.
 
 # --- appearance ---------------------------------------------------------------
+# best        gradient braille graphs, time axis, 1s refresh. Looks best.
+# performance block graphs, 2s refresh. Roughly a third less CPU.
+# A profile only fills in keys you have NOT set below, so an explicit
+# graph=/interval= line always wins. Toggle live with the p key.
+profile=${CFG[profile]}
 theme=${CFG[theme]}
 # refresh interval in seconds. 1.0 is comfortable; 2.0 or 3.0 is lighter still
 # on a box where you care about every last cycle.
@@ -29,6 +101,13 @@ interval=${CFG[interval]}
 net_unit=${CFG[net_unit]}
 # braille (highest resolution) | block (cheaper, coarser) | off
 graph=${CFG[graph]}
+# Colour graph rows by height so a plot reads as a vertical ramp.
+graph_gradient=${CFG[graph_gradient]}
+# Time ruler and avg annotation under the network graph.
+graph_axis=${CFG[graph_axis]}
+graph_stats=${CFG[graph_stats]}
+# Show SSID / connection name / local address / gateway / DNS.
+net_identity=${CFG[net_identity]}
 # force a colour depth instead of detecting: auto | 24 | 256 | 16 | none
 color_depth=${CFG[color_depth]}
 # on = draw with ASCII only, for consoles without a UTF-8 locale
@@ -78,81 +157,81 @@ highway_units=${CFG[highway_units]}
 # beside a running instance; version is otherwise read from files, unit
 # metadata and the journal.
 highway_version_probe=${CFG[highway_version_probe]}
-EOF
-}
 
-setup_service_unit() {
-  local exe=$1
-  cat <<EOF
-[Unit]
-Description=hyn-view scheduled throughput measurement
-Documentation=https://github.com/AryanVBW/HYN-view
-After=network-online.target
-Wants=network-online.target
+# --- notifications -----------------------------------------------------------
+# Comma separated, tried in order, all of them are attempted:
+#   resend | brevo | smtp | telegram | ntfy | webhook | stdout
+# API keys and tokens do NOT go here. They live in $HYN_ETC/secrets (mode 0600).
+# Run \`sudo hyn setup\` for the guided version of all of this.
+notify_channels=${CFG[notify_channels]}
+notify_to=${CFG[notify_to]}
+notify_from=${CFG[notify_from]}
+notify_from_name=${CFG[notify_from_name]}
+# Hard backstop against a flapping condition burning a provider's daily quota.
+notify_max_per_day=${CFG[notify_max_per_day]}
+notify_timeout=${CFG[notify_timeout]}
+smtp_host=${CFG[smtp_host]}
+smtp_port=${CFG[smtp_port]}
+telegram_chat_id=${CFG[telegram_chat_id]}
+ntfy_topic=${CFG[ntfy_topic]}
+ntfy_server=${CFG[ntfy_server]}
 
-[Service]
-Type=oneshot
-ExecStart=$exe speedtest --respect-guard --json
-# Deprioritised on every axis. This is monitoring; it yields to the workload
-# the machine actually exists to run.
-Nice=15
-IOSchedulingClass=idle
-CPUSchedulingPolicy=batch
-TimeoutStartSec=180
+# --- alerting ----------------------------------------------------------------
+alert_enabled=${CFG[alert_enabled]}
+# warn (default) | crit | info
+alert_min_severity=${CFG[alert_min_severity]}
+alert_interval_min=${CFG[alert_interval_min]}
+# A condition that is still true is re-notified at most this often.
+alert_repeat_hours=${CFG[alert_repeat_hours]}
+alert_notify_resolved=${CFG[alert_notify_resolved]}
+# Set any threshold to 0 to switch that rule off completely.
+alert_mem_pct=${CFG[alert_mem_pct]}
+alert_mem_crit_pct=${CFG[alert_mem_crit_pct]}
+alert_swap_pct=${CFG[alert_swap_pct]}
+alert_disk_pct=${CFG[alert_disk_pct]}
+alert_disk_crit_pct=${CFG[alert_disk_crit_pct]}
+# Load as a percentage of ONE core, so it means the same on 2 cores and 64.
+alert_load_per_core=${CFG[alert_load_per_core]}
+alert_steal_pct=${CFG[alert_steal_pct]}
+alert_iowait_pct=${CFG[alert_iowait_pct]}
+alert_temp_c=${CFG[alert_temp_c]}
+alert_net_err_rate=${CFG[alert_net_err_rate]}
+# Retransmits in per-mille of segments sent: 50 is 5%.
+alert_retrans_pm=${CFG[alert_retrans_pm]}
+alert_listen_drops=${CFG[alert_listen_drops]}
+alert_conntrack_pct=${CFG[alert_conntrack_pct]}
+alert_latency_ms=${CFG[alert_latency_ms]}
+alert_loss_pct=${CFG[alert_loss_pct]}
+alert_speed_min_pct=${CFG[alert_speed_min_pct]}
+alert_fd_pct=${CFG[alert_fd_pct]}
+alert_hw_restarts=${CFG[alert_hw_restarts]}
+alert_hw_journal_err=${CFG[alert_hw_journal_err]}
 
-# Runs as root so that the scheduled result and a manual \`sudo hyn speedtest\`
-# write the same history file with the same ownership. Everything root does not
-# need is taken away below.
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=$HYN_VAR
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-RestrictSUIDSGID=yes
-RestrictRealtime=yes
-RestrictNamespaces=yes
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-NoNewPrivileges=yes
-CapabilityBoundingSet=
-SystemCallFilter=@system-service
-SystemCallErrorNumber=EPERM
+# --- daily report ------------------------------------------------------------
+report_enabled=${CFG[report_enabled]}
+# Server local time, 24h.
+report_at=${CFG[report_at]}
+report_hours=${CFG[report_hours]}
+report_busy_cpu_pct=${CFG[report_busy_cpu_pct]}
+report_busy_mem_pct=${CFG[report_busy_mem_pct]}
+# How often metrics are sampled for the report, and how long they are kept.
+record_interval_min=${CFG[record_interval_min]}
+metrics_keep_days=${CFG[metrics_keep_days]}
 
-[Install]
-WantedBy=multi-user.target
-EOF
-}
-
-setup_timer_unit() {
-  local cal=$1
-  cat <<EOF
-[Unit]
-Description=hyn-view scheduled throughput measurement
-Documentation=https://github.com/AryanVBW/HYN-view
-
-[Timer]
-OnCalendar=$cal
-# Spread across a 15 minute window. A lot of operators run the same installer;
-# a fleet all testing at the same second is a self-inflicted traffic spike.
-RandomizedDelaySec=900
-AccuracySec=1min
-Persistent=true
-Unit=$SVC_NAME.service
-
-[Install]
-WantedBy=timers.target
+# --- self update -------------------------------------------------------------
+# off | check (default, tells you) | install (unattended npm i -g as root)
+auto_update=${CFG[auto_update]}
+update_check_hours=${CFG[update_check_hours]}
 EOF
 }
 
 setup_run() {
-  local no_timer=0 a
+  local no_timer=0 wizard=1 a
   for a in "$@"; do
     case $a in
       --no-timer) no_timer=1 ;;
+      --no-wizard) wizard=0 ;;
+      --wizard) wizard=1 ;;
       *) die "setup: unknown option $a" ;;
     esac
   done
@@ -177,6 +256,17 @@ setup_run() {
     printf '  %-34s written\n' "$HYN_ETC/config"
   fi
 
+  # Secrets file: created empty at 0600 so the wizard has somewhere safe to put
+  # an API key, and so the restrictive mode is set before any key exists.
+  if [[ ! -f $HYN_ETC/secrets ]]; then
+    ( umask 077; printf '# hyn-view secrets. Mode 0600, root only. Do not commit this file.\n' >"$HYN_ETC/secrets" )
+    chmod 0600 "$HYN_ETC/secrets"
+    printf '  %-34s created (0600)\n' "$HYN_ETC/secrets"
+  else
+    chmod 0600 "$HYN_ETC/secrets"
+    printf '  %-34s kept (0600 enforced)\n' "$HYN_ETC/secrets"
+  fi
+
   # A convenience symlink so `hyn` works for every user even when npm's global
   # bin dir is not on root's PATH (a very common sudo surprise).
   if [[ ! -e /usr/local/bin/hyn ]]; then
@@ -185,29 +275,105 @@ setup_run() {
   fi
 
   if ((no_timer)); then
-    printf '\nhyn: skipped the timer (--no-timer)\n'
+    printf '\nhyn: skipped the timers (--no-timer)\n'
   elif ! have systemctl; then
-    printf '\nhyn: no systemd here, skipping the timer\n'
+    printf '\nhyn: no systemd here, skipping the timers\n'
   else
-    local cal
-    cal=$(st_calendar "${CFG[speedtest_per_day]}")
-    setup_service_unit "$exe" >"$SVC_PATH.tmp" && mv -f "$SVC_PATH.tmp" "$SVC_PATH" || die "cannot write $SVC_PATH"
-    setup_timer_unit "$cal" >"$TMR_PATH.tmp" && mv -f "$TMR_PATH.tmp" "$TMR_PATH" || die "cannot write $TMR_PATH"
-    chmod 0644 "$SVC_PATH" "$TMR_PATH"
-    printf '  %-34s written\n' "$SVC_PATH"
-    printf '  %-34s written\n' "$TMR_PATH"
-    systemctl daemon-reload
-    systemctl enable --now "$SVC_NAME.timer" >/dev/null 2>&1 \
-      && printf '  %-34s enabled (%s)\n' "$SVC_NAME.timer" "$cal" \
-      || printf '  %-34s %s\n' "$SVC_NAME.timer" 'could not enable -- see: systemctl status hyn-speedtest.timer'
+    setup_timers "$exe"
+  fi
+
+  # The wizard runs last, so a failure in it leaves a working install behind.
+  if ((wizard)) && [[ -t 0 && -t 1 ]]; then
+    source "$HYN_LIB/wizard.sh" 2>/dev/null || warn 'could not load the setup wizard'
+    if declare -F wizard_run >/dev/null; then
+      wizard_run || warn 'wizard did not complete; run `sudo hyn setup` again to finish'
+      setup_apply_schedule "$exe"
+    fi
+  elif ((wizard)); then
+    printf '\nhyn: not a terminal, so the guided setup was skipped.\n'
+    printf '     run `sudo hyn setup` from a shell to configure notifications.\n'
   fi
 
   printf '\nhyn: done. Next steps:\n'
   printf '  hyn                 open the dashboard\n'
-  printf '  hyn doctor          verify the environment\n'
-  printf '  hyn speedtest       take the first measurement now\n'
+  printf '  hyn doctor          verify the environment end to end\n'
+  printf '  hyn alerts check    evaluate every alert rule right now\n'
+  printf '  hyn report          print the daily report without sending it\n'
   if ! ((no_timer)) && have systemctl; then
-    printf '  systemctl list-timers %s.timer\n' "$SVC_NAME"
+    printf '  systemctl list-timers "hyn-*"\n'
+  fi
+  return 0
+}
+
+# Installs all four timers. Split out so `hyn setup` and a schedule change after
+# the wizard both go through the same code.
+setup_timers() {
+  local exe=$1
+  local cal
+  cal=$(st_calendar "${CFG[speedtest_per_day]}")
+
+  _write_unit "$SVC_PATH" "$(_generic_service 'hyn-view scheduled throughput measurement' \
+    "$exe speedtest --respect-guard --json")"
+  _write_unit "$TMR_PATH" "$(_generic_timer 'hyn-view scheduled throughput measurement' \
+    "OnCalendar=$cal" "$SVC_NAME.service" 900)"
+
+  # Alerts: the one that actually has to be reliable.
+  _write_unit /etc/systemd/system/hyn-alerts.service \
+    "$(_generic_service 'hyn-view alert evaluation' "$exe alerts check --quiet")"
+  _write_unit /etc/systemd/system/hyn-alerts.timer \
+    "$(_generic_timer 'hyn-view alert evaluation' \
+      "OnBootSec=3min"$'\n'"OnUnitActiveSec=${CFG[alert_interval_min]}min" 'hyn-alerts.service' 20)"
+
+  # Metric recording for the daily report.
+  _write_unit /etc/systemd/system/hyn-record.service \
+    "$(_generic_service 'hyn-view metric sampling' "$exe record")"
+  _write_unit /etc/systemd/system/hyn-record.timer \
+    "$(_generic_timer 'hyn-view metric sampling' \
+      "OnBootSec=2min"$'\n'"OnUnitActiveSec=${CFG[record_interval_min]}min" 'hyn-record.service' 20)"
+
+  # Daily report.
+  _write_unit /etc/systemd/system/hyn-report.service \
+    "$(_generic_service 'hyn-view daily report' "$exe report --send")"
+  _write_unit /etc/systemd/system/hyn-report.timer \
+    "$(_generic_timer 'hyn-view daily report' \
+      "OnCalendar=*-*-* ${CFG[report_at]}:00" 'hyn-report.service' 300)"
+
+  systemctl daemon-reload
+  setup_apply_schedule "$exe"
+  return 0
+}
+
+_write_unit() {
+  local path=$1 content=$2
+  printf '%s\n' "$content" >"$path.tmp" && mv -f "$path.tmp" "$path" || die "cannot write $path"
+  chmod 0644 "$path"
+  printf '  %-34s written\n' "$path"
+  return 0
+}
+
+# Enables or disables each timer according to config. Called again after the
+# wizard so answering "no daily report" actually stops the timer.
+setup_apply_schedule() {
+  have systemctl || return 0
+  systemctl daemon-reload
+  _toggle_timer "$SVC_NAME.timer" 1
+  _toggle_timer hyn-record.timer 1
+  _toggle_timer hyn-alerts.timer "$(cfg_on alert_enabled && [[ -n ${CFG[notify_channels]} ]] && printf 1 || printf 0)"
+  _toggle_timer hyn-report.timer "$(cfg_on report_enabled && [[ -n ${CFG[notify_channels]} ]] && printf 1 || printf 0)"
+  return 0
+}
+
+_toggle_timer() {
+  local unit=$1 want=${2:-0}
+  if [[ $want == 1 ]]; then
+    if systemctl enable --now "$unit" >/dev/null 2>&1; then
+      printf '  %-34s enabled\n' "$unit"
+    else
+      printf '  %-34s could not enable (systemctl status %s)\n' "$unit" "$unit"
+    fi
+  else
+    systemctl disable --now "$unit" >/dev/null 2>&1
+    printf '  %-34s disabled (not configured)\n' "$unit"
   fi
   return 0
 }
@@ -224,20 +390,27 @@ setup_uninstall() {
 
   printf 'hyn: removing system integration\n'
   if have systemctl; then
-    systemctl disable --now "$SVC_NAME.timer" >/dev/null 2>&1 && printf '  timer disabled\n'
-    rm -f "$SVC_PATH" "$TMR_PATH"
+    local u
+    for u in "$SVC_NAME.timer" hyn-alerts.timer hyn-record.timer hyn-report.timer; do
+      systemctl disable --now "$u" >/dev/null 2>&1 && printf '  %-24s disabled\n' "$u"
+    done
+    rm -f "$SVC_PATH" "$TMR_PATH" \
+      /etc/systemd/system/hyn-alerts.service /etc/systemd/system/hyn-alerts.timer \
+      /etc/systemd/system/hyn-record.service /etc/systemd/system/hyn-record.timer \
+      /etc/systemd/system/hyn-report.service /etc/systemd/system/hyn-report.timer
     systemctl daemon-reload
     printf '  units removed\n'
   fi
   [[ -L /usr/local/bin/hyn ]] && rm -f /usr/local/bin/hyn && printf '  /usr/local/bin/hyn unlinked\n'
 
   if ((purge)); then
-    # Only with --purge, and only these two paths: config and recorded history
-    # are the user's data, not ours to delete by default.
+    # Only with --purge, and only these two paths: config, credentials and
+    # recorded history are the user's data, not ours to delete by default.
     rm -rf "$HYN_ETC" "$HYN_VAR"
     printf '  %s and %s removed\n' "$HYN_ETC" "$HYN_VAR"
   else
-    printf '  kept %s and %s (use --purge to remove)\n' "$HYN_ETC" "$HYN_VAR"
+    printf '  kept %s (config + secrets) and %s (history)\n' "$HYN_ETC" "$HYN_VAR"
+    printf '  use --purge to remove them too\n'
   fi
   printf '\nhyn: the command itself is managed by npm: npm rm -g hyn-view\n'
   return 0

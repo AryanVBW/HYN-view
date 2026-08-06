@@ -32,7 +32,7 @@ HYN_ROOT=$(cd -P "${_self%/*}/.." 2>/dev/null && pwd) || {
 HYN_LIB="$HYN_ROOT/lib"
 export HYN_LIB HYN_ROOT
 
-for _m in core ui net collect highway speedtest panels; do
+for _m in core ui net collect highway speedtest notify alerts report update panels; do
   # shellcheck source=/dev/null
   source "$HYN_LIB/$_m.sh" || {
     printf 'hyn: failed to load %s\n' "$HYN_LIB/$_m.sh" >&2
@@ -60,6 +60,8 @@ boot() {
   ui_init
   collect_init
   panels_enabled
+  # Non-blocking: reads a cache, and only spawns a detached fetch when stale.
+  update_startup
   return 0
 }
 
@@ -144,6 +146,23 @@ cycle_theme() {
   return 0
 }
 
+# Flips between the two visual presets live, so the difference is visible rather
+# than described in a config comment.
+cycle_profile() {
+  if [[ ${CFG[profile]} == performance ]]; then CFG[profile]=best; else CFG[profile]=performance; fi
+  # A live toggle is an explicit choice, so clear the remembered explicit keys
+  # for the ones the profile owns; otherwise the preset could not move them.
+  local k
+  for k in graph graph_gradient graph_axis graph_stats interval proc_rows net_history_detail; do
+    unset "CFG_EXPLICIT[$k]"
+  done
+  profile_apply
+  _BR_SIZE=''
+  fb_invalidate
+  set_status "profile: ${CFG[profile]} (graph ${CFG[graph]}, ${CFG[interval]}s)"
+  return 0
+}
+
 cycle_iface() {
   local i=0 n=${#NET_IFACES[@]}
   ((n == 0)) && return 0
@@ -180,6 +199,7 @@ handle_key() {
     4) VIEW=node; fb_invalidate ;;
     h | H | '?') VIEW=help; fb_invalidate ;;
     t | T) cycle_theme ;;
+    p | P) cycle_profile ;;
     u | U)
       if [[ ${CFG[net_unit]} == bits ]]; then CFG[net_unit]=bytes; else CFG[net_unit]=bits; fi
       set_status "units: ${CFG[net_unit]}" ;;
@@ -215,6 +235,7 @@ render_help() {
   panel_open P "$w" 'KEYS' 'h to return'
   panel_row P "$w" "$(kv '1 2 3 4' 'dashboard / network / processes / node' 14)"
   panel_row P "$w" "$(kv 't' "cycle theme (now: $THEME_NAME)" 14)"
+  panel_row P "$w" "$(kv 'p' "visual profile (now: ${CFG[profile]}, graph ${CFG[graph]})" 14)"
   panel_row P "$w" "$(kv 'u' "toggle bits / bytes (now: ${CFG[net_unit]})" 14)"
   panel_row P "$w" "$(kv 'm' "sort processes by cpu / mem (now: ${CFG[proc_sort]})" 14)"
   panel_row P "$w" "$(kv 'i' 'cycle monitored interface' 14)"
@@ -233,6 +254,20 @@ render_help() {
   panel_row P2 "$w" "$(kv 'colors' "depth $COLOR_DEPTH, theme $THEME_NAME" 12)"
   panel_close P2 "$w"
   fb_addmany "${P2[@]}"
+
+  local -a P3=()
+  panel_open P3 "$w" 'ABOUT' "v$HYN_VERSION"
+  panel_row P3 "$w" "${C[bold]}$HYN_AUTHOR${C[reset]}   ${C[dim]}$HYN_AUTHOR_URL${C[reset]}"
+  panel_row P3 "$w" "${C[dim]}$HYN_COPYRIGHT · MIT licence · github.com/AryanVBW/HYN-view${C[reset]}"
+  if update_read; then
+    if ((UPD_AVAILABLE)); then
+      panel_row P3 "$w" "${C[warn]}$G_UP v$UPD_LATEST is available${C[reset]} ${C[dim]}— sudo hyn update --yes${C[reset]}"
+    else
+      panel_row P3 "$w" "${C[ok]}$G_DOT up to date${C[reset]} ${C[dim]}(npm latest $UPD_LATEST)${C[reset]}"
+    fi
+  fi
+  panel_close P3 "$w"
+  fb_addmany "${P3[@]}"
 
   while ((${#FB[@]} < h - 1)); do fb_add ''; done
   footer_line "$w"
@@ -461,35 +496,137 @@ cmd_theme() {
   return 0
 }
 
-config_file_rw() {
-  # Root edits the system config so the change applies to the service and every
-  # operator on the box; an unprivileged user gets their own.
-  if is_root; then
-    printf '%s' "$HYN_ETC/config"
-  else
-    printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/hyn-view/config"
-  fi
+cmd_alerts() {
+  local sub=${1:-check}
+  [[ -n ${1:-} ]] && shift || true
+  case $sub in
+    check | run)
+      local quiet=0 a
+      for a in "$@"; do [[ $a == --quiet ]] && quiet=1; done
+      cfg_on alert_enabled || { ((quiet)) || printf 'hyn: alerting is disabled (alert_enabled=off)\n'; return 0; }
+      alerts_run "$quiet"
+      alerts_log_new
+      ;;
+    list | rules)
+      # Evaluate everything and show each rule's current value against its
+      # threshold, so an operator can see why something is or is not firing.
+      alerts_state_load
+      alerts_collect
+      alerts_evaluate
+      printf '%-22s %-5s %s\n' 'RULE' 'STATE' 'DETAIL'
+      local i
+      for ((i = 0; i < ${#AL_ID[@]}; i++)); do
+        printf '%-22s %s%-5s%s %s\n' "${AL_ID[i]}" \
+          "$( [[ ${AL_SEV[i]} == crit ]] && printf '%s' "${C[crit]}" || printf '%s' "${C[warn]}")" \
+          "${AL_SEV[i]}" "${C[reset]}" "${AL_MSG[i]}"
+      done
+      local id
+      for id in "${!_AL_SEEN[@]}"; do
+        local firing=0 j
+        for ((j = 0; j < ${#AL_ID[@]}; j++)); do [[ ${AL_ID[j]} == "$id" ]] && firing=1; done
+        ((firing)) && continue
+        printf '%-22s %s%-5s%s\n' "$id" "${C[ok]}" 'ok' "${C[reset]}"
+      done
+      printf '\n%d rules evaluated, %d firing (%d crit, %d warn, %d info)\n' \
+        "${#_AL_SEEN[@]}" "$AL_FIRING" "$AL_CRIT" "$AL_WARN" "$AL_INFO"
+      ;;
+    test)
+      # Force a notification regardless of state, to prove the path end to end.
+      alerts_state_load
+      alerts_collect
+      alerts_evaluate
+      AL_ID+=(selftest) AL_SEV+=(warn) AL_NEW+=(1) AL_VAL+=(1)
+      AL_MSG+=('Test alert from `hyn alerts test` — nothing is actually wrong')
+      ((AL_FIRING++)); ((AL_WARN++))
+      if alerts_notify 1; then printf 'hyn: test alert delivered\n'
+      else printf 'hyn: could not deliver: %s\n' "${NOTIFY_LAST_ERR:-unknown}" >&2; return 1; fi
+      ;;
+    state)
+      local f
+      f=$(alert_state_file)
+      if [[ -r $f ]]; then
+        printf '%-22s %-9s %-20s %s\n' 'RULE' 'STATE' 'SINCE' 'LAST NOTIFIED'
+        local id st since notified val
+        while IFS=$'\t' read -r id st since notified val; do
+          local s1='-' s2='-'
+          [[ $since =~ ^[0-9]+$ ]] && ((since > 0)) && printf -v s1 '%(%Y-%m-%d %H:%M)T' "$since"
+          [[ $notified =~ ^[0-9]+$ ]] && ((notified > 0)) && printf -v s2 '%(%Y-%m-%d %H:%M)T' "$notified"
+          printf '%-22s %-9s %-20s %s\n' "$id" "$st" "$s1" "$s2"
+        done <"$f"
+      else
+        printf 'hyn: no alert state yet (run: hyn alerts check)\n'
+      fi
+      ;;
+    clear)
+      is_root || warn 'not root: clearing only your user state'
+      rm -f "$(alert_state_file)"
+      printf 'hyn: alert state cleared; the next check starts from scratch\n'
+      ;;
+    log)
+      local n=${1:-25}
+      [[ $n =~ ^[0-9]+$ ]] || n=25
+      report_alerts 720
+      local total=${#RA_TS[@]} start=$((${#RA_TS[@]} - n)) i
+      ((start < 0)) && start=0
+      ((total == 0)) && { printf 'hyn: no alerts recorded yet\n'; return 0; }
+      for ((i = start; i < total; i++)); do
+        printf '%(%Y-%m-%d %H:%M)T  %-5s %s\n' "${RA_TS[i]}" "${RA_SEV[i]}" "${RA_MSG[i]}"
+      done
+      ;;
+    *) die 'usage: hyn alerts [check|list|test|state|log [N]|clear]' ;;
+  esac
+  return 0
 }
 
-config_set() {
-  local k=$1 v=$2 f
-  _cfg_allowed "$k" || die "unknown config key: $k (see 'hyn config show')"
-  f=$(config_file_rw)
-  mkdir -p "${f%/*}" 2>/dev/null || die "cannot create ${f%/*}"
-  local -a out=()
-  local line found=0
-  if [[ -r $f ]]; then
-    while IFS= read -r line || [[ -n $line ]]; do
-      if [[ ${line%%=*} == "$k" && $line == *=* ]]; then
-        out+=("$k=$v")
-        found=1
+cmd_report() {
+  report_run "$@"
+}
+
+cmd_notify() {
+  local sub=${1:-status}
+  [[ -n ${1:-} ]] && shift || true
+  case $sub in
+    test)
+      [[ -n ${CFG[notify_channels]} ]] || die 'no notify_channels configured. Run: sudo hyn setup'
+      local body
+      body="Test message from hyn-view on $HOSTNAME_S.
+
+  distro    ${DISTRO:-unknown}
+  kernel    ${KERNEL:-unknown}
+  channels  ${CFG[notify_channels]}
+  to        ${CFG[notify_to]:-n/a}
+
+Nothing is wrong; you asked for a test."
+      if notify_send info "[hyn] Test from $HOSTNAME_S" "$body"; then
+        printf 'hyn: sent via %s\n' "${CFG[notify_channels]}"
       else
-        out+=("$line")
+        printf 'hyn: failed: %s\n' "${NOTIFY_LAST_ERR:-unknown error}" >&2
+        return 1
       fi
-    done <"$f"
-  fi
-  ((found == 0)) && out+=("$k=$v")
-  printf '%s\n' "${out[@]}" >"$f.tmp" && mv -f "$f.tmp" "$f" || die "cannot write $f"
+      ;;
+    status)
+      secrets_load
+      printf 'channels        %s\n' "${CFG[notify_channels]:-(none configured)}"
+      printf 'recipients      %s\n' "${CFG[notify_to]:-(none)}"
+      printf 'from            %s\n' "${CFG[notify_from]:-(none)}"
+      printf 'min severity    %s\n' "${CFG[alert_min_severity]}"
+      printf 'check interval  every %s min\n' "${CFG[alert_interval_min]}"
+      printf 'repeat          every %s h while still firing\n' "${CFG[alert_repeat_hours]}"
+      printf 'daily report    %s\n' "$(cfg_on report_enabled && printf 'at %s' "${CFG[report_at]}" || printf 'disabled')"
+      budget_check || true
+      printf 'sent today      %s of max %s\n' "$NOTIFY_SENT_TODAY" "${CFG[notify_max_per_day]}"
+      # Report only WHETHER a credential is present, never any part of its value.
+      local k
+      for k in resend_api_key brevo_api_key smtp_user smtp_pass telegram_token webhook_url heartbeat_url; do
+        printf '%-15s %s\n' "$k" "$(has_secret "$k" && printf 'set' || printf '-')"
+      done
+      ;;
+    heartbeat)
+      if heartbeat_ping 0; then printf 'hyn: heartbeat delivered\n'
+      else printf 'hyn: heartbeat failed or no heartbeat_url set\n' >&2; return 1; fi
+      ;;
+    *) die 'usage: hyn notify [status|test|heartbeat]' ;;
+  esac
   return 0
 }
 
@@ -557,6 +694,65 @@ cmd_doctor() {
   sd=$(state_dir)
   if mkdir -p "$sd" 2>/dev/null && [[ -w $sd ]]; then _chk ok 'state dir' "$sd"; else _chk fail 'state dir' "$sd not writable"; fi
 
+  printf '\n%sNotifications%s\n' "${C[bold]}" "${C[reset]}"
+  secrets_load
+  if [[ -z ${CFG[notify_channels]} ]]; then
+    _chk warn 'channels' 'none configured -- run: sudo hyn setup'
+  else
+    _chk ok 'channels' "${CFG[notify_channels]}"
+    local ch need_to=0
+    local oIFS=$IFS
+    IFS=,
+    for ch in ${CFG[notify_channels]}; do
+      case $ch in
+        resend) IFS=$oIFS; need_to=1; if has_secret resend_api_key; then _chk ok 'resend key' 'set'; else _chk fail 'resend key' 'missing from secrets'; fi; IFS=, ;;
+        brevo) IFS=$oIFS; need_to=1; if has_secret brevo_api_key; then _chk ok 'brevo key' 'set'; else _chk fail 'brevo key' 'missing from secrets'; fi; IFS=, ;;
+        smtp) IFS=$oIFS; need_to=1; if [[ -n ${CFG[smtp_host]} ]]; then _chk ok 'smtp host' "${CFG[smtp_host]}:${CFG[smtp_port]}"; else _chk fail 'smtp host' 'not set'; fi; IFS=, ;;
+        telegram) IFS=$oIFS; if has_secret telegram_token && [[ -n ${CFG[telegram_chat_id]} ]]; then _chk ok 'telegram' "chat ${CFG[telegram_chat_id]}"; else _chk fail 'telegram' 'token or chat id missing'; fi; IFS=, ;;
+        ntfy) IFS=$oIFS; if [[ -n ${CFG[ntfy_topic]} ]]; then _chk ok 'ntfy' "${CFG[ntfy_server]}/${CFG[ntfy_topic]}"; else _chk fail 'ntfy' 'ntfy_topic not set'; fi; IFS=, ;;
+        webhook) IFS=$oIFS; if has_secret webhook_url; then _chk ok 'webhook' 'set'; else _chk fail 'webhook' 'webhook_url missing'; fi; IFS=, ;;
+      esac
+    done
+    IFS=$oIFS
+    if ((need_to)); then
+      if valid_email_list "${CFG[notify_to]}" 2>/dev/null; then _chk ok 'recipients' "${VALID_TO[*]}"
+      else _chk fail 'recipients' 'notify_to is empty or invalid'; fi
+    fi
+  fi
+  local sf="$HYN_ETC/secrets"
+  if [[ -f $sf ]]; then
+    local perm=''
+    have stat && perm=$(stat -c '%a' "$sf" 2>/dev/null)
+    if [[ $perm == 600 ]]; then _chk ok 'secrets perms' "$sf is 0600"
+    else _chk fail 'secrets perms' "$sf is ${perm:-?}, should be 600: sudo chmod 600 $sf"; fi
+  else
+    _chk warn 'secrets file' "$sf does not exist yet"
+  fi
+  if has_secret heartbeat_url || [[ -n ${CFG[heartbeat_url]} ]]; then
+    _chk ok 'heartbeat' 'configured -- an outage will be reported by the external service'
+  else
+    _chk warn 'heartbeat' 'not set: nothing will tell you if this host goes offline'
+  fi
+
+  printf '\n%sTimers%s\n' "${C[bold]}" "${C[reset]}"
+  if have systemctl; then
+    local u
+    for u in hyn-speedtest.timer hyn-record.timer hyn-alerts.timer hyn-report.timer; do
+      if systemctl cat "$u" >/dev/null 2>&1; then
+        local st
+        st=$(systemctl is-active "$u" 2>/dev/null)
+        local nxt
+        nxt=$(systemctl show -p NextElapseUSecRealtime --value "$u" 2>/dev/null)
+        if [[ $st == active ]]; then _chk ok "$u" "active${nxt:+, next $nxt}"
+        else _chk warn "$u" "$st"; fi
+      else
+        _chk warn "$u" 'not installed -- run: sudo hyn setup'
+      fi
+    done
+  else
+    _chk warn 'systemd' 'not present, nothing is scheduled'
+  fi
+
   printf '\n%sHighway node%s\n' "${C[bold]}" "${C[reset]}"
   hw_binary 1
   if ((HW_PRESENT)); then
@@ -597,6 +793,21 @@ cmd_doctor() {
   return 0
 }
 
+cmd_about() {
+  printf '\n  %s%shyn-view%s %s\n' "${C[accent]}" "${C[bold]}" "${C[reset]}" "$HYN_VERSION"
+  printf '  %sNetwork-first system monitor for Ubuntu Server%s\n\n' "${C[dim]}" "${C[reset]}"
+  printf '  %sAuthor%s     %s%s%s\n' "${C[dim]}" "${C[reset]}" "${C[bold]}" "$HYN_AUTHOR" "${C[reset]}"
+  printf '  %sGitHub%s     %s\n' "${C[dim]}" "${C[reset]}" "$HYN_AUTHOR_URL"
+  printf '  %sProject%s    https://github.com/AryanVBW/HYN-view\n' "${C[dim]}" "${C[reset]}"
+  printf '  %sLicence%s    MIT\n' "${C[dim]}" "${C[reset]}"
+  printf '  %s%s%s\n\n' "${C[dim]}" "$HYN_COPYRIGHT" "${C[reset]}"
+  printf '  %sinstalled at%s  %s\n' "${C[dim]}" "${C[reset]}" "$HYN_ROOT"
+  update_read && printf '  %slatest on npm%s %s%s\n' "${C[dim]}" "${C[reset]}" "$UPD_LATEST" \
+    "$( ((UPD_AVAILABLE)) && printf '  (update available)' )"
+  printf '\n'
+  return 0
+}
+
 cmd_help() {
   # printf rather than a heredoc: bash 5.3 feeds heredocs through a pipe, and on
   # platforms with a small initial pipe buffer (macOS starts at 512 bytes) a
@@ -617,18 +828,37 @@ cmd_help() {
     '                        measure throughput now and record it' \
     '  history [N] [--json]  recorded speed test results' \
     '' \
+    '  alerts check          evaluate every rule now (what the timer runs)' \
+    '  alerts list           every rule, its value, and whether it is firing' \
+    '  alerts test           send a test alert through the real channels' \
+    '  alerts state | log    firing state, or what has fired recently' \
+    '  report [--send]       daily report: print it, or email it' \
+    '  notify status | test  delivery configuration, or send a test message' \
+    '  record                sample metrics once (what the record timer runs)' \
+    '' \
+    '  update [--check] [--yes]  check npm for a newer release, or install it' \
+    '  about                 author, licence and version detail' \
+    '' \
     '  theme list | set <name> | current | preview <name>' \
     '  config show | get <k> | set <k> <v> | path | edit' \
-    '  doctor                check the environment and the node' \
-    '  setup                 install config, state dir and speed test timer (root)' \
-    '  uninstall             remove them again (root)' \
+    '  doctor                check the environment end to end' \
+    '  setup                 guided setup: config, timers, notifications (root)' \
+    '  wizard                re-run just the guided notification setup' \
+    '  uninstall             remove units and links (--purge drops data too)' \
     '  version | help' \
     '' \
-    'keys in the dashboard: 1-4 views, t theme, u units, m sort, i interface,' \
-    's speed test, +/- refresh, h help, q quit' \
+    'keys in the dashboard: 1-4 views, t theme, p profile, u units, m sort,' \
+    'i interface, s speed test, +/- refresh, h help, q quit' \
     '' \
-    "config:  $HYN_ETC/config  (or ~/.config/hyn-view/config)" \
-    "state:   $(state_dir)"
+    'profile=best gives gradient braille graphs, a time axis and a 1s refresh.' \
+    'profile=performance gives block graphs and 2s, for about a third less CPU.' \
+    '' \
+    "config:   $HYN_ETC/config  (or ~/.config/hyn-view/config)" \
+    "secrets:  $HYN_ETC/secrets  (mode 0600, API keys only)" \
+    "state:    $(state_dir)" \
+    '' \
+    "hyn-view $HYN_VERSION -- $HYN_COPYRIGHT" \
+    "$HYN_AUTHOR  <$HYN_AUTHOR_URL>"
   return 0
 }
 
@@ -653,10 +883,22 @@ main() {
     setup | install-service)
       source "$HYN_LIB/setup.sh" || die 'cannot load setup helpers'
       setup_run "$@" ;;
+    wizard | configure)
+      source "$HYN_LIB/notify.sh" 2>/dev/null
+      source "$HYN_LIB/wizard.sh" || die 'cannot load the setup wizard'
+      wizard_run "$@" ;;
+    alerts | alert) cmd_alerts "$@" ;;
+    report) cmd_report "$@" ;;
+    record) record_sample ;;
+    notify) cmd_notify "$@" ;;
     uninstall | remove)
       source "$HYN_LIB/setup.sh" || die 'cannot load setup helpers'
       setup_uninstall "$@" ;;
-    version | --version | -v) printf 'hyn-view %s\n' "$HYN_VERSION" ;;
+    update | upgrade) cmd_update "$@" ;;
+    about | credits) cmd_about ;;
+    version | --version | -v)
+      printf 'hyn-view %s\n' "$HYN_VERSION"
+      printf '%s\n' "$HYN_COPYRIGHT" ;;
     help | --help | -h) cmd_help ;;
     *) die "unknown command: $cmd (try 'hyn help')" ;;
   esac

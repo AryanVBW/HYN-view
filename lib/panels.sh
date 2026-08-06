@@ -70,15 +70,35 @@ header_line() {
 
 FTR_OUT=''
 footer_line() {
-  local w=$1 s
+  local w=$1 s right
   s="${C[dim]}"
   s+="${C[accent]}q${C[dim]} quit  "
   s+="${C[accent]}1${C[dim]} dash ${C[accent]}2${C[dim]} net ${C[accent]}3${C[dim]} proc ${C[accent]}4${C[dim]} node  "
-  s+="${C[accent]}t${C[dim]} theme  ${C[accent]}u${C[dim]} units  ${C[accent]}m${C[dim]} sort  "
-  s+="${C[accent]}s${C[dim]} speedtest  ${C[accent]}+/-${C[dim]} rate  ${C[accent]}i${C[dim]} iface"
+  s+="${C[accent]}t${C[dim]} theme  ${C[accent]}p${C[dim]} profile  ${C[accent]}u${C[dim]} units  ${C[accent]}m${C[dim]} sort  "
+  s+="${C[accent]}s${C[dim]} test  ${C[accent]}+/-${C[dim]} rate  ${C[accent]}i${C[dim]} iface"
   s+="${C[reset]}"
-  fit_v " $s" "$w"
-  FTR_OUT=$FIT_OUT
+
+  # Attribution lives on the status bar: present in every view, at the
+  # conventional place for it, without taking a row from the data.
+  right="${C[dim]}$HYN_PKG ${C[reset]}${C[accent2]}$HYN_AUTHOR${C[reset]}"
+  if ((UPD_AVAILABLE)); then
+    right="${C[warn]}$G_UP v$UPD_LATEST${C[reset]}  $right"
+  fi
+
+  vlen " $s"; local lw=$VLEN
+  vlen "$right"; local rw=$VLEN
+  if ((lw + rw + 3 <= w)); then
+    rep_v ' ' $((w - lw - rw - 1))
+    FTR_OUT=" $s$REP_OUT$right "
+  elif ((rw + 2 <= w)); then
+    # Too narrow for both: the credit stays, the key hints are discoverable
+    # with `h` anyway.
+    rep_v ' ' $((w - rw - 1))
+    FTR_OUT="$REP_OUT$right "
+  else
+    fit_v " $s" "$w"
+    FTR_OUT=$FIT_OUT
+  fi
   return 0
 }
 
@@ -104,11 +124,15 @@ panel_net() {
   fi
 
   net_link "$iface"
+  net_identity
+  net_ident_label
+  # The interface name is what the kernel calls it; the SSID or connection name
+  # is what the operator calls it. Show the recognisable one first.
   right="$iface"
-  [[ -n $LINK_SPEED ]] && { fmt_rate_v $((LINK_SPEED * 125000)); right+=" ${C[dim]}·${C[reset]} link $FMT_OUT"; }
-  [[ -n $LINK_MTU ]] && right+=" · mtu $LINK_MTU"
-  [[ -n $LINK_DRIVER ]] && right+=" · $LINK_DRIVER"
-  [[ -n $PUB_IP ]] && right+=" · $PUB_IP"
+  [[ -n $NET_IDENT_LABEL ]] && right+=" ${C[accent]}$NET_IDENT_LABEL${C[reset]}"
+  [[ -n $LINK_SPEED ]] && { fmt_rate_v $((LINK_SPEED * 125000)); right+=" ${C[dim]}·${C[reset]} $FMT_OUT"; }
+  [[ -n $NET_LOCAL_IP ]] && right+=" · $NET_LOCAL_IP"
+  [[ -n $PUB_IP ]] && right+=" · wan $PUB_IP"
   panel_open P_NET "$w" 'NETWORK' "$right" "${C[accent]}"
 
   safe=${iface//[^A-Za-z0-9]/_}
@@ -130,9 +154,16 @@ panel_net() {
   line="$PAD_OUT${C[dim]}peak${C[reset]} "
   pad_v "$rxp" 13; line+="$PAD_OUT${C[dim]}total${C[reset]} "
   pad_v "$rxt" 12; line+="$PAD_OUT${C[dim]}pps${C[reset]} $rxpps"
+  if cfg_on graph_stats && ((inner >= 86)); then
+    arr_stats_v "$rxa" $((gw * 2))
+    fmt_rate_v "$ARR_AVG"
+    line+="  ${C[dim]}avg${C[reset]} $FMT_OUT"
+  fi
   panel_row P_NET "$w" "$line"
 
   if ((graph_h > 0)) && [[ ${CFG[graph]} != off && ${CFG[graph]} != none ]]; then
+    local grad=0
+    cfg_on graph_gradient && grad=1
     if [[ ${CFG[graph]} == block || ${CFG[graph]} == bar ]]; then
       # One block-glyph row per direction. Coarser than braille (8 vertical
       # levels against 24, and one sample per column against two) but roughly a
@@ -143,11 +174,26 @@ panel_net() {
       sparkline_v "$txa" "$gw" "$gmax" "${C[tx]}"
       panel_raw P_NET "$w" "$SPARK_OUT"
     else
-      braille_plot "$rxa" "$gw" "$graph_h" "$gmax" "${C[rx]}" 0
+      braille_plot "$rxa" "$gw" "$graph_h" "$gmax" "${C[rx]}" 0 "$grad"
       for i in "${!BR_OUT[@]}"; do panel_raw P_NET "$w" "${BR_OUT[i]}"; done
       _net_axis "$w" "$inner" "$gmax"
-      braille_plot "$txa" "$gw" "$graph_h" "$gmax" "${C[tx]}" 1
+      local tx_h=$graph_h
+      if ((gmax > 0)); then
+        tx_h=$(((mtx * graph_h + gmax - 1) / gmax))
+        ((tx_h < 2)) && tx_h=2
+        ((tx_h > graph_h)) && tx_h=$graph_h
+      fi
+      braille_plot "$txa" "$gw" "$tx_h" "$gmax" "${C[tx]}" 1 "$grad"
       for i in "${!BR_OUT[@]}"; do panel_raw P_NET "$w" "${BR_OUT[i]}"; done
+    fi
+    # A time ruler turns "there was a spike" into "there was a spike 4 min ago".
+    if cfg_on graph_axis && ((inner >= 40)); then
+      parse_fixed3_v "${CFG[interval]}"
+      local isec=$((FIX3 / 1000)); ((isec < 1)) && isec=1
+      local per=2
+      [[ ${CFG[graph]} == block || ${CFG[graph]} == bar ]] && per=1
+      time_axis_v "$inner" "$isec" "$per"
+      panel_raw P_NET "$w" "$TIME_AXIS"
     fi
   fi
 
@@ -160,6 +206,11 @@ panel_net() {
   line="$PAD_OUT${C[dim]}peak${C[reset]} "
   pad_v "$txp" 13; line+="$PAD_OUT${C[dim]}total${C[reset]} "
   pad_v "$txt" 12; line+="$PAD_OUT${C[dim]}pps${C[reset]} $txpps"
+  if cfg_on graph_stats && ((inner >= 86)); then
+    arr_stats_v "$txa" $((gw * 2))
+    fmt_rate_v "$ARR_AVG"
+    line+="  ${C[dim]}avg${C[reset]} $FMT_OUT"
+  fi
   panel_row P_NET "$w" "$line"
 
   # health counters
@@ -233,6 +284,22 @@ panel_net() {
   # speed test
   _speed_line "$inner"
   panel_row P_NET "$w" "$SPEED_LINE"
+  # Who we are connected to and through what. Second-to-last so the frequently
+  # changing numbers stay at a stable height above it.
+  if cfg_on net_identity && ((inner >= 60)); then
+    line=''
+    [[ -n $NET_SSID ]] && line+="${C[dim]}ssid${C[reset]} ${C[accent]}$NET_SSID${C[reset]}  "
+    [[ -n $NET_CONN && $NET_CONN != "$iface" ]] && line+="${C[dim]}conn${C[reset]} $NET_CONN  "
+    [[ -n ${IF_TYPE[$iface]:-} ]] && line+="${C[dim]}type${C[reset]} ${IF_TYPE[$iface]}  "
+    [[ -n $NET_GW ]] && line+="${C[dim]}gw${C[reset]} $NET_GW  "
+    [[ -n ${LINK_MAC:-} ]] && ((inner >= 96)) && line+="${C[dim]}mac${C[reset]} $LINK_MAC  "
+    if [[ -n $NET_DNS ]]; then
+      local dns=$NET_DNS
+      ((inner < 110)) && dns=${dns%%,*}
+      line+="${C[dim]}dns${C[reset]} $dns"
+    fi
+    [[ -n $line ]] && panel_row P_NET "$w" "$line"
+  fi
   panel_close P_NET "$w"
   return 0
 }
@@ -440,12 +507,18 @@ panel_disk() {
   for mp in "${MOUNTS[@]}"; do
     ((n >= maxmounts)) && break
     ((n++))
+    local mw=12
+    ((inner < 44)) && mw=9
     bar_v "${MP_PCT[$mp]}" "$bw"
-    pad_v "$mp" 12
+    pad_v "$mp" "$mw"
     fmt_size_v "${MP_AVAIL[$mp]}"; local avail=$FMT_OUT
     line="${C[fg]}$PAD_OUT${C[reset]}$BAR_OUT ${C[fg]}${MP_PCT[$mp]}%${C[reset]}"
-    pad_v " ${C[dim]}$avail free${C[reset]}" 18
-    line+="$PAD_OUT"
+    if ((inner >= 44)); then
+      pad_v " ${C[dim]}$avail free${C[reset]}" 18
+      line+="$PAD_OUT"
+    else
+      line+=" ${C[dim]}$avail${C[reset]}"
+    fi
     if ((inner >= 74)); then
       fmt_size_v "${MP_USED[$mp]}"; local used=$FMT_OUT
       fmt_size_v "${MP_SIZE[$mp]}"
@@ -459,16 +532,22 @@ panel_disk() {
     ((n >= maxdev)) && break
     ((emitted + n >= maxrows)) && break
     ((n++))
-    pad_v "$d" 8
+    local dw=8 rw=16
+    ((inner < 44)) && { dw=6; rw=13; }
+    pad_v "$d" "$dw"
     line="${C[dim]}$PAD_OUT${C[reset]}"
-    fmt_rate_v "${DISK_RD[$d]:-0}"; pad_v "${C[rx]}r $FMT_OUT${C[reset]}" 16; line+="$PAD_OUT"
-    fmt_rate_v "${DISK_WR[$d]:-0}"; pad_v "${C[tx]}w $FMT_OUT${C[reset]}" 16; line+="$PAD_OUT"
+    fmt_rate_v "${DISK_RD[$d]:-0}"; pad_v "${C[rx]}r $FMT_OUT${C[reset]}" "$rw"; line+="$PAD_OUT"
+    fmt_rate_v "${DISK_WR[$d]:-0}"; pad_v "${C[tx]}w $FMT_OUT${C[reset]}" "$rw"; line+="$PAD_OUT"
     local u=${DISK_UTIL[$d]:-0} uc=${C[ok]}
     ((u > 70)) && uc=${C[warn]}
     ((u > 90)) && uc=${C[crit]}
-    pad_v "$uc${u}% busy${C[reset]}" 12; line+="$PAD_OUT"
-    fmt_fixed_v "${DISK_AWAIT[$d]:-0}" 100 1
-    line+="${C[dim]}await${C[reset]} ${FMT_OUT}ms"
+    if ((inner >= 44)); then
+      pad_v "$uc${u}% busy${C[reset]}" 12; line+="$PAD_OUT"
+      fmt_fixed_v "${DISK_AWAIT[$d]:-0}" 100 1
+      line+="${C[dim]}await${C[reset]} ${FMT_OUT}ms"
+    else
+      line+="$uc${u}%${C[reset]}"
+    fi
     if ((inner >= 74)) && [[ ${DISK_INFLIGHT[$d]:-0} =~ ^[0-9]+$ ]]; then
       line+="  ${C[dim]}queue${C[reset]} ${DISK_INFLIGHT[$d]}"
     fi
@@ -841,20 +920,26 @@ render_net_full() {
   local left=$((h - 1 - ${#FB[@]} - 1))
   if ((left >= 4)); then
     local -a P_IF=()
-    panel_open P_IF "$w" 'INTERFACES' ''
+    net_identity
+    panel_open P_IF "$w" 'INTERFACES' "gw ${NET_GW:-none} · dns ${NET_DNS:-none}"
     local ifn n=0
     for ifn in "${NET_IFACES[@]}"; do
       ((n >= left - 3)) && break
       ((n++))
-      net_link "$ifn"
       pad_v "$ifn" 12
       local line="${C[fg]}$PAD_OUT${C[reset]}"
-      status_dot_v "${LINK_STATE:-unknown}" "${LINK_STATE:-?}"
-      pad_v "$STATUS_OUT" 14; line+="$PAD_OUT"
-      fmt_rate_v "${NET_RXR[$ifn]:-0}"; pad_v "$G_DOWN $FMT_OUT" 16; line+="${C[rx]}$PAD_OUT${C[reset]}"
-      fmt_rate_v "${NET_TXR[$ifn]:-0}"; pad_v "$G_UP $FMT_OUT" 16; line+="${C[tx]}$PAD_OUT${C[reset]}"
-      fmt_size_v "${NET_RX[$ifn]:-0}"; line+="${C[dim]}tot $FMT_OUT"
-      fmt_size_v "${NET_TX[$ifn]:-0}"; line+=" / $FMT_OUT${C[reset]}"
+      pad_v "${IF_TYPE[$ifn]:-?}" 10; line+="${C[dim]}$PAD_OUT${C[reset]}"
+      status_dot_v "${IF_STATE[$ifn]:-unknown}" "${IF_STATE[$ifn]:-?}"
+      pad_v "$STATUS_OUT" 12; line+="$PAD_OUT"
+      pad_v "${IF_IP[$ifn]:-—}" 20; line+="${C[fg]}$PAD_OUT${C[reset]}"
+      fmt_rate_v "${NET_RXR[$ifn]:-0}"; pad_v "$G_DOWN $FMT_OUT" 15; line+="${C[rx]}$PAD_OUT${C[reset]}"
+      fmt_rate_v "${NET_TXR[$ifn]:-0}"; pad_v "$G_UP $FMT_OUT" 15; line+="${C[tx]}$PAD_OUT${C[reset]}"
+      if [[ -n ${IF_SSID[$ifn]:-} ]]; then
+        line+="${C[accent]}${IF_SSID[$ifn]}${C[reset]}"
+      else
+        fmt_size_v "${NET_RX[$ifn]:-0}"; line+="${C[dim]}$FMT_OUT"
+        fmt_size_v "${NET_TX[$ifn]:-0}"; line+=" / $FMT_OUT${C[reset]}"
+      fi
       panel_row P_IF "$w" "$line"
     done
     net_tuning

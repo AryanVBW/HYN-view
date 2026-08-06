@@ -320,9 +320,12 @@ heat_strip_v() {
   return 0
 }
 
-# braille_plot <array-name> <cells-wide> <cells-high> <max> <colour> [flip]
+# braille_plot <array-name> <cells-wide> <cells-high> <max> <colour> [flip] [gradient]
 # Rows land in BR_OUT, top first. flip=1 grows downward from the top, which is
 # what lets the rx/tx pair mirror around a shared axis and read at a glance.
+# gradient=1 colours each row by its height, so the plot reads as a vertical
+# ramp instead of a flat block -- the single biggest visual difference between
+# the `best` and `performance` profiles, and it costs h cached lookups.
 #
 # Two optimisations matter here, because this is the most expensive thing in a
 # frame (a 150-column graph is 292 dot columns):
@@ -338,9 +341,9 @@ declare -a _BR_ZERO=()
 _BR_SIZE=''
 braille_plot() {
   local -n _pv=$1
-  local w=$2 h=$3 max=$4 col=$5 flip=${6:-0}
+  local w=$2 h=$3 max=$4 col=$5 flip=${6:-0} gradient=${7:-0}
   local dotw=$((w * 2)) doth=$((h * 4))
-  local n=${#_pv[@]} start off i x cx base val hh nfill cy edge line
+  local n=${#_pv[@]} start off i x cx base val hh nfill cy edge line rowcol pct
   local -a cells=()
   BR_OUT=()
   ((w <= 0 || h <= 0)) && return 0
@@ -390,8 +393,72 @@ braille_plot() {
     line=''
     base=$((cy * w))
     for ((x = 0; x < w; x++)); do line+=${BRAILLE[cells[base + x]]}; done
-    BR_OUT+=("$col$line${C[reset]}")
+    if ((gradient && h > 1)); then
+      # Row 0 is the top. For a normal plot the top is the high end; for a
+      # flipped plot the far row is, so the ramp has to invert with it.
+      if ((flip)); then pct=$((cy * 100 / (h - 1)))
+      else pct=$(((h - 1 - cy) * 100 / (h - 1))); fi
+      grad_v "$pct"
+      rowcol=$GRAD_OUT
+    else
+      rowcol=$col
+    fi
+    BR_OUT+=("$rowcol$line${C[reset]}")
   done
+  return 0
+}
+
+# time_axis_v <cells-wide> <seconds-per-sample> <samples-per-cell>
+# A labelled time ruler for under a graph, so "the spike was a while ago" becomes
+# "the spike was four minutes ago".
+TIME_AXIS=''
+time_axis_v() {
+  local w=$1 secs=$2 per=$3
+  local span=$((w * per * secs))
+  ((span <= 0 || w < 20)) && { rep_v "$G_HLINE" "$w"; TIME_AXIS="${C[border]}$REP_OUT${C[reset]}"; return 0; }
+  local -a marks=()
+  local i frac lbl
+  # Four evenly spaced marks reading right-to-left from "now".
+  for i in 3 2 1; do
+    frac=$((span * i / 4))
+    if ((frac >= 3600)); then printf -v lbl -- '-%dh' $((frac / 3600))
+    elif ((frac >= 60)); then printf -v lbl -- '-%dm' $((frac / 60))
+    else printf -v lbl -- '-%ds' "$frac"; fi
+    marks+=("$lbl")
+  done
+  local out='' seg=$((w / 4)) k
+  printf -v lbl -- '-%s' "$( ((span >= 3600)) && printf '%dh' $((span / 3600)) || printf '%dm' $((span / 60)) )"
+  out="${C[dim]}$lbl${C[reset]}"
+  vlen "$out"
+  local used=$VLEN
+  for k in 0 1 2; do
+    rep_v "$G_HLINE" $((seg - ${#marks[k]} - 1))
+    out+="${C[border]}$REP_OUT${C[reset]} ${C[dim]}${marks[k]}${C[reset]}"
+    ((used += seg))
+  done
+  rep_v "$G_HLINE" $((w - used - 4))
+  out+="${C[border]}$REP_OUT${C[reset]} ${C[dim]}now${C[reset]}"
+  vlen "$out"
+  ((VLEN < w)) && { rep_v "$G_HLINE" $((w - VLEN)); out+="${C[border]}$REP_OUT${C[reset]}"; }
+  TIME_AXIS=$out
+  return 0
+}
+
+# arr_stats_v <array-name> <window> -- min/avg/max of the visible window, so the
+# graph's shape gets actual numbers attached to it.
+ARR_MIN=0 ARR_AVG=0
+arr_stats_v() {
+  local -n _sa=$1
+  local w=$2 n=${#_sa[@]} i start sum=0 cnt=0 v
+  ARR_MIN=0 ARR_AVG=0 ARR_MAX=0
+  start=$((n - w)); ((start < 0)) && start=0
+  for ((i = start; i < n; i++)); do
+    v=${_sa[i]:-0}
+    ((cnt == 0 || v < ARR_MIN)) && ARR_MIN=$v
+    ((v > ARR_MAX)) && ARR_MAX=$v
+    ((sum += v)); ((cnt++))
+  done
+  ((cnt > 0)) && ARR_AVG=$((sum / cnt))
   return 0
 }
 
