@@ -306,20 +306,78 @@ disk_sample() {
 
 # Free space has no /proc source -- statfs is a syscall bash cannot make. One
 # `df` on a slow cadence is the honest cost; cached between refreshes.
+#
+# The filtering matters more than it looks. A stock Ubuntu server mounts every
+# installed snap as a read-only squashfs loop device at /snap/..., and squashfs
+# is *always* 100% full by definition. Without this filter a box with twenty
+# snaps shows twenty filesystems on the dashboard and fires twenty critical
+# "disk full" alerts that can never be cleared. /proc/mounts is the authority on
+# type and options, so pair it with df rather than trying to guess from df alone.
 declare -a MOUNTS=()
-declare -A MP_PCT=() MP_USED=() MP_SIZE=() MP_AVAIL=()
+declare -A MP_PCT=() MP_USED=() MP_SIZE=() MP_AVAIL=() MP_FSTYPE=()
 DF_LAST=0
+
+# Filesystems that represent real, writable storage someone can run out of.
+_FS_REAL=' ext2 ext3 ext4 xfs btrfs zfs f2fs jfs reiserfs ufs vfat exfat ntfs ntfs3 nfs nfs4 cifs smbfs virtiofs apfs hfs '
+
+# Builds the allowlist of mount points worth reporting, in _MP_OK.
+declare -A _MP_OK=()
+_disk_scan_mounts() {
+  local dev mp fstype opts rest pat skip
+  _MP_OK=()
+  [[ -r $HYN_PROC/mounts ]] || return 1
+  while read -r dev mp fstype opts rest; do
+    [[ -n $mp && -n $fstype ]] || continue
+    [[ $_FS_REAL == *" $fstype "* ]] || continue
+    # Read-only means nothing can fill it up. That is every snap.
+    case ,$opts, in
+      *,ro,*) continue ;;
+    esac
+    skip=0
+    local IFS=,
+    for pat in ${CFG[hide_mount]}; do
+      [[ -z $pat ]] && continue
+      [[ $mp == "$pat" || $mp == "$pat"* ]] && { skip=1; break; }
+    done
+    unset IFS
+    ((skip)) && continue
+    # /proc/mounts escapes spaces and friends as octal; decode so the key
+    # matches what df reports.
+    mp=${mp//\\040/ }
+    mp=${mp//\\011/	}
+    _MP_OK[$mp]=$fstype
+  done <"$HYN_PROC/mounts"
+  return 0
+}
+
 disk_usage() {
   local force=${1:-0} now
   now=${EPOCHSECONDS:-0}
   ((force == 0 && DF_LAST > 0 && now - DF_LAST < 30)) && return 0
   DF_LAST=$now
   have df || return 1
-  MOUNTS=() MP_PCT=() MP_USED=() MP_SIZE=() MP_AVAIL=()
+  _disk_scan_mounts
+  local have_filter=$((${#_MP_OK[@]} > 0))
+  MOUNTS=() MP_PCT=() MP_USED=() MP_SIZE=() MP_AVAIL=() MP_FSTYPE=()
   local src size used avail pct mp
   while read -r src size used avail pct mp; do
     [[ $src == Filesystem || -z $mp ]] && continue
-    case $src in /dev/* | zfs* | *:/*) ;; *) continue ;; esac
+    if ((have_filter)); then
+      # /proc/mounts was readable, so trust it completely.
+      [[ -v _MP_OK[$mp] ]] || continue
+      MP_FSTYPE[$mp]=${_MP_OK[$mp]}
+    else
+      # No /proc/mounts (not Linux, or restricted): fall back to judging by the
+      # device path, which at least keeps tmpfs and overlays out.
+      case $src in
+        /dev/loop*) continue ;;
+        /dev/* | zfs* | *:/*) ;;
+        *) continue ;;
+      esac
+      case $mp in
+        /snap/* | /var/lib/snapd/*) continue ;;
+      esac
+    fi
     pct=${pct%\%}
     [[ $pct =~ ^[0-9]+$ ]] || continue
     MOUNTS+=("$mp")

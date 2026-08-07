@@ -278,6 +278,25 @@ render_help() {
 # ---------------------------------------------------------------------------
 # main loop
 # ---------------------------------------------------------------------------
+# Offer setup before the alternate screen is entered, so the prompts are plain
+# scrollable text and Ctrl-C leaves a normal terminal behind.
+maybe_onboard() {
+  cfg_on onboarding || return 0
+  [[ -t 0 && -t 1 ]] || return 0
+  is_first_run || return 0
+  source "$HYN_LIB/wizard.sh" 2>/dev/null || return 0
+  declare -F onboard_prompt >/dev/null || return 0
+  onboard_prompt
+  # Re-read whatever it wrote, so the first frame reflects the new answers.
+  cfg_load
+  color_detect
+  theme_load "${CFG[theme]}"
+  _GRAD=()
+  ui_init
+  panels_enabled
+  return 0
+}
+
 run_tui() {
   [[ -t 1 ]] || die "not a terminal -- use 'hyn snapshot' for scripts and cron"
   term_setup
@@ -842,8 +861,9 @@ cmd_help() {
     '  theme list | set <name> | current | preview <name>' \
     '  config show | get <k> | set <k> <v> | path | edit' \
     '  doctor                check the environment end to end' \
-    '  setup                 guided setup: config, timers, notifications (root)' \
-    '  wizard                re-run just the guided notification setup' \
+    '  onboard               full guided setup: mode, theme, alerts, reports' \
+    '  setup                 install config, secrets and the timers (root)' \
+    '  wizard                re-run just the notification setup' \
     '  uninstall             remove units and links (--purge drops data too)' \
     '  version | help' \
     '' \
@@ -870,10 +890,10 @@ main() {
   local cmd=${1:-}
   [[ -n $cmd ]] && shift || true
   case $cmd in
-    '' | dash | dashboard) run_tui ;;
-    net | network) VIEW=net; run_tui ;;
-    proc | top | ps) VIEW=proc; run_tui ;;
-    node | highway | hyn) VIEW=node; run_tui ;;
+    '' | dash | dashboard) maybe_onboard; run_tui ;;
+    net | network) VIEW=net; maybe_onboard; run_tui ;;
+    proc | top | ps) VIEW=proc; maybe_onboard; run_tui ;;
+    node | highway | hyn) VIEW=node; maybe_onboard; run_tui ;;
     snapshot | once) cmd_snapshot "$@" ;;
     speedtest | speed | st) cmd_speedtest "$@" ;;
     history | hist) cmd_history "$@" ;;
@@ -884,9 +904,11 @@ main() {
       source "$HYN_LIB/setup.sh" || die 'cannot load setup helpers'
       setup_run "$@" ;;
     wizard | configure)
-      source "$HYN_LIB/notify.sh" 2>/dev/null
       source "$HYN_LIB/wizard.sh" || die 'cannot load the setup wizard'
       wizard_run "$@" ;;
+    onboard | onboarding | firstrun)
+      source "$HYN_LIB/wizard.sh" || die 'cannot load the setup wizard'
+      onboard_run "$@" ;;
     alerts | alert) cmd_alerts "$@" ;;
     report) cmd_report "$@" ;;
     record) record_sample ;;

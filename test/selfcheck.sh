@@ -10,6 +10,12 @@
 #   bash test/selfcheck.sh
 #
 # No framework, no fixtures directory, no network. Exits non-zero on failure.
+#
+# Fixture files are written with printf, never heredocs. bash 5.3 routes both
+# heredocs and here-strings through a pipe, and macOS starts pipes at a 512-byte
+# buffer, so anything past roughly ten lines deadlocks before the receiving
+# command is even exec'd. That cost real debugging time three separate times;
+# keep printf.
 
 set -uo pipefail
 
@@ -87,44 +93,44 @@ EOF
 }
 write_netdev 1000000 1000 0 0 500000 500 0 0
 
-cat >"$FP/meminfo" <<'EOF'
-MemTotal:       16384000 kB
-MemFree:         1024000 kB
-MemAvailable:    8192000 kB
-Buffers:          512000 kB
-Cached:          4096000 kB
-SReclaimable:     256000 kB
-Shmem:            128000 kB
-Dirty:             12000 kB
-SwapTotal:       2048000 kB
-SwapFree:        1024000 kB
-Committed_AS:    9000000 kB
-EOF
+printf '%s\n' \
+  'MemTotal:       16384000 kB' \
+  'MemFree:         1024000 kB' \
+  'MemAvailable:    8192000 kB' \
+  'Buffers:          512000 kB' \
+  'Cached:          4096000 kB' \
+  'SReclaimable:     256000 kB' \
+  'Shmem:            128000 kB' \
+  'Dirty:             12000 kB' \
+  'SwapTotal:       2048000 kB' \
+  'SwapFree:        1024000 kB' \
+  'Committed_AS:    9000000 kB' \
+  > "$FP/meminfo"
 
 # Gateway 192.168.1.1 stored little-endian as 0101A8C0. Flags 0003 has
 # RTF_GATEWAY (0x2) set, which is what marks the real default route.
-cat >"$FP/net/route" <<'EOF'
-Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
-eth0	00000000	0101A8C0	0003	0	0	100	00000000	0	0	0
-eth0	0001A8C0	00000000	0001	0	0	0	00FFFFFF	0	0	0
-EOF
+printf '%s\n' \
+  'Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT' \
+  'eth0	00000000	0101A8C0	0003	0	0	100	00000000	0	0	0' \
+  'eth0	0001A8C0	00000000	0001	0	0	0	00FFFFFF	0	0	0' \
+  > "$FP/net/route"
 
-cat >"$FP/net/sockstat" <<'EOF'
-sockets: used 200
-TCP: inuse 5 orphan 0 tw 12 alloc 20 mem 3
-UDP: inuse 2 mem 1
-UDPLITE: inuse 0
-RAW: inuse 0
-FRAG: inuse 0 memory 0
-EOF
+printf '%s\n' \
+  'sockets: used 200' \
+  'TCP: inuse 5 orphan 0 tw 12 alloc 20 mem 3' \
+  'UDP: inuse 2 mem 1' \
+  'UDPLITE: inuse 0' \
+  'RAW: inuse 0' \
+  'FRAG: inuse 0 memory 0' \
+  > "$FP/net/sockstat"
 
 # st column is field 4. 0A=LISTEN on port 0x1F90 (8080), 01=ESTAB, 06=TIME_WAIT.
-cat >"$FP/net/tcp" <<'EOF'
-  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
-   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12345 1
-   1: 0100007F:C350 0100007F:1F90 01 00000000:00000000 00:00000000 00000000     0        0 12346 1
-   2: 0100007F:C351 0100007F:1F90 06 00000000:00000000 00:00000000 00000000     0        0 12347 1
-EOF
+printf '%s\n' \
+  '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode' \
+  '   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12345 1' \
+  '   1: 0100007F:C350 0100007F:1F90 01 00000000:00000000 00:00000000 00000000     0        0 12346 1' \
+  '   2: 0100007F:C351 0100007F:1F90 06 00000000:00000000 00:00000000 00000000     0        0 12347 1' \
+  > "$FP/net/tcp"
 
 write_snmp() {
   cat >"$FP/net/snmp" <<EOF
@@ -142,13 +148,13 @@ EOF
 }
 write_snmp 20000 100 0
 
-cat >"$FP/pressure/cpu" <<'EOF'
-some avg10=1.25 avg60=0.80 avg300=0.30 total=1234567
-EOF
-cat >"$FP/pressure/io" <<'EOF'
-some avg10=0.00 avg60=0.00 avg300=0.00 total=0
-full avg10=0.00 avg60=0.00 avg300=0.00 total=0
-EOF
+printf '%s\n' \
+  'some avg10=1.25 avg60=0.80 avg300=0.30 total=1234567' \
+  > "$FP/pressure/cpu"
+printf '%s\n' \
+  'some avg10=0.00 avg60=0.00 avg300=0.00 total=0' \
+  'full avg10=0.00 avg60=0.00 avg300=0.00 total=0' \
+  > "$FP/pressure/io"
 
 write_diskstats() {
   printf '   8       0 sda 1000 0 %s 500 800 0 %s 300 0 %s 800 0 0 0 0\n' "$1" "$2" "$3" >"$FP/diskstats"
@@ -318,13 +324,13 @@ theme_load hiway
 # ---------------------------------------------------------------------------
 section 'config parsing'
 # ---------------------------------------------------------------------------
-cat >"$HYN_ETC/config" <<'EOF'
-# a comment
-theme = gruvbox
-net_unit="bytes"     # trailing comment
-proc_rows=12
-bogus_key=whatever
-EOF
+printf '%s\n' \
+  '# a comment' \
+  'theme = gruvbox' \
+  'net_unit="bytes"     # trailing comment' \
+  'proc_rows=12' \
+  'bogus_key=whatever' \
+  > "$HYN_ETC/config"
 CFG_WARNINGS=()
 cfg_load
 eq 'config value'          'gruvbox' "${CFG[theme]}"
@@ -431,6 +437,42 @@ eq 'disk in list'    'sda'     "${DISKS[0]}"
 eq 'disk read B/s'   '2048000' "${DISK_RD[sda]}"
 eq 'disk write B/s'  '2048000' "${DISK_WR[sda]}"
 eq 'disk util pct'   '10'      "${DISK_UTIL[sda]}"
+
+# Mount filtering. A stock Ubuntu server mounts every snap as a read-only
+# squashfs loop at /snap/..., and squashfs is ALWAYS 100% full, so without
+# filtering the disk panel fills with them and every one fires a permanent,
+# uncleanable "disk critically full" alert.
+printf '%s\n' \
+  '/dev/vda2 / ext4 rw,relatime 0 0' \
+  '/dev/vda1 /boot/efi vfat rw,relatime 0 0' \
+  '/dev/vdb1 /var ext4 rw,relatime 0 0' \
+  '/dev/loop0 /snap/core22/1612 squashfs ro,nodev,relatime 0 0' \
+  '/dev/loop1 /snap/snapd/21759 squashfs ro,nodev,relatime 0 0' \
+  '/dev/loop2 /snap/lxd/29351 squashfs ro,nodev,relatime 0 0' \
+  'tmpfs /run tmpfs rw,nosuid,nodev 0 0' \
+  'overlay /var/lib/docker/overlay2/abc/merged overlay rw,relatime 0 0' \
+  'proc /proc proc rw,nosuid,nodev,noexec 0 0' \
+  '/dev/vdc1 /mnt/backup ext4 ro,relatime 0 0' \
+  '192.168.1.9:/export /mnt/nfs nfs4 rw,relatime 0 0' \
+  > "$FP/mounts"
+_disk_scan_mounts
+truthy 'root kept'            '[[ -v _MP_OK[/] ]]'
+truthy 'second ext4 kept'     '[[ -v _MP_OK[/var] ]]'
+truthy 'nfs kept'             '[[ -v _MP_OK[/mnt/nfs] ]]'
+falsy  'snap squashfs dropped'    '[[ -v _MP_OK[/snap/core22/1612] ]]'
+falsy  'snapd squashfs dropped'   '[[ -v _MP_OK[/snap/snapd/21759] ]]'
+falsy  'lxd squashfs dropped'     '[[ -v _MP_OK[/snap/lxd/29351] ]]'
+falsy  'tmpfs dropped'            '[[ -v _MP_OK[/run] ]]'
+falsy  'docker overlay dropped'   '[[ -v _MP_OK[/var/lib/docker/overlay2/abc/merged] ]]'
+falsy  'procfs dropped'           '[[ -v _MP_OK[/proc] ]]'
+falsy  'efi partition dropped'    '[[ -v _MP_OK[/boot/efi] ]]'
+# Read-only means it cannot fill up, so it is not worth alerting on.
+falsy  'read-only mount dropped'  '[[ -v _MP_OK[/mnt/backup] ]]'
+eq 'exactly three real mounts' '3' "${#_MP_OK[@]}"
+# /proc/mounts octal-escapes spaces; the key must match what df prints.
+printf '/dev/vdd1 /mnt/my\\040disk ext4 rw,relatime 0 0\n' >>"$FP/mounts"
+_disk_scan_mounts
+truthy 'escaped space decoded' '[[ -v _MP_OK["/mnt/my disk"] ]]'
 
 sys_sample
 eq 'uptime seconds' '123456' "$UPTIME_S"
@@ -1151,6 +1193,64 @@ RA_CRIT=0 RA_WARN=0
 R[disk_days]=3
 contains 'disk projection verdict' 'PLAN AHEAD' "$(_verdict)"
 R[disk_days]=0
+
+# ---------------------------------------------------------------------------
+section 'first-run onboarding'
+# ---------------------------------------------------------------------------
+# First run means no config AND no marker. Either signal alone gets it wrong:
+# a user who declined has no config either and must not be asked again, and
+# `sudo hyn setup` writes a config without ever touching the marker.
+ob_etc="$HYN_ETC/config"
+ob_marker=$(onboard_marker)
+rm -f "$ob_etc" "$ob_marker"
+truthy 'fresh install is a first run' 'is_first_run'
+
+printf 'theme=nord\n' >"$ob_etc"
+falsy 'existing config is not a first run' 'is_first_run'
+rm -f "$ob_etc"
+truthy 'first run again once config is gone' 'is_first_run'
+
+onboard_mark_done skipped
+truthy 'marker is written' '[[ -r $ob_marker ]]'
+falsy 'a remembered decline is not re-asked' 'is_first_run'
+contains 'marker records the outcome' 'skipped' "$(cat "$ob_marker")"
+onboard_mark_done completed
+contains 'marker updates the outcome' 'completed' "$(cat "$ob_marker")"
+rm -f "$ob_marker"
+
+# The onboarding prompt is opt-out via config.
+eq 'onboarding defaults on' 'on' "${CFG[onboarding]}"
+CFG[onboarding]=off
+falsy 'onboarding can be disabled' 'cfg_on onboarding'
+CFG[onboarding]=on
+truthy 'onboarding re-enabled' 'cfg_on onboarding'
+
+# The wizard file must load cleanly and expose both entry points: the full
+# first-run flow and the notifications-only re-run.
+source "$HYN_LIB/wizard.sh"
+truthy 'onboard_run exists'    'declare -F onboard_run >/dev/null'
+truthy 'onboard_prompt exists' 'declare -F onboard_prompt >/dev/null'
+truthy 'wizard_run exists'     'declare -F wizard_run >/dev/null'
+truthy 'detection helper exists' 'declare -F onboard_detect >/dev/null'
+# Non-interactive must be refused rather than hanging waiting for stdin.
+W_TTY=0
+falsy 'onboarding refuses a non-tty' 'onboard_run'
+falsy 'prompt refuses a non-tty'     'onboard_prompt'
+
+# Validators used by the prompts.
+truthy 'accepts a valid time'    '_v_hhmm 08:30'
+truthy 'accepts midnight'        '_v_hhmm 00:00'
+truthy 'accepts 23:59'           '_v_hhmm 23:59'
+falsy  'rejects hour 24'         '_v_hhmm 24:00'
+falsy  'rejects minute 60'       '_v_hhmm 12:60'
+falsy  'rejects a bare hour'     '_v_hhmm 8'
+truthy 'accepts a long topic'    '_v_topic hyn-abc123456'
+falsy  'rejects a short topic'   '_v_topic short'
+falsy  'rejects a topic with a slash' '_v_topic "abc/def12345"'
+truthy 'accepts an https url'    '_v_url https://example.com/ping'
+falsy  'rejects a non-url'       '_v_url notaurl'
+truthy 'accepts a hostname'      '_v_host smtp.gmail.com'
+falsy  'rejects a host with a space' '_v_host "bad host"'
 
 # ---------------------------------------------------------------------------
 printf '\n'

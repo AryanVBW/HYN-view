@@ -10,7 +10,7 @@
 # HYN_PROC / HYN_SYS exist so test/selfcheck.sh can point the readers at a
 # fixture tree and assert on known numbers. Never hardcode /proc below.
 
-HYN_VERSION="1.1.0"
+HYN_VERSION="1.2.0"
 HYN_AUTHOR='Vivek W (AryanVBW)'
 HYN_AUTHOR_URL='https://github.com/AryanVBW'
 HYN_COPYRIGHT="(c) 2026 Vivek W (AryanVBW)"
@@ -55,6 +55,11 @@ declare -A CFG=(
   [net_identity]=on
   [wan_iface]=auto
   [hide_iface]='lo,docker0,veth,br-,virbr,tap,dummy'
+  # Mount points to leave out of the disk panel and the disk alerts. Snap
+  # squashfs mounts are read-only and permanently 100% full, so they are already
+  # excluded by type; these are the paths that are real filesystems but not
+  # interesting (container layers, bind mounts of the same device).
+  [hide_mount]='/snap,/var/lib/snapd,/var/lib/docker,/var/lib/containers,/run,/dev,/sys,/proc,/boot/efi'
   # Order is priority: on a short terminal the panels at the end are the ones
   # that get dropped. net is always first and always drawn.
   [panels]='net,cpu,mem,node,proc,disk'
@@ -146,6 +151,9 @@ declare -A CFG=(
   # that breaks itself at 3am is worse than one that is a version behind.
   [auto_update]=check
   [update_check_hours]=12
+  # Offer the guided setup on the first interactive launch. Asked once; a
+  # decline is remembered.
+  [onboarding]=on
   [color_depth]=auto
   [ascii]=off
 )
@@ -583,6 +591,40 @@ state_dir() { state_dir_v; printf '%s' "$STATE_DIR"; }
 
 die() { printf 'hyn: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'hyn: %s\n' "$*" >&2; }
+
+# ---------------------------------------------------------------------------
+# first run
+# ---------------------------------------------------------------------------
+# True when nobody has configured this install yet. Two independent signals,
+# because either one alone gets it wrong:
+#
+#   * no config file anywhere -- but a user who declined onboarding has no config
+#     either, and must not be asked again on every launch;
+#   * no "onboarded" marker -- but `sudo hyn setup` writes a config without ever
+#     touching the marker, and that operator is plainly already set up.
+#
+# So: first run means no config AND no marker.
+onboard_marker() {
+  state_dir_v
+  printf '%s/onboarded' "$STATE_DIR"
+}
+
+is_first_run() {
+  [[ -r $HYN_ETC/config ]] && return 1
+  [[ -r ${XDG_CONFIG_HOME:-$HOME/.config}/hyn-view/config ]] && return 1
+  [[ -r $(onboard_marker) ]] && return 1
+  return 0
+}
+
+# Records that the question has been asked, whatever the answer was.
+onboard_mark_done() {
+  local f
+  f=$(onboard_marker)
+  state_dir_v
+  [[ -d $STATE_DIR ]] || mkdir -p "$STATE_DIR" 2>/dev/null || return 1
+  printf '%s\t%s\n' "${EPOCHSECONDS:-0}" "${1:-completed}" >"$f" 2>/dev/null
+  return 0
+}
 
 # ---------------------------------------------------------------------------
 # config writing

@@ -13,11 +13,42 @@ sudo hyn setup      # guided: notifications, alerts, daily report, timers
 hyn                 # dashboard
 ```
 
-`sudo hyn setup` asks the questions rather than leaving you to reverse-engineer a
-config file: where alerts should go, what should trigger them, when the daily
-report should arrive, and whether to watch for updates. It ends by sending a real
-test message, because a notification setup you have not seen arrive is not
-configured — it is hoped for.
+## First launch
+
+Run `hyn` on a fresh install and it offers a guided setup before it draws
+anything. Eight steps, about two minutes, and every question has a default that
+is right for a 24/7 relay node — holding Enter through the whole thing produces a
+good configuration.
+
+```
+Step 1 of 8  What we found          detected hardware, WAN link, filesystems, node
+Step 2 of 8  Display mode           best looking, or best performing
+Step 3 of 8  Theme                  all six drawn live in your terminal
+Step 4 of 8  Units and layout       bits or bytes, refresh rate, rows
+Step 5 of 8  Where alerts go        email (Resend recommended) or push
+Step 6 of 8  What counts as a problem
+Step 7 of 8  Daily report and speed tests
+Step 8 of 8  Outage detection and updates
+```
+
+It shows what it *detected* before asking for anything — being told "Ubuntu
+24.04, 8 cores, 31 GiB RAM, eth0 at 1 Gbps, Highway node v0.1.75 active" earns
+the right to ask for an API key. Nothing is written until you confirm a summary,
+so abandoning halfway leaves no trace. It ends by sending a real test message,
+because a notification setup you have not seen arrive is not configured — it is
+hoped for.
+
+Asked once. Declining is remembered, and the dashboard works fine without it
+(alerts and reports do not). Re-run any time:
+
+```
+hyn onboard               full guided setup again
+sudo hyn wizard           just the notification part
+sudo hyn setup            just the config and timers, no questions
+hyn config set <k> <v>    one setting, scriptable
+```
+
+Set `onboarding=off` to suppress the prompt entirely.
 
 ## Why it is not just another htop
 
@@ -294,6 +325,8 @@ Keys worth knowing:
 | `alert_repeat_hours` | `6` | reminder interval while still firing |
 | `report_at` | `08:00` | server local time |
 | `auto_update` | `check` | `off`, `check` or `install` |
+| `onboarding` | `on` | offer guided setup on first interactive launch |
+| `hide_mount` | `/snap,/var/lib/docker,…` | mount points kept out of the disk panel and alerts |
 
 Themes: `hiway` (default), `nord`, `gruvbox`, `dracula`, `solar`, `mono`. Drop a
 `.theme` file in `/etc/hyn-view/themes/` to add your own — they are 15 hex
@@ -303,6 +336,9 @@ colours, resolved at load into whatever the terminal supports (truecolor, 256,
 ## Requirements
 
 Ubuntu 22.04 or 24.04 (anything with Linux `/proc` and bash 4.3+ will work).
+Snap mounts are excluded automatically: they are read-only squashfs and therefore
+permanently 100% full, so a box with twenty snaps would otherwise show twenty
+filesystems and fire twenty disk-full alerts that could never clear.
 `curl` for speed tests and the update check; `ping` for latency, falling back to
 a TCP handshake when ICMP is filtered; `systemd` for unit tracking and the timer.
 `hyn doctor` reports which of these you have.
