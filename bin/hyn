@@ -357,6 +357,8 @@ cmd_snapshot() {
   sample_all
   sleep 1
   sample_all
+  sys_whoami
+  sys_sessions 1
   local iface=${NET_WAN:-none}
 
   if ((json)); then
@@ -364,6 +366,16 @@ cmd_snapshot() {
     st_history_read 1
     printf '{\n'
     printf '  "host": "%s",\n' "$HOSTNAME_S"
+    printf '  "running_as": "%s",\n' "$RUN_AS"
+    printf '  "sessions": ['
+    local si sfirst=1
+    for ((si = 0; si < ${#SESS_USER[@]}; si++)); do
+      ((sfirst)) || printf ', '
+      sfirst=0
+      printf '{"user": "%s", "tty": "%s", "from": "%s"}' \
+        "${SESS_USER[si]}" "${SESS_TTY[si]}" "${SESS_FROM[si]}"
+    done
+    printf '],\n'
     printf '  "kernel": "%s",\n' "$KERNEL"
     printf '  "uptime_s": %s,\n' "$UPTIME_S"
     printf '  "load": [%s, %s, %s],\n' "${LOAD1:-0}" "${LOAD5:-0}" "${LOAD15:-0}"
@@ -400,6 +412,15 @@ cmd_snapshot() {
   fi
 
   printf '%s  %s  %s\n' "$HOSTNAME_S" "$DISTRO" "$KERNEL"
+  printf 'user     running as %s (uid %s)\n' "$RUN_AS" "$RUN_UID"
+  if ((${#SESS_USER[@]} == 0)); then
+    printf 'sessions nobody logged in\n'
+  else
+    local si
+    for ((si = 0; si < ${#SESS_USER[@]}; si++)); do
+      printf 'session  %-14s %-10s from %s\n' "${SESS_USER[si]}" "${SESS_TTY[si]}" "${SESS_FROM[si]}"
+    done
+  fi
   printf 'uptime   %s   load %s %s %s\n' "$(fmt_dur "$UPTIME_S")" "${LOAD1:-?}" "${LOAD5:-?}" "${LOAD15:-?}"
   printf 'cpu      %s%%  usr %s sys %s io %s steal %s  (%s cores)\n' \
     "$CPU_PCT" "$CPU_USER" "$CPU_SYS" "$CPU_IOWAIT" "$CPU_STEAL" "$CPU_COUNT"

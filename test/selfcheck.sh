@@ -1233,6 +1233,86 @@ mv "$mf.saved" "$mf"
 report_aggregate 24
 
 # ---------------------------------------------------------------------------
+section 'accounts and access'
+# ---------------------------------------------------------------------------
+sys_whoami
+truthy 'running-as user resolved' '[[ -n $RUN_AS ]]'
+eq 'uid matches EUID' "${EUID:-0}" "$RUN_UID"
+# Resolution must fall through to NSS. A local account is in /etc/passwd, but an
+# LDAP/SSSD/AD account on a managed server is not, and neither is any account on
+# macOS (Directory Services). Without the getent fallback those all render as a
+# bare number.
+_UIDNAME=()
+_uid_name_v 0
+eq 'uid 0 resolves to root' 'root' "$UID_NAME"
+# sys_whoami must always produce a NAME, even where the uid is in neither
+# /etc/passwd nor NSS (macOS Directory Services, and some managed Linux setups).
+_UIDNAME=()
+sys_whoami
+falsy 'running-as is never a bare number' '[[ $RUN_AS == "${EUID:-0}" ]]'
+# $USER/$LOGNAME are not trusted: they survive into a sudo shell still naming the
+# original human while EUID is 0, which would misreport who the timer ran as.
+USER=someoneelse LOGNAME=someoneelse sys_whoami
+falsy 'stale USER is not believed' '[[ $RUN_AS == someoneelse ]]'
+SUDO_USER=realperson sys_whoami
+eq 'sudo invoker recorded separately' 'realperson' "$LOGIN_USER"
+unset SUDO_USER
+sys_whoami
+eq 'no invoker without sudo' '' "$LOGIN_USER"
+_UIDNAME=()
+_uid_name_v 4294967000
+eq 'an unknown uid falls back to the number' '4294967000' "$UID_NAME"
+truthy 'lookups are cached' '[[ -v _UIDNAME[4294967000] ]]'
+_UIDNAME=()
+# `who` output parsing: a remote session reports its host in parentheses, a local
+# console session reports none.
+_parse_who() {
+  SESS_USER=() SESS_TTY=() SESS_FROM=() SESS_WHEN=()
+  local u tty d t rest host
+  while read -r u tty d t rest; do
+    [[ -n $u && -n $tty ]] || continue
+    host='local'
+    if [[ $rest == *'('*')'* ]]; then
+      host=${rest#*\(}; host=${host%%\)*}
+    fi
+    [[ -z $host ]] && host='local'
+    SESS_USER+=("$u") SESS_TTY+=("$tty") SESS_FROM+=("$host") SESS_WHEN+=("$d $t")
+  done
+}
+printf '%s\n' \
+  'vivek    pts/0        2026-08-07 10:30 (192.168.1.5)' \
+  'root     pts/1        2026-08-07 11:02 (10.0.0.9)' \
+  'console  tty1         2026-08-06 22:11' \
+  > "$TMP/who.txt"
+_parse_who < "$TMP/who.txt"
+eq 'three sessions parsed'   '3'             "${#SESS_USER[@]}"
+eq 'first user'              'vivek'         "${SESS_USER[0]}"
+eq 'first tty'               'pts/0'         "${SESS_TTY[0]}"
+eq 'remote host extracted'   '192.168.1.5'   "${SESS_FROM[0]}"
+eq 'second remote host'      '10.0.0.9'      "${SESS_FROM[1]}"
+eq 'local session has no host' 'local'       "${SESS_FROM[2]}"
+contains 'login time captured' '2026-08-07 10:30' "${SESS_WHEN[0]}"
+
+# The report must name the account and list the sessions.
+RUN_AS=root RUN_UID=0 LOGIN_USER=vivek
+FAILED_LOGINS=1284 FAILED_LOGIN_TOP='203.0.113.9 (900x)'
+acc=$(report_access_text 24)
+contains 'access section names the account'  'ran as' "$acc"
+contains 'access section names root'          'root'       "$acc"
+contains 'access section names the invoker'   'vivek'      "$acc"
+contains 'access section lists a session'     'pts/0'      "$acc"
+contains 'access section shows the source'    '192.168.1.5' "$acc"
+contains 'access section counts rejections'   '1284'       "$acc"
+contains 'access section names worst offender' '203.0.113.9' "$acc"
+# A number that is never zero needs the caveat, or it reads as an incident.
+contains 'rejections are put in context' 'watch the trend' "$acc"
+SESS_USER=() SESS_TTY=() SESS_FROM=() SESS_WHEN=()
+acc=$(report_access_text 24)
+contains 'empty session list is explicit' 'nobody' "$acc"
+FAILED_LOGINS=0 FAILED_LOGIN_TOP=''
+_parse_who < "$TMP/who.txt"
+
+# ---------------------------------------------------------------------------
 section 'email rendering'
 # ---------------------------------------------------------------------------
 # Trend series feed the sparklines and must be downsampled, or 288 samples
@@ -1270,6 +1350,9 @@ contains 'email has a bar'              'border-radius:4px' "$h"
 contains 'email has the alerts section' 'Alerts' "$h"
 contains 'email has connection detail'  'Connection' "$h"
 contains 'email credits the author'     'Vivek W (AryanVBW)' "$h"
+contains 'email has the access section' 'Access' "$h"
+contains 'email names the account'      'Report ran as' "$h"
+contains 'email lists the session user' 'vivek' "$h"
 # Escaping still applies to every interpolated value.
 HOSTNAME_S='evil<script>alert(1)</script>'
 h=$(report_html 24)
@@ -1286,6 +1369,11 @@ contains 'alert email has a severity pill' 'CRITICAL' "$ah"
 contains 'alert email has resource bars'   'Resources' "$ah"
 contains 'alert email explains silencing'  'silence' "$ah"
 contains 'alert email credits the author'  'AryanVBW' "$ah"
+contains 'alert email names the account'   'Running as' "$ah"
+contains 'alert email lists sessions'      'Session' "$ah"
+# A session from an address the operator does not recognise is a security signal,
+# so the source must survive into the alert, not just the report.
+contains 'alert email shows session source' '192.168.1.5' "$ah"
 falsy   'alert email has no style block'   '[[ $ah == *"<style"* ]]'
 _reset_alerts
 

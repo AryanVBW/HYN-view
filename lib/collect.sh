@@ -402,10 +402,18 @@ _uid_name_v() {
   local uid=$1 u x id
   if [[ -v _UIDNAME[$uid] ]]; then UID_NAME=${_UIDNAME[$uid]}; return 0; fi
   UID_NAME=$uid
-  # /etc/passwd directly: `id -nu` would be a fork per distinct uid, per tick.
+  # /etc/passwd directly first: `id -nu` would be a fork per distinct uid, per
+  # tick, and the file covers every local account.
   while IFS=: read -r u x id _; do
     [[ $id == "$uid" ]] && { UID_NAME=$u; break; }
   done </etc/passwd 2>/dev/null
+  # Still unresolved means the account is not local: LDAP, SSSD, AD or macOS
+  # Directory Services. getent goes through NSS and finds those. One fork, cached
+  # for the life of the process, and only for uids the file did not answer.
+  if [[ $UID_NAME == "$uid" ]] && have getent; then
+    local line
+    line=$(getent passwd "$uid" 2>/dev/null) && [[ -n $line ]] && UID_NAME=${line%%:*}
+  fi
   _UIDNAME[$uid]=$UID_NAME
   return 0
 }
@@ -555,5 +563,91 @@ sys_failed_units() {
     [[ $unit == *.service || $unit == *.socket || $unit == *.timer || $unit == *.mount ]] || continue
     FAILED_UNITS+=("$unit")
   done < <(systemctl list-units --state=failed --no-legend --plain --no-pager 2>/dev/null)
+  return 0
+}
+
+
+# ---------------------------------------------------------------------------
+# accounts and access
+# ---------------------------------------------------------------------------
+# Who the tool is running as, and who is logged into the box. On a server that
+# runs unattended, "an ssh session from an address I do not recognise" is a more
+# useful line in a report than most performance numbers.
+RUN_AS='' RUN_UID='' LOGIN_USER=''
+declare -a SESS_USER=() SESS_TTY=() SESS_FROM=() SESS_WHEN=()
+SESS_LAST=0
+FAILED_LOGINS=0 FAILED_LOGIN_TOP=''
+
+# Resolved from /etc/passwd via the cache proc_sample already uses, so this costs
+# no fork at all.
+sys_whoami() {
+  RUN_UID=${EUID:-0}
+  _uid_name_v "$RUN_UID"
+  RUN_AS=$UID_NAME
+  # If neither /etc/passwd nor NSS resolved it, ask the kernel about the current
+  # process specifically. Deliberately `id -un` and not $USER or $LOGNAME: those
+  # can survive into a sudo shell still naming the original human while EUID is
+  # 0, which would make the report claim it ran as someone it did not.
+  if [[ $RUN_AS == "$RUN_UID" ]] && have id; then
+    local n
+    n=$(id -un 2>/dev/null) && [[ -n $n ]] && RUN_AS=$n
+  fi
+  # SUDO_USER is the right way to name the human, and it is unambiguous: it only
+  # exists because sudo set it.
+  LOGIN_USER=${SUDO_USER:-}
+  return 0
+}
+
+# Active login sessions. `who` reads utmp, is POSIX, and gives the remote host in
+# one fork -- loginctl would need a fork per session, and systemd's own session
+# files carry a "do not parse" warning.
+sys_sessions() {
+  local force=${1:-0} now=${EPOCHSECONDS:-0}
+  ((force == 0 && SESS_LAST > 0 && now - SESS_LAST < 60)) && return 0
+  SESS_LAST=$now
+  SESS_USER=() SESS_TTY=() SESS_FROM=() SESS_WHEN=()
+  have who || return 1
+  local u tty d t rest host
+  while read -r u tty d t rest; do
+    [[ -n $u && -n $tty ]] || continue
+    # A remote host is reported in parentheses at the end of the line; a local
+    # console session has none.
+    host='local'
+    if [[ $rest == *'('*')'* ]]; then
+      host=${rest#*\(}
+      host=${host%%\)*}
+    fi
+    [[ -z $host ]] && host='local'
+    SESS_USER+=("$u") SESS_TTY+=("$tty") SESS_FROM+=("$host") SESS_WHEN+=("$d $t")
+  done < <(who 2>/dev/null)
+  return 0
+}
+
+# Rejected authentication attempts in the window. On an internet-facing box this
+# is never zero, so the number only means something as a trend -- a jump from
+# hundreds to tens of thousands is the signal.
+sys_failed_logins() {
+  local hours=${1:-24}
+  FAILED_LOGINS=0 FAILED_LOGIN_TOP=''
+  have journalctl || return 1
+  local line ip
+  declare -A tally=()
+  while IFS= read -r line; do
+    case $line in
+      *'Failed password'* | *'Invalid user'* | *'authentication failure'* | *'Failed publickey'*)
+        ((FAILED_LOGINS++))
+        # "from 1.2.3.4 port 5678" -- pull the address to name the worst offender.
+        if [[ $line == *' from '* ]]; then
+          ip=${line#* from }
+          ip=${ip%% *}
+          [[ -n $ip ]] && ((tally[$ip]++))
+        fi
+        ;;
+    esac
+  done < <(journalctl -u ssh -u sshd --since "-${hours}h" --no-pager -o cat 2>/dev/null)
+  local k best=0
+  for k in "${!tally[@]}"; do
+    ((tally[$k] > best)) && { best=${tally[$k]}; FAILED_LOGIN_TOP="$k (${tally[$k]}x)"; }
+  done
   return 0
 }

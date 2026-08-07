@@ -140,6 +140,14 @@ is critical, so a box that is up but broken also trips it.
 
 ## Daily report
 
+Every message — alert or report — names the account it ran as, the human who set
+it up if it was via sudo, and who is logged into the box right now with their
+source address and login time. On a server that runs unattended, "an ssh session
+from an address I do not recognise" is a more useful line than most performance
+numbers. The report also counts rejected SSH authentications for the window,
+labelled as a trend rather than an incident, because on an internet-facing host
+that number is never zero.
+
 One message a day. Performance with averages, peaks and minutes spent busy;
 storage with the 24h change and a projected fill date; network totals, peak
 rates, retransmit share and latency; every LAN and WAN interface with its type,

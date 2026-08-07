@@ -1,6 +1,6 @@
 {
   "name": "hyn-view",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Network-first, ultra-low-overhead terminal system monitor for Ubuntu Server. Pure bash, zero runtime dependencies, themeable, with email/push alerting, daily reports, scheduled speed tests and read-only Highway (hw-os) node tracking.",
   "bin": {
     "hyn": "bin/hyn",

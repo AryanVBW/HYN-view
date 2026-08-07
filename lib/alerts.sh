@@ -158,6 +158,8 @@ alerts_collect() {
   cfg_on highway_track && hw_sample 1000
   st_history_read 1
   net_retrans_permille
+  sys_whoami
+  sys_sessions 1
   return 0
 }
 
@@ -479,6 +481,16 @@ alerts_body() {
 # The numbers someone will immediately want after reading the alert, so they do
 # not have to ssh in to get context.
 alerts_context() {
+  printf 'host     %s   running as %s (uid %s)\n' "$HOSTNAME_S" "${RUN_AS:-?}" "${RUN_UID:-?}"
+  if ((${#SESS_USER[@]} > 0)); then
+    local si out=''
+    for ((si = 0; si < ${#SESS_USER[@]} && si < 5; si++)); do
+      out+="${out:+, }${SESS_USER[si]}@${SESS_FROM[si]}"
+    done
+    printf 'logged in %s\n' "$out"
+  else
+    printf 'logged in nobody\n'
+  fi
   fmt_size_v "$MEM_USED"; local mu=$FMT_OUT
   fmt_size_v "$MEM_TOTAL"
   printf 'cpu      %s%%  (usr %s sys %s io %s steal %s)  load %s %s %s\n' \
@@ -625,6 +637,23 @@ alerts_html() {
       e_bar "$mp" "${MP_PCT[$mp]:-0}" "$FMT_OUT free"
     done
     printf '</td></tr></table>'
+
+    e_section 'Access'
+    e_kv_open
+    local ranas="${RUN_AS:-?} (uid ${RUN_UID:-?})"
+    [[ -n ${LOGIN_USER:-} && $LOGIN_USER != "${RUN_AS:-}" ]] && ranas+=" · invoked by $LOGIN_USER"
+    e_kv 'Running as' "$ranas"
+    if ((${#SESS_USER[@]} == 0)); then
+      e_kv 'Logged in now' 'nobody'
+    else
+      local si
+      for ((si = 0; si < ${#SESS_USER[@]} && si < 6; si++)); do
+        local scol=$E_INK
+        [[ ${SESS_FROM[si]} == local ]] && scol=$E_MUTED
+        e_kv "Session ${SESS_TTY[si]}" "${SESS_USER[si]} from ${SESS_FROM[si]} since ${SESS_WHEN[si]}" "$scol"
+      done
+    fi
+    e_kv_close
 
     e_section 'Network'
     net_identity
