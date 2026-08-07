@@ -294,6 +294,20 @@ bar_v 0 10 ''
 vlen "$BAR_OUT"; eq 'bar width at 0' '10' "$VLEN"
 bar_v 100 10 ''
 vlen "$BAR_OUT"; eq 'bar width at 100' '10' "$VLEN"
+# The eighth blocks come in two axes and picking the wrong one is visible. A
+# horizontal bar's partial cell must come from the LEFT ramp (U+258F..U+2589,
+# growing rightward); the lower ramp (U+2581..U+2587) renders a squat mark on the
+# baseline that reads as a glitch rather than as sub-cell precision.
+bar_v 47 10 ''
+truthy 'bar partial cell is a left block' '[[ $BAR_OUT == *$'"'"'\u258b'"'"'* ]]'
+falsy  'bar partial cell is not a lower block' '[[ $BAR_OUT == *$'"'"'\u2585'"'"'* ]]'
+# ...and the sparkline must keep using the lower ramp, or columns grow sideways.
+declare -a SP2=(4)
+sparkline_v SP2 1 8 ''
+truthy 'sparkline column is a lower block' '[[ $SPARK_OUT == *$'"'"'\u2584'"'"'* ]]'
+truthy 'the two ramps are distinct' '[[ ${GLYPH_BLOCK[4]} != "${GLYPH_LBLOCK[4]}" ]]'
+eq 'both ramps share the full block' "${GLYPH_BLOCK[8]}" "${GLYPH_LBLOCK[8]}"
+eq 'both ramps have 9 steps' '9' "${#GLYPH_LBLOCK[@]}"
 declare -a H=(0 50 100)
 heat_strip_v H 3
 vlen "$HEAT_OUT"; eq 'heat strip width' '3' "$VLEN"

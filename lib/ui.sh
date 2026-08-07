@@ -37,13 +37,14 @@ ui_locale() {
   return 0
 }
 
-declare -a BRAILLE=() GLYPH_BLOCK=()
+declare -a BRAILLE=() GLYPH_BLOCK=() GLYPH_LBLOCK=()
 G_HLINE='' G_VLINE='' G_TL='' G_TR='' G_BL='' G_BR='' G_UP='' G_DOWN='' G_DOT='' G_ELL=''
 
 glyphs_init() {
   local i n b
   if cfg_on ascii; then
     GLYPH_BLOCK=(' ' '.' '.' ':' ':' '|' '|' '#' '#')
+    GLYPH_LBLOCK=(' ' '.' '.' ':' ':' '|' '|' '#' '#')
     G_HLINE='-' G_VLINE='|' G_TL='+' G_TR='+' G_BL='+' G_BR='+'
     G_UP='v' G_DOWN='^' G_DOT='*' G_ELL='~'
     # Still fill 256 entries so braille_plot can index blindly; density buckets
@@ -62,7 +63,13 @@ glyphs_init() {
     done
     return 0
   fi
+  # Two ramps, because the eighth blocks come in two axes and using the wrong one
+  # is visible: GLYPH_BLOCK grows upward from the baseline (for sparkline columns
+  # and heat cells), GLYPH_LBLOCK grows rightward from the left edge (for
+  # horizontal bars). A horizontal bar ending in a lower-eighth block renders as a
+  # squat mark sitting on the baseline -- it reads as a glitch, not as precision.
   GLYPH_BLOCK=(' ' $'\u2581' $'\u2582' $'\u2583' $'\u2584' $'\u2585' $'\u2586' $'\u2587' $'\u2588')
+  GLYPH_LBLOCK=(' ' $'\u258f' $'\u258e' $'\u258d' $'\u258c' $'\u258b' $'\u258a' $'\u2589' $'\u2588')
   G_HLINE=$'\u2500' G_VLINE=$'\u2502' G_TL=$'\u256d' G_TR=$'\u256e' G_BL=$'\u2570' G_BR=$'\u256f'
   G_UP=$'\u25b4' G_DOWN=$'\u25be' G_DOT=$'\u25cf' G_ELL=$'\u2026'
   BRAILLE=()
@@ -270,10 +277,10 @@ bar_v() {
   eighths=$((p * w * 8 / 100))
   full=$((eighths / 8)); part=$((eighths % 8))
   BAR_OUT=$col
-  if ((full > 0)); then rep_v "${GLYPH_BLOCK[8]}" "$full"; BAR_OUT+=$REP_OUT; fi
-  if ((part > 0 && full < w)); then BAR_OUT+=${GLYPH_BLOCK[part]}; ((full++)); fi
+  if ((full > 0)); then rep_v "${GLYPH_LBLOCK[8]}" "$full"; BAR_OUT+=$REP_OUT; fi
+  if ((part > 0 && full < w)); then BAR_OUT+=${GLYPH_LBLOCK[part]}; ((full++)); fi
   if ((full < w)); then
-    rep_v "${GLYPH_BLOCK[0]}" $((w - full))
+    rep_v "${GLYPH_LBLOCK[0]}" $((w - full))
     BAR_OUT+="${C[dim]}$REP_OUT"
   fi
   BAR_OUT+=${C[reset]}
