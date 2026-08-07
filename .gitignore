@@ -1,5 +1,6 @@
 node_modules/
 *.tgz
+*.tgz.sha256
 *.tmp
 *.bak
 .DS_Store
