@@ -124,6 +124,33 @@ alerts_log_new() {
 # ---------------------------------------------------------------------------
 declare -A R=()
 R_ROWS=0
+# Downsampled series for the email sparklines. Kept short on purpose: 288 samples
+# is 288 characters, which wraps on a phone and reads as noise. 48 buckets over
+# 24h is one point per half hour, which is enough to see shape.
+declare -a RH_CPU=() RH_MEM=() RH_DISK=() RH_RX=() RH_TX=()
+RH_BUCKETS=48
+
+# _downsample <src-array> <dest-array> -- averages the source into RH_BUCKETS
+# buckets, preserving order.
+_downsample() {
+  local -n _src=$1
+  local -n _dst=$2
+  local n=${#_src[@]} i b sum cnt
+  _dst=()
+  ((n == 0)) && return 0
+  if ((n <= RH_BUCKETS)); then
+    _dst=("${_src[@]}")
+    return 0
+  fi
+  for ((b = 0; b < RH_BUCKETS; b++)); do
+    sum=0 cnt=0
+    for ((i = b * n / RH_BUCKETS; i < (b + 1) * n / RH_BUCKETS; i++)); do
+      ((sum += ${_src[i]:-0})); ((cnt++))
+    done
+    ((cnt > 0)) && _dst+=($((sum / cnt))) || _dst+=(0)
+  done
+  return 0
+}
 
 # Aggregate the last <hours> of samples. All integer maths; averages are
 # accumulated as sums and divided once at the end.
@@ -144,6 +171,7 @@ report_aggregate() {
   local hw_up=0 hw_rss_max=0 hw_cpu_s=0 hw_rest_max=0 hw_rest_first=-1
   local procs_max=0 first_ts=0 last_ts=0
   local cpu_busy_n=0 mem_busy_n=0
+  local -a s_cpu=() s_mem=() s_disk=() s_rx=() s_tx=()
 
   local busy_cpu=${CFG[report_busy_cpu_pct]:-80}
   local busy_mem=${CFG[report_busy_mem_pct]:-85}
@@ -191,6 +219,8 @@ report_aggregate() {
     ((hw_rest_first < 0)) && hw_rest_first=$hwrest
     ((hwrest > hw_rest_max)) && hw_rest_max=$hwrest
     procs=${procs:-0}; ((procs > procs_max)) && procs_max=$procs
+    s_cpu+=("$cpu"); s_mem+=("$mem"); s_disk+=("$diskmax")
+    s_rx+=("$rxb"); s_tx+=("$txb")
   done <"$f"
 
   ((n == 0)) && return 1
@@ -225,6 +255,11 @@ report_aggregate() {
   [[ $ival =~ ^[0-9]+$ ]] || ival=5
   R[cpu_busy_min]=$((cpu_busy_n * ival))
   R[mem_busy_min]=$((mem_busy_n * ival))
+  _downsample s_cpu RH_CPU
+  _downsample s_mem RH_MEM
+  _downsample s_disk RH_DISK
+  _downsample s_rx RH_RX
+  _downsample s_tx RH_TX
 
   # Days until the largest filesystem fills, from the observed trend. Only
   # meaningful when it is actually growing.
@@ -286,16 +321,42 @@ report_speed() {
 # ---------------------------------------------------------------------------
 # rendering
 # ---------------------------------------------------------------------------
+# Plain-text sparkline for the text report. Same glyphs as the dashboard, so the
+# email and the terminal look like the same tool.
+_t_spark() {
+  local -n _ta=$1
+  local label=$2 n=${#_ta[@]} i max=1 v out=''
+  ((n == 0)) && return 0
+  for v in "${_ta[@]}"; do [[ $v =~ ^[0-9]+$ ]] && ((v > max)) && max=$v; done
+  local -a g=(' ' $'\u2581' $'\u2582' $'\u2583' $'\u2584' $'\u2585' $'\u2586' $'\u2587' $'\u2588')
+  for ((i = 0; i < n; i++)); do
+    v=${_ta[i]:-0}
+    [[ $v =~ ^[0-9]+$ ]] || v=0
+    local sx=$((v * 8 / max))
+    ((sx > 8)) && sx=8
+    out+=${g[sx]}
+  done
+  printf '%s%s\n' "$label" "$out"
+  return 0
+}
 _verdict() {
   # One line an operator can act on, at the top, before any numbers.
+  #
+  # Every R lookup is defaulted into a local first. This function runs even when
+  # report_aggregate found no samples at all -- which is the state of every fresh
+  # install's first report -- so R may be entirely empty. Note also that bash
+  # expands BOTH operands of `((a && b))` before evaluating, so `&&` does not
+  # protect an undefaulted second reference; that is the bug this shape fixes.
+  local days=${R[disk_days]:-0} hwup=${R[hw_up_pct]:-100}
   if ((RA_CRIT > 0)); then printf 'ATTENTION — %d critical alert(s) in the last 24h' "$RA_CRIT"; return; fi
-  if cfg_on highway_track && ((HW_PRESENT)) && [[ ${R[hw_up_pct]:-100} -lt 99 ]]; then
-    printf 'DEGRADED — Highway was active for only %s%% of the day' "${R[hw_up_pct]}"; return
+  if cfg_on highway_track && ((HW_PRESENT)) && ((hwup < 99)); then
+    printf 'DEGRADED — Highway was active for only %s%% of the day' "$hwup"; return
   fi
-  if ((${R[disk_days]:-0} > 0 && ${R[disk_days]} < 14)); then
-    printf 'PLAN AHEAD — largest filesystem fills in about %s days' "${R[disk_days]}"; return
+  if ((days > 0 && days < 14)); then
+    printf 'PLAN AHEAD — largest filesystem fills in about %s days' "$days"; return
   fi
   if ((RA_WARN > 0)); then printf 'MOSTLY HEALTHY — %d warning(s) in the last 24h' "$RA_WARN"; return; fi
+  if ((R_ROWS == 0)); then printf 'NO HISTORY YET — nothing recorded, so there is nothing to compare against'; return; fi
   printf 'HEALTHY — no alerts in the last 24h'
 }
 
@@ -332,6 +393,8 @@ report_text() {
         "${R[mem_avg]}" "${R[mem_max]}" "${R[mem_busy_min]}" "${CFG[report_busy_mem_pct]:-85}"
       printf '  swap             peak %s%%\n' "${R[swap_max]}"
       printf '  processes        peak %s\n' "${R[procs_max]}"
+      _t_spark RH_CPU '  cpu trend        '
+      _t_spark RH_MEM '  memory trend     '
       printf '\n'
 
       printf 'STORAGE\n'
@@ -364,6 +427,8 @@ report_text() {
           "$(fmt_fixed "${R[lat_avg]}" 1000 1)" "$(fmt_fixed "${R[lat_max]}" 1000 1)"
       fi
       ((${R[ct_max]} > 0)) && printf '  conntrack peak   %s%%\n' "${R[ct_max]}"
+      _t_spark RH_RX '  download trend   '
+      _t_spark RH_TX '  upload trend     '
       printf '\n'
     fi
 
@@ -507,100 +572,247 @@ _hrow() {
 
 report_html() {
   local hours=${1:-24}
-  local verdict accent='#15803d'
+  local verdict sev=info
   verdict=$(_verdict)
   case $verdict in
-    ATTENTION*) accent='#b91c1c' ;;
-    DEGRADED*) accent='#b45309' ;;
-    'PLAN AHEAD'*) accent='#b45309' ;;
-    MOSTLY*) accent='#a16207' ;;
+    ATTENTION*) sev=crit ;;
+    DEGRADED* | 'PLAN AHEAD'*) sev=warn ;;
+    MOSTLY*) sev=warn ;;
+    HEALTHY*) sev=ok ;;
   esac
+  report_alerts "$hours"
+  local have_speed=0
+  report_speed "$hours" && have_speed=1
+
   {
-    printf '<div style="font:14px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111;max-width:720px">'
-    printf '<div style="font-size:13px;color:#888;letter-spacing:.08em;text-transform:uppercase">Daily report</div>'
-    printf '<div style="font-size:22px;font-weight:600;margin:2px 0 2px">%s</div>' "$(html_escape "$HOSTNAME_S")"
-    printf '<div style="color:#777">%(%A %d %B %Y)T</div>' -1
-    printf '<div style="margin:18px 0;padding:12px 14px;border-left:4px solid %s;background:#f8f9fa;font-weight:600">%s</div>' \
-      "$accent" "$(html_escape "$verdict")"
+    # Inbox snippet: the single most useful sentence, not scraped boilerplate.
+    local pre
+    if ((${#RA_TS[@]} > 0)); then
+      pre="${verdict#* — } · ${#RA_TS[@]} alert(s) · cpu ${R[cpu_avg]:-0}% avg, disk ${R[disk_now]:-0}%"
+    else
+      pre="${verdict#* — } · cpu ${R[cpu_avg]:-0}% avg, mem ${R[mem_avg]:-0}% avg, disk ${R[disk_now]:-0}%"
+    fi
+    e_preheader "$pre"
+    e_open
+    printf -v _d '%(%A %d %B %Y)T' -1
+    e_header "$HOSTNAME_S" "Daily report · $_d" "$verdict" "$sev"
+
+    # ---- headline numbers -------------------------------------------------
+    if ((R_ROWS > 0)); then
+      local cpucol memcol dskcol
+      cpucol=$(e_level "${R[cpu_max]:-0}")
+      memcol=$(e_level "${R[mem_max]:-0}")
+      dskcol=$(e_level "${R[disk_now]:-0}")
+      e_kpi_open
+      e_kpi 'CPU avg' "${R[cpu_avg]:-0}%" "peak ${R[cpu_max]:-0}%" "$cpucol"
+      e_kpi 'Memory avg' "${R[mem_avg]:-0}%" "peak ${R[mem_max]:-0}%" "$memcol"
+      e_kpi 'Disk' "${R[disk_now]:-0}%" "$(printf '%+d pts / %sh' "${R[disk_delta]:-0}" "$hours")" "$dskcol"
+      fmt_size_v $((${R[rx_bytes]:-0} + ${R[tx_bytes]:-0}))
+      e_kpi 'Transferred' "$FMT_OUT" "in ${hours}h" "$E_ACCENT"
+      e_kpi_close
+    fi
+
+    # ---- alerts first: it is the reason to read the rest ------------------
+    e_section "Alerts · last ${hours}h"
+    if ((${#RA_TS[@]} == 0)); then
+      printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:0 26px">'
+      printf '<div style="font-size:13px;color:%s">Nothing fired. <span style="color:%s">All clear.</span></div>' \
+        "$E_MUTED" "$E_OK"
+      printf '</td></tr></table>'
+    else
+      printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:0 26px">'
+      printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0" style="font-size:13px">'
+      local i
+      for ((i = 0; i < ${#RA_TS[@]} && i < 20; i++)); do
+        printf '<tr><td style="padding:5px 10px 5px 0;color:%s;white-space:nowrap;vertical-align:top;font-family:%s;font-size:12px">%(%H:%M)T</td>' \
+          "$E_MUTED" "$E_MONO" "${RA_TS[i]}"
+        printf '<td style="padding:5px 10px 5px 0;vertical-align:top;white-space:nowrap">%s</td>' "$(e_pill "${RA_SEV[i]}")"
+        printf '<td style="padding:5px 0;color:%s;vertical-align:top">%s</td></tr>' "$E_INK" "$(html_escape "${RA_MSG[i]}")"
+      done
+      printf '</table>'
+      ((${#RA_TS[@]} > 20)) && printf '<div style="font-size:12px;color:%s;padding-top:6px">and %s more</div>' \
+        "$E_MUTED" $((${#RA_TS[@]} - 20))
+      printf '</td></tr></table>'
+    fi
 
     if ((R_ROWS > 0)); then
-      printf '<div style="font-weight:600;margin:22px 0 8px">Performance</div><table style="border-collapse:collapse;width:100%%">'
-      _hrow 'CPU' "avg ${R[cpu_avg]}%, peak ${R[cpu_max]}%, ${R[cpu_busy_min]} min busy"
-      _hrow 'CPU steal' "avg ${R[steal_avg]}%, peak ${R[steal_max]}%"
-      _hrow 'iowait' "avg ${R[io_avg]}%, peak ${R[io_max]}%"
-      _hrow 'Load' "avg $(fmt_fixed "${R[load_avg]}" 1000 2), peak $(fmt_fixed "${R[load_max]}" 1000 2) over $CPU_COUNT cores"
-      _hrow 'Memory' "avg ${R[mem_avg]}%, peak ${R[mem_max]}%, ${R[mem_busy_min]} min high"
-      _hrow 'Swap' "peak ${R[swap_max]}%"
-      printf '</table>'
+      # ---- performance ----------------------------------------------------
+      e_section 'Performance'
+      printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:0 26px">'
+      e_bar 'CPU (peak)' "${R[cpu_max]:-0}" "avg ${R[cpu_avg]:-0}%"
+      e_bar 'Memory (peak)' "${R[mem_max]:-0}" "avg ${R[mem_avg]:-0}%"
+      ((${R[swap_max]:-0} > 0)) && e_bar 'Swap (peak)' "${R[swap_max]}" "${R[swap_max]}%"
+      printf '</td></tr></table>'
+      e_kv_open
+      e_kv 'Busy time' "${R[cpu_busy_min]:-0} min above ${CFG[report_busy_cpu_pct]:-80}% cpu, ${R[mem_busy_min]:-0} min above ${CFG[report_busy_mem_pct]:-85}% memory"
+      e_kv 'Load average' "avg $(fmt_fixed "${R[load_avg]:-0}" 1000 2), peak $(fmt_fixed "${R[load_max]:-0}" 1000 2) over $CPU_COUNT cores"
+      # steal is the one number here an operator can act on, by changing provider
+      if ((${R[steal_max]:-0} >= 10)); then
+        e_kv 'CPU steal' "avg ${R[steal_avg]}%, peak ${R[steal_max]}% — the host is oversold" "$E_WARN"
+      else
+        e_kv 'CPU steal' "avg ${R[steal_avg]:-0}%, peak ${R[steal_max]:-0}%"
+      fi
+      e_kv 'iowait' "avg ${R[io_avg]:-0}%, peak ${R[io_max]:-0}%"
+      e_kv 'Processes' "peak ${R[procs_max]:-0}"
+      e_spark RH_CPU 'CPU trend' "$E_ACCENT"
+      e_spark RH_MEM 'Memory trend' "$E_ACCENT"
+      e_kv_close
 
-      printf '<div style="font-weight:600;margin:22px 0 8px">Storage</div><table style="border-collapse:collapse;width:100%%">'
+      # ---- storage --------------------------------------------------------
+      e_section 'Storage'
+      printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:0 26px">'
       local mp
       for mp in "${MOUNTS[@]}"; do
-        _hrow "$mp" "${MP_PCT[$mp]}% — $(fmt_size "${MP_AVAIL[$mp]:-0}") free of $(fmt_size "${MP_SIZE[$mp]:-0}")"
+        fmt_size_v "${MP_AVAIL[$mp]:-0}"
+        e_bar "$mp" "${MP_PCT[$mp]:-0}" "$FMT_OUT free"
       done
-      ((${R[disk_delta]} != 0)) && _hrow '24h change' "$(printf '%+d' "${R[disk_delta]}") points"
-      ((${R[disk_days]:-0} > 0)) && _hrow 'Projection' "full in about ${R[disk_days]} days"
-      printf '</table>'
-
-      printf '<div style="font-weight:600;margin:22px 0 8px">Network</div><table style="border-collapse:collapse;width:100%%">'
-      _hrow 'Interface' "${NET_WAN:-none}"
-      _hrow 'Transferred' "$(fmt_size "${R[rx_bytes]}") down / $(fmt_size "${R[tx_bytes]}") up"
-      _hrow 'Peak rate' "$(fmt_rate "${R[rx_peak]}") down / $(fmt_rate "${R[tx_peak]}") up"
-      _hrow 'Retransmits' "avg $(fmt_fixed "${R[retrans_avg]}" 10 2)%, peak $(fmt_fixed "${R[retrans_max]}" 10 2)%"
-      ((${R[lat_avg]} > 0)) && _hrow 'Latency' "avg $(fmt_fixed "${R[lat_avg]}" 1000 1)ms, peak $(fmt_fixed "${R[lat_max]}" 1000 1)ms"
-      printf '</table>'
-    fi
-
-    report_connection_html
-
-    if report_speed "$hours"; then
-      printf '<div style="font-weight:600;margin:22px 0 8px">Throughput tests</div><table style="border-collapse:collapse;width:100%%">'
-      _hrow 'Tests run' "${S[n]}"
-      _hrow 'Download' "avg $(fmt_rate "${S[down_avg]}"), worst $(fmt_rate "${S[down_min]}"), best $(fmt_rate "${S[down_max]}")"
-      _hrow 'Upload' "avg $(fmt_rate "${S[up_avg]}"), best $(fmt_rate "${S[up_max]}")"
-      ((${S[best]:-0} > 0)) && _hrow 'vs all-time best' "$((S[down_avg] * 100 / S[best]))% of $(fmt_rate "${S[best]}")"
-      printf '</table>'
-    fi
-
-    if cfg_on highway_track && ((HW_PRESENT)); then
-      printf '<div style="font-weight:600;margin:22px 0 8px">Highway node</div><table style="border-collapse:collapse;width:100%%">'
-      _hrow 'Status' "$HW_HEALTH — $HW_HEALTH_WHY"
-      _hrow 'Version' "${HW_VERSION:-unknown}$( ((HW_UPDATE)) && printf ' (update: %s)' "$HW_LATEST")"
-      ((R_ROWS > 0)) && _hrow 'Active' "${R[hw_up_pct]}% of the window"
-      ((${R[hw_restarts]:-0} > 0)) && _hrow 'Restarts' "${R[hw_restarts]} in ${hours}h"
-      if ((HW_PID > 0)); then
-        _hrow 'Process' "pid $HW_PID, up $(fmt_dur "$HW_UPTIME"), $HW_THR threads"
-        _hrow 'Memory' "$(fmt_size "$HW_RSS") now, $(fmt_size "${R[hw_rss_max]:-0}") peak"
+      printf '</td></tr></table>'
+      e_kv_open
+      ((${R[disk_delta]:-0} != 0)) && e_kv '24h change' "$(printf '%+d' "${R[disk_delta]}") percentage points"
+      if ((${R[disk_days]:-0} > 0)); then
+        local dcol=$E_MUTED
+        ((${R[disk_days]} < 14)) && dcol=$E_WARN
+        ((${R[disk_days]} < 5)) && dcol=$E_CRIT
+        e_kv 'Projection' "full in roughly ${R[disk_days]} days at the current rate" "$dcol"
       fi
-      _hrow 'Mesh tunnel' "${HW_NEBULA:-not detected}"
-      _hrow 'Journal (1h)' "$HW_JOURNAL_ERR errors, $HW_JOURNAL_WARN warnings"
-      printf '</table>'
-    fi
+      e_spark RH_DISK 'Disk trend' "$E_ACCENT"
+      e_kv_close
 
-    report_alerts "$hours"
-    printf '<div style="font-weight:600;margin:22px 0 8px">Alerts</div>'
-    if ((${#RA_TS[@]} == 0)); then
-      printf '<div style="color:#15803d">None in the last %sh.</div>' "$hours"
+      # ---- network --------------------------------------------------------
+      e_section 'Network'
+      e_kv_open
+      e_kv 'Interface' "${NET_WAN:-none}${NET_IDENT_LABEL:+ ($NET_IDENT_LABEL)}"
+      e_kv 'Transferred' "$(fmt_size "${R[rx_bytes]:-0}") down / $(fmt_size "${R[tx_bytes]:-0}") up"
+      e_kv 'Peak rate' "$(fmt_rate "${R[rx_peak]:-0}") down / $(fmt_rate "${R[tx_peak]:-0}") up"
+      local rcol=$E_INK
+      ((${R[retrans_max]:-0} > 50)) && rcol=$E_WARN
+      e_kv 'TCP retransmits' "avg $(fmt_fixed "${R[retrans_avg]:-0}" 10 2)%, peak $(fmt_fixed "${R[retrans_max]:-0}" 10 2)%" "$rcol"
+      ((${R[lat_avg]:-0} > 0)) && e_kv 'Latency' "avg $(fmt_fixed "${R[lat_avg]}" 1000 1)ms, peak $(fmt_fixed "${R[lat_max]}" 1000 1)ms"
+      ((${R[ct_max]:-0} > 0)) && e_kv 'Conntrack peak' "${R[ct_max]}%"
+      e_spark RH_RX 'Download trend' "$E_OK"
+      e_spark RH_TX 'Upload trend' "$E_ACCENT"
+      e_kv_close
     else
-      printf '<table style="border-collapse:collapse;width:100%%">'
-      local i col
-      for ((i = 0; i < ${#RA_TS[@]} && i < 25; i++)); do
-        col='#a16207'
-        [[ ${RA_SEV[i]} == crit ]] && col='#b91c1c'
-        printf '<tr><td style="padding:3px 14px 3px 0;color:#666;white-space:nowrap">%(%H:%M)T</td><td style="padding:3px 8px 3px 0;color:%s;font-weight:600">%s</td><td style="padding:3px 0">%s</td></tr>' \
-          "${RA_TS[i]}" "$col" "${RA_SEV[i]}" "$(html_escape "${RA_MSG[i]}")"
-      done
-      printf '</table>'
-      ((${#RA_TS[@]} > 25)) && printf '<div style="color:#666">and %s more</div>' $((${#RA_TS[@]} - 25))
+      e_section 'Performance'
+      printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:0 26px">'
+      printf '<div style="font-size:13px;color:%s">No samples recorded yet. Metrics are collected by <span style="font-family:%s">hyn-record.timer</span>; check it with <span style="font-family:%s">systemctl status hyn-record.timer</span>.</div>' \
+        "$E_MUTED" "$E_MONO" "$E_MONO"
+      printf '</td></tr></table>'
     fi
 
-    printf '<div style="color:#888;font-size:12px;margin-top:26px;border-top:1px solid #e5e7eb;padding-top:12px">'
-    printf 'hyn-view %s on %s &middot; %s cores, %s &middot; uptime %s<br>' \
-      "$HYN_VERSION" "$(html_escape "$HOSTNAME_S")" "$CPU_COUNT" \
-      "$(html_escape "${KERNEL:-}")" "$(fmt_dur "$UPTIME_S")"
-    printf '%s &middot; built by <a href="%s" style="color:#666">%s</a>' \
-      "$HYN_COPYRIGHT" "$HYN_AUTHOR_URL" "$(html_escape "$HYN_AUTHOR")"
-    printf '</div></div>'
+    # ---- connection ------------------------------------------------------
+    net_identity 1
+    e_section 'Connection'
+    e_kv_open
+    e_kv 'WAN interface' "${NET_WAN:-none}"
+    [[ -n ${NET_SSID:-} ]] && e_kv 'Wi-Fi SSID' "$NET_SSID" "$E_ACCENT"
+    [[ -n ${NET_CONN:-} ]] && e_kv 'Connection name' "$NET_CONN"
+    [[ -n ${NET_LOCAL_IP:-} ]] && e_kv 'Local address' "$NET_LOCAL_IP"
+    [[ -n ${PUB_IP:-} ]] && e_kv 'Public address' "$PUB_IP"
+    [[ -n ${NET_GW:-} ]] && e_kv 'Gateway' "$NET_GW"
+    [[ -n ${NET_DNS:-} ]] && e_kv 'DNS' "$NET_DNS"
+    e_kv_close
+    printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:10px 26px 0 26px">'
+    printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0" style="font-size:12px">'
+    printf '<tr style="color:%s"><td style="padding:4px 10px 4px 0;font-weight:600">Interface</td><td style="padding:4px 10px 4px 0;font-weight:600">Type</td><td style="padding:4px 10px 4px 0;font-weight:600">State</td><td style="padding:4px 10px 4px 0;font-weight:600">Address</td><td style="padding:4px 0;font-weight:600">In / Out</td></tr>' "$E_MUTED"
+    local ifn
+    for ifn in "${NET_IFACES[@]}"; do
+      local scol=$E_OK
+      [[ ${IF_STATE[$ifn]:-} == up ]] || scol=$E_MUTED
+      printf '<tr style="border-top:1px solid %s"><td style="padding:5px 10px 5px 0;color:%s;font-weight:600">%s</td>' \
+        "$E_HAIR" "$E_INK" "$(html_escape "$ifn")"
+      printf '<td style="padding:5px 10px 5px 0;color:%s">%s</td>' "$E_MUTED" "$(html_escape "${IF_TYPE[$ifn]:-?}")"
+      printf '<td style="padding:5px 10px 5px 0;color:%s">%s</td>' "$scol" "$(html_escape "${IF_STATE[$ifn]:-?}")"
+      printf '<td style="padding:5px 10px 5px 0;color:%s;font-family:%s">%s</td>' "$E_INK" "$E_MONO" "$(html_escape "${IF_IP[$ifn]:--}")"
+      printf '<td style="padding:5px 0;color:%s;font-family:%s">%s / %s</td></tr>' \
+        "$E_INK" "$E_MONO" "$(fmt_size "${NET_RX[$ifn]:-0}")" "$(fmt_size "${NET_TX[$ifn]:-0}")"
+    done
+    printf '</table></td></tr></table>'
+
+    # ---- throughput ------------------------------------------------------
+    if ((have_speed)); then
+      e_section "Throughput tests · ${S[n]} in ${hours}h"
+      e_kv_open
+      e_kv 'Download' "avg $(fmt_rate "${S[down_avg]}") · worst $(fmt_rate "${S[down_min]}") · best $(fmt_rate "${S[down_max]}")"
+      e_kv 'Upload' "avg $(fmt_rate "${S[up_avg]}") · best $(fmt_rate "${S[up_max]}")"
+      ((${S[lat_avg]:-0} > 0)) && e_kv 'Test latency' "avg $(fmt_fixed "${S[lat_avg]}" 1000 1)ms"
+      if ((${S[best]:-0} > 0)); then
+        local ratio=$((S[down_avg] * 100 / S[best]))
+        local pcol=$E_OK
+        ((ratio < 70)) && pcol=$E_WARN
+        ((ratio < 50)) && pcol=$E_CRIT
+        e_kv 'Against all-time best' "${ratio}% of $(fmt_rate "${S[best]}")" "$pcol"
+      fi
+      e_spark ST_H_DOWN 'Download history' "$E_OK"
+      e_kv_close
+    else
+      e_section 'Throughput tests'
+      printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:0 26px">'
+      printf '<div style="font-size:13px;color:%s">No results in the last %sh.</div>' "$E_MUTED" "$hours"
+      printf '</td></tr></table>'
+    fi
+
+    # ---- highway ---------------------------------------------------------
+    if cfg_on highway_track && ((HW_PRESENT)); then
+      e_section 'Highway node'
+      local hcol
+      hcol=$(e_sevcolor "$( [[ $HW_HEALTH == ok ]] && printf ok || printf "$HW_HEALTH" )")
+      e_kv_open
+      e_kv 'Status' "$HW_HEALTH — $HW_HEALTH_WHY" "$hcol"
+      e_kv 'Version' "${HW_VERSION:-unknown}" "$( ((HW_UPDATE)) && printf '%s' "$E_WARN" )"
+      ((HW_UPDATE)) && e_kv 'Update available' "$HW_LATEST" "$E_WARN"
+      ((R_ROWS > 0)) && e_kv 'Active' "${R[hw_up_pct]:-0}% of the window"
+      ((${R[hw_restarts]:-0} > 0)) && e_kv 'Restarts' "${R[hw_restarts]} in ${hours}h" "$E_WARN"
+      if ((HW_PID > 0)); then
+        e_kv 'Process' "pid $HW_PID · up $(fmt_dur "$HW_UPTIME") · $HW_THR threads"
+        e_kv 'Memory' "$(fmt_size "$HW_RSS") now, $(fmt_size "${R[hw_rss_max]:-0}") peak"
+        e_kv 'CPU' "$(fmt_fixed "$HW_CPU" 10 1)% now, $(fmt_fixed "${R[hw_cpu_avg]:-0}" 10 1)% avg"
+      fi
+      e_kv 'Mesh tunnel' "${HW_NEBULA:-not detected}" "$( [[ -z $HW_NEBULA ]] && printf '%s' "$E_WARN" )"
+      local jcol=$E_INK
+      ((HW_JOURNAL_ERR > 0)) && jcol=$E_CRIT
+      e_kv 'Journal (1h)' "$HW_JOURNAL_ERR errors, $HW_JOURNAL_WARN warnings" "$jcol"
+      [[ -n $HW_QDISC ]] && e_kv 'WAN qdisc' "$HW_QDISC"
+      e_kv_close
+      local u
+      if ((${#HW_UNITS[@]} > 0)); then
+        printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:10px 26px 0 26px">'
+        printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0" style="font-size:12px">'
+        for u in "${HW_UNITS[@]}"; do
+          local ucol=$E_OK
+          [[ ${HW_STATE[$u]:-} == active ]] || ucol=$E_CRIT
+          printf '<tr style="border-top:1px solid %s"><td style="padding:5px 10px 5px 0;color:%s;font-weight:600">%s</td>' \
+            "$E_HAIR" "$E_INK" "$(html_escape "${u%.service}")"
+          printf '<td style="padding:5px 10px 5px 0;color:%s">%s/%s</td>' "$ucol" \
+            "$(html_escape "${HW_STATE[$u]:-?}")" "$(html_escape "${HW_SUB[$u]:-?}")"
+          printf '<td style="padding:5px 0;color:%s">%s restart(s)</td></tr>' "$E_MUTED" "${HW_RESTARTS[$u]:-0}"
+        done
+        printf '</table></td></tr></table>'
+      fi
+    fi
+
+    # ---- top processes ---------------------------------------------------
+    if ((${#P_PID[@]} > 0)); then
+      e_section 'Busiest processes right now'
+      printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:0 26px">'
+      printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0" style="font-size:12px">'
+      printf '<tr style="color:%s"><td style="padding:4px 10px 4px 0;font-weight:600">PID</td><td style="padding:4px 10px 4px 0;font-weight:600">CPU</td><td style="padding:4px 10px 4px 0;font-weight:600">Memory</td><td style="padding:4px 0;font-weight:600">Command</td></tr>' "$E_MUTED"
+      local j
+      for ((j = 0; j < ${#P_PID[@]} && j < 6; j++)); do
+        printf '<tr style="border-top:1px solid %s"><td style="padding:5px 10px 5px 0;color:%s;font-family:%s">%s</td>' \
+          "$E_HAIR" "$E_MUTED" "$E_MONO" "${P_PID[j]}"
+        printf '<td style="padding:5px 10px 5px 0;color:%s;font-family:%s">%s%%</td>' \
+          "$E_INK" "$E_MONO" "$(fmt_fixed "${P_CPU[j]}" 10 1)"
+        printf '<td style="padding:5px 10px 5px 0;color:%s;font-family:%s">%s</td>' \
+          "$E_INK" "$E_MONO" "$(fmt_size "${P_RSS[j]}")"
+        printf '<td style="padding:5px 0;color:%s;font-weight:600">%s</td></tr>' \
+          "$E_INK" "$(html_escape "${P_NAME[j]}")"
+      done
+      printf '</table></td></tr></table>'
+    fi
+
+    e_footer
+    e_close
   }
   return 0
 }

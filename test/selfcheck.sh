@@ -1180,6 +1180,16 @@ contains 'html report has a wrapper' '<div'      "$reph"
 contains 'html report names host'    'test-node' "$reph"
 falsy 'html escapes stray angle brackets' '[[ $(html_escape "<b>") == *"<b>"* ]]'
 eq 'html_escape converts ampersand' 'a&amp;b' "$(html_escape 'a&b')"
+# Pins the bash 5.2 replacement-& behaviour. Written with an UNQUOTED replacement,
+# ${s//</&lt;} yields "<lt;" on bash >= 5.2 because & means "the matched text"
+# there -- which silently broke escaping on Ubuntu 24.04 and would let a crafted
+# hostname or journal line inject markup into an operator's email.
+eq 'escapes < and >'        'a&lt;b&gt;c'      "$(html_escape 'a<b>c')"
+eq 'escapes a full tag'     '&lt;script&gt;'   "$(html_escape '<script>')"
+eq 'escapes & before < >'   '&amp;lt;'         "$(html_escape '&lt;')"
+eq 'escapes double quotes'  '&quot;x&quot;'    "$(html_escape '"x"')"
+falsy 'no literal <lt; artefact' '[[ $(html_escape "<") == *"<lt;"* ]]'
+eq 'plain text is untouched' 'hello world'     "$(html_escape 'hello world')"
 
 # Verdict must reflect severity, not just say something cheerful.
 RA_CRIT=0 RA_WARN=0 RA_TS=()
@@ -1193,6 +1203,91 @@ RA_CRIT=0 RA_WARN=0
 R[disk_days]=3
 contains 'disk projection verdict' 'PLAN AHEAD' "$(_verdict)"
 R[disk_days]=0
+
+# The crash a user actually hit: on a fresh install report_aggregate finds no
+# samples, so R is entirely empty, and _verdict read R[disk_days] with no default.
+# Bash expands BOTH operands of `((a && b))` before evaluating, so the `&&` did
+# not protect the second reference and `set -u` aborted mid-email — three times,
+# once per _verdict call. Every R lookup outside an R_ROWS>0 block must be
+# defaulted.
+mv "$mf" "$mf.saved"
+R=(); R_ROWS=0; RA_CRIT=0; RA_WARN=0; RA_TS=()
+falsy 'aggregation reports no data' 'report_aggregate 24'
+eq 'no rows counted' '0' "$R_ROWS"
+v_out=$(_verdict 2>&1)
+falsy 'verdict has no unbound-variable error' '[[ $v_out == *"unbound variable"* ]]'
+contains 'verdict says there is no history' 'NO HISTORY' "$v_out"
+# The whole report must render on a fresh install, not just the verdict.
+t_out=$(report_text 24 2>&1)
+falsy 'text report has no unbound error' '[[ $t_out == *"unbound variable"* ]]'
+contains 'text report explains the gap' 'none recorded yet' "$t_out"
+h_out=$(report_html 24 2>&1)
+falsy 'html report has no unbound error' '[[ $h_out == *"unbound variable"* ]]'
+contains 'html report explains the gap' 'No samples recorded yet' "$h_out"
+# And with alerts present but still no metrics.
+RA_CRIT=1
+v_out=$(_verdict 2>&1)
+contains 'alerts still win the verdict' 'ATTENTION' "$v_out"
+RA_CRIT=0
+mv "$mf.saved" "$mf"
+report_aggregate 24
+
+# ---------------------------------------------------------------------------
+section 'email rendering'
+# ---------------------------------------------------------------------------
+# Trend series feed the sparklines and must be downsampled, or 288 samples
+# becomes 288 characters and wraps into noise on a phone.
+truthy 'cpu trend series built'  '((${#RH_CPU[@]} > 0))'
+truthy 'trend is downsampled'    '((${#RH_CPU[@]} <= RH_BUCKETS))'
+declare -a BIG=()
+for i in $(seq 1 500); do BIG+=("$i"); done
+_downsample BIG DS
+eq 'downsample caps at the bucket count' "$RH_BUCKETS" "${#DS[@]}"
+truthy 'downsample preserves direction' '((${DS[0]} < ${DS[-1]}))'
+declare -a SMALL=(5 6 7)
+_downsample SMALL DS2
+eq 'short series passes through' '3' "${#DS2[@]}"
+
+# Severity colours must be distinct, or the design conveys nothing.
+truthy 'crit and warn differ' '[[ $(e_sevcolor crit) != $(e_sevcolor warn) ]]'
+truthy 'warn and ok differ'   '[[ $(e_sevcolor warn) != $(e_sevcolor ok) ]]'
+eq 'low usage is green'  "$E_OK"   "$(e_level 10)"
+eq 'high usage is amber' "$E_WARN" "$(e_level 75)"
+eq 'full is red'         "$E_CRIT" "$(e_level 95)"
+eq 'garbage is muted'    "$E_MUTED" "$(e_level abc)"
+
+# Email HTML has to survive clients that strip <style>, so structure must be
+# tables with inline styles and bars must be coloured table cells.
+h=$(report_html 24)
+contains 'email uses table layout'      '<table role="presentation"' "$h"
+contains 'email styles are inline'      'style="' "$h"
+falsy   'email has no style block'      '[[ $h == *"<style"* ]]'
+falsy   'email has no external image'   '[[ $h == *"<img"* ]]'
+falsy   'email avoids flexbox'          '[[ $h == *"display:flex"* ]]'
+contains 'email has a preheader'        'display:none' "$h"
+contains 'email has KPI figures'        'CPU avg' "$h"
+contains 'email has a bar'              'border-radius:4px' "$h"
+contains 'email has the alerts section' 'Alerts' "$h"
+contains 'email has connection detail'  'Connection' "$h"
+contains 'email credits the author'     'Vivek W (AryanVBW)' "$h"
+# Escaping still applies to every interpolated value.
+HOSTNAME_S='evil<script>alert(1)</script>'
+h=$(report_html 24)
+falsy 'hostname is escaped in html' '[[ $h == *"<script>"* ]]'
+contains 'hostname escaped safely' '&lt;script&gt;' "$h"
+HOSTNAME_S='test-node'
+
+# The alert email renders with the same components.
+_reset_alerts; _AL_PREV_STATE=(); _AL_PREV_NOTIFIED=()
+_check_bool e_a crit 1 'disk /var critically full'
+_check_bool e_b warn 1 'memory at 91%'
+ah=$(alerts_html "0" "1" crit)
+contains 'alert email has a severity pill' 'CRITICAL' "$ah"
+contains 'alert email has resource bars'   'Resources' "$ah"
+contains 'alert email explains silencing'  'silence' "$ah"
+contains 'alert email credits the author'  'AryanVBW' "$ah"
+falsy   'alert email has no style block'   '[[ $ah == *"<style"* ]]'
+_reset_alerts
 
 # ---------------------------------------------------------------------------
 section 'first-run onboarding'

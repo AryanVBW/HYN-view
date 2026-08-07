@@ -147,7 +147,15 @@ address, state and traffic, plus SSID, gateway and DNS; throughput tests against
 your all-time best; full Highway node status; and everything that fired.
 
 It leads with a one-line verdict — `HEALTHY`, `MOSTLY HEALTHY`, `PLAN AHEAD`,
-`DEGRADED` or `ATTENTION` — because that is what a phone notification shows.
+`DEGRADED`, `ATTENTION` or `NO HISTORY YET` — because that is what a phone
+notification shows.
+
+The HTML version is built for mail clients, not browsers: inline styles only,
+tables for structure, bars drawn as coloured table cells, no external images and
+no `<style>` block, since Gmail strips it and Outlook renders through Word. A
+hidden preheader sets the inbox snippet. Headline figures sit in KPI cells at the
+top, trends are block-glyph sparklines in a monospace span, and severities are
+coloured pills. Alerts use the same components, so the two look like one product.
 
 ```
 hyn report            print it

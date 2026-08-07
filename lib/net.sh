@@ -65,6 +65,7 @@ net_find_wan() {
   if [[ ${CFG[wan_iface]} != auto ]]; then NET_WAN=${CFG[wan_iface]}; return 0; fi
   local ifn dest flags rest best='' bestmetric=999999 metric
   local -a f=()
+  [[ -r $HYN_PROC/net/route ]] || { NET_WAN=''; return 1; }
   while read -r ifn dest _ flags _ _ metric rest; do
     [[ $ifn == Iface ]] && continue
     [[ $dest == 00000000 ]] || continue
@@ -367,6 +368,7 @@ _ms_to_us() {
 # come out of the word in reverse.
 net_gateway_ip() {
   local ifn dest gw flags rest g
+  [[ -r $HYN_PROC/net/route ]] || return 1
   while read -r ifn dest gw flags rest; do
     [[ $ifn == Iface ]] && continue
     [[ $dest == 00000000 ]] || continue

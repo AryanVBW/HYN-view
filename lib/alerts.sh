@@ -527,55 +527,162 @@ alerts_context() {
 # A deliberately plain HTML email: a table, a monospace block, no images, no
 # external CSS. It has to be legible in a phone notification preview and in a
 # text-only client, and it must not look like marketing.
+# Same components as the daily report, so the two look like one product. An
+# alert has to be legible in a phone notification preview first and a mail client
+# second, so the severity, host and headline all appear before any detail.
 alerts_html() {
   local newlist=$1 onglist=$2 worst=$3 i
-  local accent='#0f766e'
+  local nnew=0 nong=0
+  for i in $newlist; do [[ $i =~ ^[0-9]+$ ]] && ((nnew++)); done
+  for i in $onglist; do [[ $i =~ ^[0-9]+$ ]] && ((nong++)); done
+  local badge
   case $worst in
-    crit) accent='#b91c1c' ;;
-    warn) accent='#b45309' ;;
+    crit) badge='CRITICAL' ;;
+    warn) badge='WARNING' ;;
+    *) badge='NOTICE' ;;
   esac
+  local total=$((nnew + nong))
+  ((total > 0)) && badge="$badge · $total issue$( ((total > 1)) && printf s )"
+
+  # Inbox snippet: the first problem, spelled out.
+  local pre=''
+  for i in $newlist $onglist; do
+    [[ $i =~ ^[0-9]+$ ]] || continue
+    pre=${AL_MSG[i]}
+    break
+  done
+  [[ -z $pre ]] && pre='Previously reported issues have cleared'
+
   {
-    printf '<div style="font:14px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111;max-width:680px">'
-    printf '<div style="border-left:4px solid %s;padding:2px 0 2px 14px;margin-bottom:18px">' "$accent"
-    printf '<div style="font-size:19px;font-weight:600">%s</div>' "$(html_escape "$HOSTNAME_S")"
-    printf '<div style="color:#666">%s &middot; uptime %s</div>' \
-      "$(html_escape "${DISTRO:-Linux}")" "$(fmt_dur "$UPTIME_S")"
-    printf '</div>'
-    if [[ -n ${newlist//[[:space:]]/} ]]; then
-      printf '<div style="font-weight:600;margin:16px 0 6px">New</div><ul style="margin:0;padding-left:20px">'
+    e_preheader "$pre"
+    e_open
+    printf -v _now '%(%H:%M %Z, %d %b)T' -1
+    e_header "$HOSTNAME_S" "Alert · $_now" "$badge" "$worst"
+
+    # Quick state, so the reader does not have to ssh in for context.
+    local cpucol memcol dskcol dpct=0 mp
+    for mp in "${MOUNTS[@]}"; do
+      [[ ${MP_PCT[$mp]:-0} =~ ^[0-9]+$ ]] || continue
+      ((MP_PCT[$mp] > dpct)) && dpct=${MP_PCT[$mp]}
+    done
+    cpucol=$(e_level "$CPU_PCT"); memcol=$(e_level "$MEM_PCT"); dskcol=$(e_level "$dpct")
+    e_kpi_open
+    e_kpi 'CPU' "${CPU_PCT}%" "steal ${CPU_STEAL}%" "$cpucol"
+    e_kpi 'Memory' "${MEM_PCT}%" "swap ${SWAP_PCT}%" "$memcol"
+    e_kpi 'Disk' "${dpct}%" 'fullest mount' "$dskcol"
+    fmt_dur_v "$UPTIME_S"
+    e_kpi 'Uptime' "$FMT_OUT" "load ${LOAD1:-?}" "$E_ACCENT"
+    e_kpi_close
+
+    if ((nnew > 0)); then
+      e_section 'New'
+      printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:0 26px">'
+      printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0" style="font-size:14px">'
       for i in $newlist; do
         [[ $i =~ ^[0-9]+$ ]] || continue
-        printf '<li style="margin:4px 0"><b style="color:%s">%s</b> — %s</li>' \
-          "$accent" "${AL_SEV[i]}" "$(html_escape "${AL_MSG[i]}")"
+        printf '<tr><td style="padding:6px 10px 6px 0;vertical-align:top;white-space:nowrap">%s</td>' "$(e_pill "${AL_SEV[i]}")"
+        printf '<td style="padding:6px 0;color:%s;font-weight:600">%s</td></tr>' "$E_INK" "$(html_escape "${AL_MSG[i]}")"
       done
-      printf '</ul>'
+      printf '</table></td></tr></table>'
     fi
-    if [[ -n ${onglist//[[:space:]]/} ]]; then
-      printf '<div style="font-weight:600;margin:16px 0 6px">Still active</div><ul style="margin:0;padding-left:20px">'
+
+    if ((nong > 0)); then
+      e_section 'Still active'
+      printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:0 26px">'
+      printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0" style="font-size:13px">'
       for i in $onglist; do
         [[ $i =~ ^[0-9]+$ ]] || continue
-        printf '<li style="margin:4px 0">%s <span style="color:#666">(for %s)</span></li>' \
-          "$(html_escape "${AL_MSG[i]}")" \
+        printf '<tr><td style="padding:6px 10px 6px 0;vertical-align:top;white-space:nowrap">%s</td>' "$(e_pill "${AL_SEV[i]}")"
+        printf '<td style="padding:6px 0;color:%s">%s <span style="color:%s">(for %s)</span></td></tr>' \
+          "$E_INK" "$(html_escape "${AL_MSG[i]}")" "$E_MUTED" \
           "$(fmt_dur $((${EPOCHSECONDS:-0} - ${_AL_PREV_SINCE[${AL_ID[i]}]:-0})))"
       done
-      printf '</ul>'
+      printf '</table></td></tr></table>'
     fi
+
     if ((${#AL_RESOLVED[@]} > 0)) && cfg_on alert_notify_resolved; then
-      printf '<div style="font-weight:600;margin:16px 0 6px;color:#15803d">Resolved</div><ul style="margin:0;padding-left:20px">'
+      e_section 'Resolved'
+      printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:0 26px">'
+      printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0" style="font-size:13px">'
       local r
       for r in "${AL_RESOLVED[@]}"; do
-        printf '<li style="margin:4px 0;color:#555">%s</li>' "$(html_escape "${r#*|}")"
+        printf '<tr><td style="padding:6px 10px 6px 0;vertical-align:top;white-space:nowrap">%s</td>' "$(e_pill ok)"
+        printf '<td style="padding:6px 0;color:%s">%s</td></tr>' "$E_MUTED" "$(html_escape "${r#*|}")"
       done
-      printf '</ul>'
+      printf '</table></td></tr></table>'
     fi
-    printf '<div style="font-weight:600;margin:20px 0 6px">Current state</div>'
-    printf '<pre style="background:#f6f7f9;border:1px solid #e5e7eb;border-radius:6px;padding:12px;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-x:auto">%s</pre>' \
-      "$(html_escape "$(alerts_context)")"
-    printf '<div style="color:#888;font-size:12px;margin-top:18px;border-top:1px solid #e5e7eb;padding-top:10px">'
-    printf 'hyn-view %s on %s<br>%s &middot; built by <a href="%s" style="color:#666">%s</a></div>' \
-      "$HYN_VERSION" "$(html_escape "$HOSTNAME_S")" "$HYN_COPYRIGHT" \
-      "$HYN_AUTHOR_URL" "$(html_escape "$HYN_AUTHOR")"
-    printf '</div>'
+
+    # Resource bars: the numbers the reader will want next.
+    e_section 'Resources'
+    printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:0 26px">'
+    e_bar 'CPU' "$CPU_PCT" "usr ${CPU_USER}% sys ${CPU_SYS}%"
+    fmt_size_v "$MEM_USED"; local mu=$FMT_OUT
+    fmt_size_v "$MEM_TOTAL"
+    e_bar 'Memory' "$MEM_PCT" "$mu / $FMT_OUT"
+    ((SWAP_TOTAL > 0)) && e_bar 'Swap' "$SWAP_PCT" "$(fmt_size "$SWAP_USED")"
+    for mp in "${MOUNTS[@]}"; do
+      fmt_size_v "${MP_AVAIL[$mp]:-0}"
+      e_bar "$mp" "${MP_PCT[$mp]:-0}" "$FMT_OUT free"
+    done
+    printf '</td></tr></table>'
+
+    e_section 'Network'
+    net_identity
+    e_kv_open
+    local ifc=${NET_WAN:-none}
+    e_kv 'Interface' "$ifc${NET_IDENT_LABEL:+ ($NET_IDENT_LABEL)}"
+    [[ -n ${NET_SSID:-} ]] && e_kv 'Wi-Fi SSID' "$NET_SSID" "$E_ACCENT"
+    [[ -n ${NET_LOCAL_IP:-} ]] && e_kv 'Local address' "$NET_LOCAL_IP"
+    [[ -n ${PUB_IP:-} ]] && e_kv 'Public address' "$PUB_IP"
+    [[ -n ${NET_GW:-} ]] && e_kv 'Gateway' "${NET_GW}${NET_DNS:+  ·  dns $NET_DNS}"
+    if [[ $ifc != none ]]; then
+      e_kv 'Throughput' "$(fmt_rate "${NET_RXR[$ifc]:-0}") down / $(fmt_rate "${NET_TXR[$ifc]:-0}") up"
+    fi
+    local rcol=$E_INK
+    ((NET_RETRANS_PM > 50)) && rcol=$E_WARN
+    e_kv 'TCP retransmits' "$(fmt_fixed "$NET_RETRANS_PM" 10 2)% of segments" "$rcol"
+    local k
+    for k in "${!LAT_MS[@]}"; do
+      [[ $k == '#ts' ]] && continue
+      [[ ${LAT_MS[$k]} =~ ^[0-9]+$ ]] || continue
+      local lcol=$E_INK
+      ((${LAT_LOSS[$k]:-0} > 0)) && lcol=$E_CRIT
+      e_kv "Latency $k" "$(fmt_fixed "${LAT_MS[$k]}" 1000 1)ms, loss ${LAT_LOSS[$k]:-0}%" "$lcol"
+    done
+    e_kv_close
+
+    if cfg_on highway_track && ((HW_PRESENT)); then
+      e_section 'Highway node'
+      local hcol
+      hcol=$(e_sevcolor "$( [[ $HW_HEALTH == ok ]] && printf ok || printf '%s' "$HW_HEALTH" )")
+      e_kv_open
+      e_kv 'Status' "$HW_HEALTH — $HW_HEALTH_WHY" "$hcol"
+      e_kv 'Version' "${HW_VERSION:-unknown}"
+      if ((HW_PID > 0)); then
+        e_kv 'Process' "pid $HW_PID · up $(fmt_dur "$HW_UPTIME") · $(fmt_size "$HW_RSS") · $(fmt_fixed "$HW_CPU" 10 1)% cpu"
+      fi
+      e_kv 'Mesh tunnel' "${HW_NEBULA:-not detected}" "$( [[ -z $HW_NEBULA ]] && printf '%s' "$E_WARN" )"
+      local u
+      for u in "${HW_UNITS[@]}"; do
+        local ucol=$E_OK
+        [[ ${HW_STATE[$u]:-} == active ]] || ucol=$E_CRIT
+        e_kv "${u%.service}" "${HW_STATE[$u]:-?}/${HW_SUB[$u]:-?} · ${HW_RESTARTS[$u]:-0} restart(s)" "$ucol"
+      done
+      e_kv_close
+    fi
+
+    e_section 'How to silence this'
+    printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:0 26px">'
+    printf '<div style="font-size:12px;line-height:1.7;color:%s">' "$E_MUTED"
+    printf 'Set the rule&rsquo;s threshold to <span style="font-family:%s;color:%s">0</span> in ' "$E_MONO" "$E_INK"
+    printf '<span style="font-family:%s;color:%s">%s/config</span>, then ' "$E_MONO" "$E_INK" "$HYN_ETC"
+    printf '<span style="font-family:%s;color:%s">systemctl restart hyn-alerts.timer</span>.<br>' "$E_MONO" "$E_INK"
+    printf 'Run <span style="font-family:%s;color:%s">hyn alerts list</span> on the host to see every rule and its current value.' \
+      "$E_MONO" "$E_INK"
+    printf '</div></td></tr></table>'
+
+    e_footer
+    e_close
   }
 }
 
