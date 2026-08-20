@@ -38,17 +38,20 @@ export const Header = () => {
           <Logo className="w-[100px] md:w-[120px]" />
         </Link>
         <div className="flex max-lg:hidden items-center gap-x-8">
-          <Link className="uppercase transition-colors ease-out duration-150 font-mono text-foreground/60 hover:text-foreground/100" href="/dashboard">
+          <Link
+            className="uppercase transition-colors ease-out duration-150 font-mono text-foreground/60 hover:text-foreground/100"
+            href="/dashboard"
+          >
             Dashboard
           </Link>
           {signedIn ? (
             <Link
               href="/account"
-              className="flex items-center gap-2 font-mono text-foreground/80 transition-colors ease-out duration-150 hover:text-foreground"
+              className="flex items-center gap-2 border border-border px-3 py-1.5 font-mono text-xs uppercase text-foreground/80 transition-colors ease-out duration-150 hover:border-foreground/40 hover:text-foreground"
               title={email ?? undefined}
             >
               <UserCircle2 className="size-4 text-primary" aria-hidden />
-              <span className="max-w-[16ch] truncate normal-case">{email}</span>
+              My account
             </Link>
           ) : email === null ? (
             <Link className="uppercase transition-colors ease-out duration-150 font-mono text-primary hover:text-primary/80" href="/signin">

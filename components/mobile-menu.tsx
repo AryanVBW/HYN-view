@@ -19,7 +19,7 @@ export const MobileMenu = ({ className, signedIn = false, email = null }: Mobile
     { name: "Dashboard", href: "/dashboard" },
     { name: "Link server", href: "/link" },
     signedIn
-      ? { name: email ? `Account (${email})` : "Account", href: "/account" }
+      ? { name: "My account", href: "/account" }
       : { name: "Sign in", href: "/signin" },
   ];
 
@@ -70,6 +70,11 @@ export const MobileMenu = ({ className, signedIn = false, email = null }: Mobile
                 className="text-xl font-mono uppercase text-foreground/60 transition-colors ease-out duration-150 hover:text-foreground/100 py-2"
               >
                 {item.name}
+                {item.href === "/account" && email ? (
+                  <span className="mt-1 block text-xs normal-case text-muted-foreground">
+                    {email}
+                  </span>
+                ) : null}
               </Link>
             ))}
 

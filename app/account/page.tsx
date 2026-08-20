@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { AlertTriangle, CheckCircle2, Mail, ShieldCheck, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, LayoutDashboard, Mail, ShieldCheck, UserCircle2, XCircle } from "lucide-react";
 import { NotifyPreferences } from "@/components/account/notify-preferences";
 import { NodeSettings } from "@/components/account/node-settings";
+import { Button } from "@/components/ui/button";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
 import { claimAdminIfAllowed } from "@/lib/admin-claim";
@@ -78,53 +79,84 @@ export default async function AccountPage() {
   }, {});
 
   const stats = [
-    { label: "Sent, 30 days", value: sent30.count ?? 0, tone: "primary" as const },
-    { label: "Failed, 30 days", value: failed30.count ?? 0, tone: (failed30.count ? "bad" : "muted") as "bad" | "muted" },
-    { label: "Total attempts", value: total30.count ?? 0, tone: "muted" as const },
-    { label: "Admin assigned", value: prefs?.admin_id ? 1 : 0, tone: "muted" as const },
+    { label: "Sent, 30 days", value: sent30.count ?? 0, tone: "primary" as const, icon: CheckCircle2 },
+    {
+      label: "Failed, 30 days",
+      value: failed30.count ?? 0,
+      tone: (failed30.count ? "bad" : "muted") as "bad" | "muted",
+      icon: XCircle,
+    },
+    { label: "Total attempts", value: total30.count ?? 0, tone: "muted" as const, icon: Mail },
+    { label: "Admin assigned", value: prefs?.admin_id ? 1 : 0, tone: "muted" as const, icon: ShieldCheck },
   ];
 
   return (
     <Shell email={auth.user.email}>
       <div className="space-y-10">
-        <div className="border-b border-border pb-8">
-          <p className="section-kicker">// your account</p>
-          <h1 className="mt-2 font-sentient text-3xl text-foreground md:text-4xl">
-            {profile?.full_name || auth.user.email}
-          </h1>
-          <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 font-mono text-sm text-muted-foreground">
-            <span className="flex items-center gap-2">
-              <Mail className="size-4 text-primary" aria-hidden />
-              {auth.user.email}
-            </span>
-            {profile?.role === "admin" ? (
-              <Link
-                href="/admin"
-                className="flex items-center gap-2 text-primary underline underline-offset-4"
-              >
-                <ShieldCheck className="size-4" aria-hidden />
-                administrator · open admin dashboard
-              </Link>
+        <div className="flex flex-col gap-6 border-b border-border pb-8 md:flex-row md:items-start md:justify-between">
+          <div>
+            <p className="section-kicker">// your account</p>
+            <div className="mt-2 flex items-center gap-4">
+              <span className="hidden size-12 shrink-0 items-center justify-center rounded-full border border-border bg-secondary sm:flex">
+                <UserCircle2 className="size-6 text-primary" aria-hidden />
+              </span>
+              <h1 className="font-sentient text-3xl text-foreground md:text-4xl">
+                {profile?.full_name || auth.user.email}
+              </h1>
+            </div>
+            <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 font-mono text-sm text-muted-foreground">
+              <span className="flex items-center gap-2">
+                <Mail className="size-4 text-primary" aria-hidden />
+                {auth.user.email}
+              </span>
+              {profile?.role === "admin" ? (
+                <Link
+                  href="/admin"
+                  className="flex items-center gap-2 text-primary underline underline-offset-4"
+                >
+                  <ShieldCheck className="size-4" aria-hidden />
+                  administrator · open admin dashboard
+                </Link>
+              ) : null}
+              <span>member since {new Date(profile?.created_at ?? auth.user.created_at).toLocaleDateString()}</span>
+              <span>{nodes.filter((n) => !n.is_demo).length} server(s) linked</span>
+            </div>
+
+            {profile?.status === "suspended" ? (
+              <p className="mt-4 border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs leading-6 text-destructive">
+                This account is suspended
+                {profile.suspended_reason ? `: ${profile.suspended_reason}` : ""}. Your
+                servers have stopped reporting. Contact your administrator.
+              </p>
             ) : null}
-            <span>member since {new Date(profile?.created_at ?? auth.user.created_at).toLocaleDateString()}</span>
-            <span>{nodes.filter((n) => !n.is_demo).length} server(s) linked</span>
           </div>
 
-          {profile?.status === "suspended" ? (
-            <p className="mt-4 border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs leading-6 text-destructive">
-              This account is suspended
-              {profile.suspended_reason ? `: ${profile.suspended_reason}` : ""}. Your
-              servers have stopped reporting. Contact your administrator.
-            </p>
-          ) : null}
+          <Link href="/dashboard" className="shrink-0">
+            <Button size="sm" className="gap-2 whitespace-nowrap">
+              <LayoutDashboard className="size-4" aria-hidden />
+              Go to dashboard
+            </Button>
+          </Link>
         </div>
 
         <div className="grid gap-px overflow-hidden border border-border bg-border sm:grid-cols-2 lg:grid-cols-4">
           {stats.map((s) => (
             <div key={s.label} className="bg-card px-5 py-5">
-              <p className="font-mono text-[0.65rem] uppercase tracking-wide text-muted-foreground">
-                {s.label}
-              </p>
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-mono text-[0.65rem] uppercase tracking-wide text-muted-foreground">
+                  {s.label}
+                </p>
+                <s.icon
+                  className={`size-4 ${
+                    s.tone === "primary"
+                      ? "text-primary"
+                      : s.tone === "bad"
+                        ? "text-destructive"
+                        : "text-muted-foreground/60"
+                  }`}
+                  aria-hidden
+                />
+              </div>
               <p
                 className={`mt-3 font-sentient text-3xl ${
                   s.tone === "primary"
