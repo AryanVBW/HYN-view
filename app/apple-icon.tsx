@@ -5,7 +5,7 @@ export const contentType = "image/png";
 
 // iOS masks this into a rounded square itself, so it ships as a plain filled
 // square here rather than pre-rounding it. Same mark as app/icon.tsx, scaled
-// up: three ascending squares, no wordmark.
+// up: three ascending squares in white, matching components/logo.tsx.
 export default function AppleIcon() {
   return new ImageResponse(
     (
@@ -19,11 +19,10 @@ export default function AppleIcon() {
           background: "#000000",
         }}
       >
-        <svg width="128" height="128" viewBox="0 0 32 32" fill="none">
-          <path
-            d="M2 5h6v6H2V5Zm8 8h6v6h-6v-6Zm8 8h6v6h-6v-6Z"
-            fill="#FFC700"
-          />
+        <svg width="140" height="140" viewBox="0 0 32 32" fill="none">
+          <rect x="2" y="5" width="8" height="8" fill="#ffffff" />
+          <rect x="12" y="15" width="8" height="8" fill="#ffffff" fillOpacity="0.85" />
+          <rect x="22" y="25" width="8" height="8" fill="#ffffff" fillOpacity="0.7" />
         </svg>
       </div>
     ),
