@@ -24,6 +24,13 @@ const vignetteOffset = 0.4;
 const useManualTime = false;
 const manualTime = 0;
 
+// #rrggbb -> [0..1, 0..1, 0..1], for the vignette shader's uniform -- GLSL
+// takes a linear triple, not a CSS string.
+function hexToRgb01(hex: string): [number, number, number] {
+  const n = parseInt(hex.slice(1), 16);
+  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+}
+
 export const GL = ({ hovering }: { hovering: boolean }) => {
   // Three.js needs a real hex, not a CSS var -- <color args> is read once by
   // the renderer, not recomputed on every paint the way a CSS custom property
@@ -34,6 +41,7 @@ export const GL = ({ hovering }: { hovering: boolean }) => {
   useEffect(() => {
     setBackground(resolvedTheme === "light" ? "#fafaf9" : "#000000");
   }, [resolvedTheme]);
+  const vignetteColor = hexToRgb01(background);
 
   return (
     <div id="webgl">
@@ -68,6 +76,7 @@ export const GL = ({ hovering }: { hovering: boolean }) => {
             args={[VignetteShader]}
             uniforms-darkness-value={vignetteDarkness}
             uniforms-offset-value={vignetteOffset}
+            uniforms-vignetteColor-value={vignetteColor}
           />
         </Effects>
       </Canvas>
