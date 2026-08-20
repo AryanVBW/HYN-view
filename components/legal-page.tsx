@@ -1,8 +1,9 @@
 import Link from "next/link";
 import { Logo } from "@/components/logo";
+import { ParticleField } from "@/components/particle-field";
 
-// Shared shell for the legal pages. Typography is set here rather than per page
-// so the three documents cannot drift apart visually.
+// Shared shell for the public policy pages. Typography is set here so they
+// cannot drift apart visually.
 export function LegalPage({
   title,
   kicker,
@@ -16,6 +17,7 @@ export function LegalPage({
 }) {
   return (
     <div className="min-h-screen bg-background">
+      <ParticleField blur="soft" />
       <main className="container pt-32 pb-16 md:pt-44">
         <div className="mx-auto max-w-3xl">
           <Link href="/" className="inline-block">
@@ -37,6 +39,10 @@ export function LegalPage({
           <nav className="mt-16 flex flex-wrap gap-x-6 gap-y-2 border-t border-border pt-8 font-mono text-xs text-muted-foreground">
             <Link href="/privacy" className="hover:text-primary">Privacy</Link>
             <Link href="/terms" className="hover:text-primary">Terms</Link>
+            <Link href="/acceptable-use" className="hover:text-primary">Acceptable use</Link>
+            <Link href="/security" className="hover:text-primary">Security</Link>
+            <Link href="/subprocessors" className="hover:text-primary">Providers</Link>
+            <Link href="/dpa" className="hover:text-primary">DPA</Link>
             <Link href="/legal" className="hover:text-primary">Disclaimer &amp; licence</Link>
             <Link href="/" className="hover:text-primary">Home</Link>
           </nav>
@@ -52,13 +58,5 @@ export function Important({ children }: { children: React.ReactNode }) {
     <div className="my-6 border-l-2 border-primary bg-primary/5 px-4 py-3 font-mono text-sm leading-7 text-foreground/80">
       {children}
     </div>
-  );
-}
-
-export function Placeholder({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="border border-dashed border-[#e8a400]/60 bg-[#e8a400]/10 px-1.5 py-0.5 font-mono text-[0.8em] text-[#e8a400]">
-      {children}
-    </span>
   );
 }

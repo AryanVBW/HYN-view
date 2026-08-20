@@ -3,6 +3,7 @@ import { Suspense } from "react";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Logo } from "@/components/logo";
+import { ParticleField } from "@/components/particle-field";
 import { SignInForm } from "@/components/signin-form";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
@@ -22,6 +23,7 @@ export default async function SignInPage() {
 
   return (
     <div className="flex min-h-svh flex-col items-center justify-center px-4 py-16">
+      <ParticleField blur="crisp" />
       <Link href="/" className="mb-10">
         <Logo className="w-[120px]" />
       </Link>

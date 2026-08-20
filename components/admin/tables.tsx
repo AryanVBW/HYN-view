@@ -160,7 +160,7 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                 <tr key={node.id} className="border-b border-border/50 align-top">
                   <td className="py-3 pr-4">
                     <Link
-                      href={`/dashboard?node=${node.id}`}
+                      href={`/admin?tab=client&client=${node.owner_id ?? ""}&node=${node.id}`}
                       className="text-card-foreground hover:text-primary"
                     >
                       {node.name}
@@ -179,7 +179,16 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                     ) : null}
                   </td>
                   <td className="py-3 pr-4">
-                    <span className="text-card-foreground/80">{node.owner_email ?? "—"}</span>
+                    {node.owner_id ? (
+                      <Link
+                        href={`/admin?tab=client&client=${node.owner_id}&node=${node.id}`}
+                        className="text-card-foreground/80 hover:text-primary"
+                      >
+                        {node.owner_email ?? "Unnamed client"}
+                      </Link>
+                    ) : (
+                      <span className="text-card-foreground/80">—</span>
+                    )}
                     {node.owner_status === "suspended" ? (
                       <span className="block text-destructive">account suspended</span>
                     ) : null}
@@ -326,7 +335,12 @@ export function ClientTable({ clients, selfId }: { clients: AdminClient[]; selfI
             {clients.map((c) => (
               <tr key={c.id} className="border-b border-border/50 align-top">
                 <td className="py-3 pr-4 text-card-foreground/90">
-                  {c.email ?? "—"}
+                  <Link
+                    href={`/admin?tab=client&client=${c.id}`}
+                    className="hover:text-primary"
+                  >
+                    {c.email ?? c.full_name ?? "Unnamed client"}
+                  </Link>
                   {c.id === selfId ? <span className="text-primary"> (you)</span> : null}
                 </td>
                 <td className="py-3 pr-4">

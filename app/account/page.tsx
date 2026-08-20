@@ -2,17 +2,15 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { AlertTriangle, CheckCircle2, LayoutDashboard, Mail, ShieldCheck, UserCircle2, XCircle } from "lucide-react";
-import { NotifyPreferences } from "@/components/account/notify-preferences";
 import { NodeSettings } from "@/components/account/node-settings";
 import { Button } from "@/components/ui/button";
+import { ParticleField } from "@/components/particle-field";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
 import { claimAdminIfAllowed } from "@/lib/admin-claim";
 import { formatRelative } from "@/lib/dashboard-data";
 import type {
-  AdminOption,
   Node,
-  NotifyPrefs,
   NotificationLogRow,
   Profile,
 } from "@/lib/types";
@@ -20,7 +18,7 @@ import { NODE_COLUMNS } from "@/lib/types";
 
 export const metadata: Metadata = {
   title: "Account / HYN-view",
-  description: "Your account, notification channels and delivery history.",
+  description: "Your account, server settings and notification delivery history.",
 };
 
 export const dynamic = "force-dynamic";
@@ -45,11 +43,9 @@ export default async function AccountPage() {
 
   await claimAdminIfAllowed(supabase, auth.user.email);
 
-  const [profileRes, nodesRes, prefsRes, adminsRes, logRes] = await Promise.all([
+  const [profileRes, nodesRes, logRes] = await Promise.all([
     supabase.from("profiles").select("*").eq("id", auth.user.id).maybeSingle(),
     supabase.from("nodes").select(NODE_COLUMNS).eq("revoked", false).order("created_at"),
-    supabase.from("notify_prefs").select("*").eq("user_id", auth.user.id).maybeSingle(),
-    supabase.rpc("hyn_list_admins"),
     supabase
       .from("notification_log")
       .select("*")
@@ -59,8 +55,6 @@ export default async function AccountPage() {
 
   const profile = profileRes.data as Profile | null;
   const nodes = (nodesRes.data ?? []) as Node[];
-  const prefs = prefsRes.data as NotifyPrefs | null;
-  const admins = (adminsRes.data ?? []) as AdminOption[];
   const log = (logRes.data ?? []) as NotificationLogRow[];
 
   // Counted over a 30-day window rather than all time: "how many emails have
@@ -87,7 +81,6 @@ export default async function AccountPage() {
       icon: XCircle,
     },
     { label: "Total attempts", value: total30.count ?? 0, tone: "muted" as const, icon: Mail },
-    { label: "Admin assigned", value: prefs?.admin_id ? 1 : 0, tone: "muted" as const, icon: ShieldCheck },
   ];
 
   return (
@@ -139,7 +132,7 @@ export default async function AccountPage() {
           </Link>
         </div>
 
-        <div className="grid gap-px overflow-hidden border border-border bg-border sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-px overflow-hidden border border-border bg-border sm:grid-cols-3">
           {stats.map((s) => (
             <div key={s.label} className="bg-card px-5 py-5">
               <div className="flex items-center justify-between gap-2">
@@ -172,7 +165,19 @@ export default async function AccountPage() {
           ))}
         </div>
 
-        <NotifyPreferences prefs={prefs} admins={admins} userEmail={auth.user.email} />
+        <div className="terminal-panel p-6">
+          <p className="section-kicker">// notification delivery</p>
+          <p className="mt-2 font-sentient text-2xl text-card-foreground">
+            Configured on each server
+          </p>
+          <p className="mt-2 max-w-2xl font-mono text-xs leading-6 text-muted-foreground">
+            The portal does not store provider destinations, API keys, passwords or
+            webhooks. On each monitored server, run <code>sudo hyn wizard</code>.
+            Provider credentials stay in <code>/etc/hyn-view/secrets</code> with
+            root-only permissions. This page keeps only the delivery results reported
+            by your server.
+          </p>
+        </div>
 
         <NodeSettings nodes={nodes} />
 
@@ -266,6 +271,7 @@ export default async function AccountPage() {
 function Shell({ children, email }: { children: React.ReactNode; email?: string | null }) {
   return (
     <div className="min-h-screen bg-background">
+      <ParticleField blur="subtle" />
       <main className="container pt-32 pb-10 md:pt-44">{children}</main>
       <footer className="container flex flex-col gap-3 border-t border-border py-8 font-mono text-xs text-muted-foreground md:flex-row md:items-center md:justify-between">
         <span className="flex flex-wrap items-center gap-x-4 gap-y-2">

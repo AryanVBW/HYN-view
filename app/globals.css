@@ -176,6 +176,79 @@ nav {
   height: 100%;
 }
 
+/* Fixed full-viewport particle background for every page that isn't the
+   landing page (which keeps its own #webgl hero above). The field occupies the
+   page's zero layer while every following sibling is explicitly lifted above
+   it. A negative z-index would put the WebGL surface behind the root's opaque
+   background: the GPU would still draw particles, but the browser compositor
+   would correctly hide them. Opacity is themed down in light
+   mode -- the same additive-blended points that read as a quiet glow on a
+   near-black page turn into visible grey static on a light one at full
+   strength, since additive blending has nothing dark to add light *to*. */
+.particle-field {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.9;
+}
+
+.particle-field ~ * {
+  position: relative;
+  z-index: 1;
+}
+
+.dark .particle-field {
+  opacity: 1;
+}
+
+/* Three blur tiers, tuned so text over the field never has to fight it:
+   - crisp:   sign-in. Barely blurred -- little content on that page to
+              compete with, so the field is allowed to be the page's visual
+              anchor rather than recede.
+   - soft:    the middle ground (link, legal, terms, privacy).
+   - subtle:  dashboard, account, admin -- pages dense with real data. Heavy
+              blur turns the points into an ambient wash of light rather than
+              a shape, so a chart line or a table row never has to compete
+              with a bright dot sitting behind it. */
+.particle-field--crisp {
+  filter: blur(1px);
+}
+
+.particle-field--soft {
+  filter: blur(18px);
+}
+
+.particle-field--subtle {
+  filter: blur(48px);
+  opacity: 0.55;
+}
+
+.dark .particle-field--subtle {
+  opacity: 0.7;
+}
+
+@keyframes admin-stat-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.admin-stat-card {
+  animation: admin-stat-enter 0.42s both ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .admin-stat-card {
+    animation: none;
+  }
+}
+
 .section-pad {
   padding-block: clamp(4.5rem, 10vw, 9rem);
 }

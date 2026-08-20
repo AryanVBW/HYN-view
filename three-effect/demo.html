@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>ThreeCanvas effect — standalone demo</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #050505; overflow: hidden; }
+  #hero { position: relative; width: 100%; height: 100%; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #controls {
+    position: fixed; top: 16px; left: 16px; z-index: 10;
+    font: 12px monospace; color: #ccc; background: rgba(0,0,0,.5);
+    padding: 12px; border-radius: 8px; display: grid; gap: 8px;
+  }
+  #controls label { display: flex; justify-content: space-between; gap: 8px; }
+</style>
+</head>
+<body>
+  <div id="hero">
+    <canvas id="hero-canvas"></canvas>
+  </div>
+
+  <div id="controls">
+    <label>Flux Dynamics <input id="flux" type="range" min="0" max="2" step="0.1" value="0.6"></label>
+    <label>Processing Threads <input id="threads" type="range" min="0.1" max="2" step="0.1" value="0.9"></label>
+    <label>Clock Rate <input id="clock" type="range" min="0" max="0.5" step="0.01" value="0.1"></label>
+    <label>Density <input id="density" type="range" min="0.1" max="1" step="0.05" value="0.8"></label>
+    <label>Energy Profile
+      <button data-color="#f97316">orange</button>
+      <button data-color="#3b82f6">blue</button>
+      <button data-color="#10b981">green</button>
+    </label>
+  </div>
+
+  <script type="module">
+    import { ThreeCanvas } from "./three-canvas.mjs";
+
+    const canvas = document.getElementById("hero-canvas");
+    const effect = new ThreeCanvas(canvas);
+
+    document.getElementById("flux").addEventListener("input", (e) =>
+      effect.setParams({ fluxDynamics: parseFloat(e.target.value) }));
+    document.getElementById("threads").addEventListener("input", (e) =>
+      effect.setParams({ processingThreads: parseFloat(e.target.value) }));
+    document.getElementById("clock").addEventListener("input", (e) =>
+      effect.setParams({ clockRate: parseFloat(e.target.value) }));
+    document.getElementById("density").addEventListener("input", (e) =>
+      effect.setParams({ density: parseFloat(e.target.value) }));
+    document.querySelectorAll("[data-color]").forEach((btn) =>
+      btn.addEventListener("click", () => effect.setColor(btn.dataset.color)));
+  </script>
+</body>
+</html>

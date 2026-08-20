@@ -1,11 +1,13 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Loader2, Lock, Mail } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/client";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
+import { buildPasswordSignUpRequest, normalizeInternalPath } from "@/lib/legal-consent";
 
 const GoogleIcon = (props: React.SVGProps<SVGSVGElement>) => (
   <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden {...props}>
@@ -33,11 +35,12 @@ type Mode = "signin" | "signup";
 export function SignInForm() {
   const router = useRouter();
   const params = useSearchParams();
-  const nextPath = params.get("next") ?? "/dashboard";
+  const nextPath = normalizeInternalPath(params.get("next"));
 
   const [mode, setMode] = useState<Mode>("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [busy, setBusy] = useState<null | "google" | "password">(null);
   const [error, setError] = useState<string | null>(params.get("error"));
   const [notice, setNotice] = useState<string | null>(null);
@@ -78,13 +81,24 @@ export function SignInForm() {
     const supabase = createClient();
 
     if (mode === "signup") {
-      const { data, error } = await supabase.auth.signUp({
-        email: email.trim(),
-        password,
-        options: {
+      let request;
+      try {
+        request = buildPasswordSignUpRequest({
+          email,
+          password,
           emailRedirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(nextPath)}`,
-        },
-      });
+          acceptedTerms,
+        });
+      } catch (registrationError) {
+        setBusy(null);
+        setError(
+          registrationError instanceof Error
+            ? registrationError.message
+            : "Legal acceptance is required to register.",
+        );
+        return;
+      }
+      const { data, error } = await supabase.auth.signUp(request);
       setBusy(null);
       if (error) {
         setError(error.message);
@@ -151,6 +165,29 @@ export function SignInForm() {
           </span>
         </label>
 
+        {mode === "signup" ? (
+          <label className="flex items-start gap-3 border border-input bg-input/10 px-3 py-3">
+            <input
+              type="checkbox"
+              required
+              checked={acceptedTerms}
+              onChange={(event) => setAcceptedTerms(event.target.checked)}
+              className="mt-0.5 size-4 shrink-0 accent-current"
+            />
+            <span className="font-mono text-xs leading-5 text-muted-foreground">
+              I am at least 18 and accept the{" "}
+              <Link href="/terms" target="_blank" className="text-primary underline underline-offset-4">
+                Terms of Use
+              </Link>{" "}
+              and acknowledge the{" "}
+              <Link href="/privacy" target="_blank" className="text-primary underline underline-offset-4">
+                Privacy Notice
+              </Link>
+              .
+            </span>
+          </label>
+        ) : null}
+
         <label className="block">
           <span className="mb-1.5 block font-mono text-[0.65rem] uppercase text-muted-foreground">
             Password
@@ -181,11 +218,30 @@ export function SignInForm() {
           </p>
         ) : null}
 
-        <Button type="submit" size="sm" disabled={busy !== null} className="w-full gap-2">
+        <Button
+          type="submit"
+          size="sm"
+          disabled={busy !== null || (mode === "signup" && !acceptedTerms)}
+          className="w-full gap-2"
+        >
           {busy === "password" ? <Loader2 className="size-4 animate-spin" /> : null}
           {mode === "signup" ? "Create account" : "Sign in"}
         </Button>
       </form>
+
+      {mode === "signin" ? (
+        <p className="text-center font-mono text-[0.65rem] leading-5 text-muted-foreground">
+          By continuing, you confirm that you are at least 18 and accept the{" "}
+          <Link href="/terms" target="_blank" className="text-primary underline underline-offset-4">
+            Terms of Use
+          </Link>{" "}
+          and acknowledge the{" "}
+          <Link href="/privacy" target="_blank" className="text-primary underline underline-offset-4">
+            Privacy Notice
+          </Link>
+          .
+        </p>
+      ) : null}
 
       <p className="text-center font-mono text-xs text-muted-foreground">
         {mode === "signup" ? "Already have an account?" : "No account yet?"}{" "}
@@ -195,6 +251,7 @@ export function SignInForm() {
             setMode(mode === "signup" ? "signin" : "signup");
             setError(null);
             setNotice(null);
+            setAcceptedTerms(false);
           }}
           className="text-primary underline underline-offset-4 hover:text-primary/80"
         >

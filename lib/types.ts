@@ -99,45 +99,6 @@ export type Profile = {
   updated_at: string;
 };
 
-export type ChannelKind = "resend" | "brevo" | "smtp" | "ntfy" | "telegram" | "webhook";
-
-// Note the absence of `secret`: the column grant in supabase/schema.sql makes it
-// unreadable from a browser session, so it is deliberately not in this type.
-export type NotificationChannel = {
-  id: string;
-  owner: string;
-  node_id: string | null;
-  kind: ChannelKind;
-  target: string;
-  extra: Record<string, unknown>;
-  enabled: boolean;
-  created_at: string;
-};
-
-// And therefore `select("*")` on notification_channels is denied outright —
-// Postgres refuses the whole statement when `*` expands onto a column the role
-// cannot read, so this is not "the secret comes back empty", it is "the query
-// fails". Select these columns instead.
-export const CHANNEL_COLUMNS =
-  "id, owner, node_id, kind, target, extra, enabled, created_at" as const;
-
-// What a user picks: an address, an optional phone number, and which admin
-// should manage their delivery. The actual channel plumbing lives on that
-// admin's own NotificationChannel rows, configured from the admin panel.
-export type NotifyPrefs = {
-  user_id: string;
-  notify_email: string | null;
-  notify_phone: string | null;
-  admin_id: string | null;
-  updated_at: string;
-};
-
-export type AdminOption = {
-  id: string;
-  email: string | null;
-  full_name: string | null;
-};
-
 export type NotificationLogRow = {
   id: number;
   node_id: string;
@@ -168,6 +129,22 @@ export type AdminOverview = {
   notifications_24h: number;
   notifications_failed_24h: number;
   metrics_24h: number;
+};
+
+export type AdminTrendPoint = {
+  time: string;
+  cpu: number | null;
+  down: number;
+  up: number;
+};
+
+export type NotificationTemplate = {
+  template_key: "alert" | "report";
+  name: string;
+  description: string;
+  html_template: string;
+  updated_at: string;
+  updated_by_email: string | null;
 };
 
 export type AdminNode = {

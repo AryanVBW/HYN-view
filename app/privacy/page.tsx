@@ -1,264 +1,329 @@
 import type { Metadata } from "next";
-import { Important, LegalPage, Placeholder } from "@/components/legal-page";
+import Link from "next/link";
+import { Important, LegalPage } from "@/components/legal-page";
 
 export const metadata: Metadata = {
   title: "Privacy Policy / HYN-view",
   description:
-    "What the hyn-view agent reads, what is sent to the dashboard, who can see it, and how to reduce or delete it.",
+    "How NexusV handles account data and server telemetry for the HYN-view hosted dashboard.",
 };
+
+const contact = "vivek.aryanvbw@gmail.com";
 
 export default function PrivacyPage() {
   return (
-    <LegalPage kicker="// privacy" title="Privacy Policy" updated="19 August 2026">
+    <LegalPage kicker="// privacy" title="Privacy Policy" updated="21 August 2026">
       <Important>
-        Placeholders like <Placeholder>[CONTACT EMAIL]</Placeholder> must be filled in
-        before this is published, and reviewed by a lawyer in your jurisdiction. If
-        you operate this dashboard for other people you are a data controller and
-        obligations apply to you regardless of what this page says.
+        HYN-view server telemetry can be personal or confidential data when a
+        hostname, email, account name, IP address, process name or alert identifies a
+        person or reveals operational details. We minimise this data, but do not
+        describe it as anonymous or non-personal in every context.
       </Important>
 
-      <h2>1. Two parts, and which one you are using</h2>
+      <h2>1. Operator, scope and roles</h2>
       <p>
-        The <strong>agent</strong> runs on a server you administer. On its own it reads
-        local counters and prints them to your terminal or emails them to an address
-        you configure. It sends <strong>nothing to the author of this software</strong>,
-        contains no usage analytics, and needs no account.
+        <strong>NEXUSV TECHNOLOGIES PRIVATE LIMITED</strong> operates the HYN-view
+        dashboard at <a href="https://www.hyn-view.in">www.hyn-view.in</a> and{" "}
+        <a href="https://www.hyn-view.info">www.hyn-view.info</a> (the
+        &ldquo;Hosted Service&rdquo;). Privacy, grievance, security and support
+        questions may be sent to <a href={`mailto:${contact}`}>{contact}</a>.
       </p>
       <p>
-        The <strong>dashboard</strong> is optional. Only once you run{" "}
-        <code>sudo hyn link</code> and approve it does a server start sending
-        telemetry to it.
+        The open-source <strong>agent</strong> runs on a server owned or administered
+        by its installer. It can work locally without an account. NexusV receives no
+        server telemetry from an unlinked agent, although the agent can still make
+        the built-in and configured outbound requests listed below. Linking and
+        approving a server starts submissions to the optional Hosted Service.
       </p>
       <p>
-        The dashboard is not run by the software&apos;s author as a public service.
-        Whoever deploys it operates it and is the controller of the data in it. For
-        this deployment that is <Placeholder>[YOUR LEGAL NAME / COMPANY]</Placeholder>,{" "}
-        <Placeholder>[POSTAL ADDRESS]</Placeholder>, contactable at{" "}
-        <Placeholder>[CONTACT EMAIL]</Placeholder>.
+        NexusV is controller or Data Fiduciary for account, authentication, service
+        security and operator-administration data. A customer that decides why and
+        how to monitor its server is normally controller of that telemetry, and
+        NexusV processes it for the customer. A self-hosted portal has a separate
+        operator responsible for its own privacy notice and compliance.
       </p>
 
-      <h2>2. What the agent reads on the machine</h2>
+      <h2>2. What the agent can read</h2>
+      <p>Depending on version and settings, local measurements can include:</p>
+      <ul>
+        <li>
+          hostname or node label, OS and kernel, uptime, CPU model and clocks, load,
+          temperature sensors and service status;
+        </li>
+        <li>
+          CPU, memory, swap, pressure, filesystem capacity, disk throughput and
+          utilisation;
+        </li>
+        <li>
+          interface and connection counters, latency, packet loss, DNS timing and
+          throughput tests, plus optional local or public IP, MAC, gateway and Wi-Fi
+          name;
+        </li>
+        <li>
+          process names and resource use. Only when an administrator sets{" "}
+          <code>notify_access_details=on</code>, local alerts or reports can include
+          run-as and session usernames, session source addresses and the source IP
+          with the most rejected logins. The default is <code>off</code>; and
+        </li>
+        <li>
+          unit names, states, restarts, versions and diagnostic summaries. Older
+          agents or optional diagnostic fields can include a short service-log
+          excerpt, so administrators should upgrade and review settings before
+          linking a sensitive machine.
+        </li>
+      </ul>
       <p>
-        All of it comes from the operating system and stays on the machine unless you
-        link it to a dashboard.
+        This information stays on the server unless its administrator links a portal
+        or configures an outbound notification or endpoint. Install and use the agent
+        only with the machine owner&apos;s authority.
       </p>
-      <h3>System and resource usage</h3>
+
+      <h3>Built-in and default outbound requests</h3>
       <p>
-        Hostname, operating system, kernel, uptime, processor model and core count,
-        per-core clock speeds and governor, every temperature sensor the hardware
-        exposes, processor utilisation, load, pressure stall information, memory and
-        swap, per-filesystem capacity, and disk throughput.
+        An agent can make network requests without being linked. Default settings and
+        installed timers can contact:
       </p>
-      <h3>Network</h3>
+      <ul>
+        <li>
+          Cloudflare <code>1.1.1.1</code> and Google <code>8.8.8.8</code> for latency
+          and packet-loss probes, plus the local gateway;
+        </li>
+        <li>
+          the machine&apos;s configured DNS resolver to resolve{" "}
+          <code>cloudflare.com</code> for DNS timing;
+        </li>
+        <li>
+          <code>api.ipify.org</code>, falling back to <code>ifconfig.me</code>, for
+          public-IP discovery;
+        </li>
+        <li>
+          an installed Ookla Speedtest or <code>speedtest-cli</code> provider, or{" "}
+          <code>speed.cloudflare.com</code> as the curl fallback, for throughput tests;
+        </li>
+        <li>
+          <code>install.hiwaynetwork.io</code> for the optional Highway version
+          manifest; and <code>registry.npmjs.org</code> for update checks.
+        </li>
+      </ul>
       <p>
-        Per-interface throughput, errors and drops; link speed, duplex, MTU and MAC
-        address; TCP connection states, retransmits and connection-tracking usage;
-        the local IP address; latency and packet loss to the configured probe
-        targets; the machine&apos;s <strong>public IP address</strong>; and on wireless
-        links the network name and gateway.
+        A configured notification provider, heartbeat URL or linked portal is also
+        contacted. Every external endpoint necessarily receives the server&apos;s
+        public or egress source IP and ordinary request metadata; the system resolver
+        sees DNS queries. Diagnostic endpoints do not receive the hosted telemetry
+        payload, but notification destinations receive their message content and a
+        linked portal receives the payload described below. Disable these functions
+        with <code>latency_targets=</code>, <code>dns_probe=off</code>,{" "}
+        <code>public_ip=off</code>, <code>speedtest_per_day=0</code>,{" "}
+        <code>highway_update_check=off</code> or <code>highway_track=off</code>, and{" "}
+        <code>auto_update=off</code>, as applicable.
       </p>
-      <h3>Processes and accounts</h3>
+
+      <h2>3. What the Hosted Service handles</h2>
+      <h3>Accounts and authentication</h3>
+      <ul>
+        <li>email address and, if supplied, name;</li>
+        <li>
+          a protected password verifier and authentication records handled by
+          Supabase Auth, or identity information from an enabled OAuth provider;
+        </li>
+        <li>strictly necessary session cookies and account-security records; and</li>
+        <li>
+          IP address, user agent, timestamp, error and security metadata generated by
+          Vercel, Supabase or the application.
+        </li>
+      </ul>
       <p>
-        The process list, and for the heaviest processes their name, resource use and{" "}
-        <strong>the account name of the user running them</strong>. It also reads{" "}
-        <strong>who is currently logged in</strong> — account name, terminal,{" "}
-        <strong>the source network address of the remote session</strong> and login
-        time — and counts <strong>rejected SSH authentication attempts</strong>.
+        NexusV does not receive or display a user&apos;s plaintext password. Supabase
+        Auth processes the password and keeps a protected verifier. If Google sign-in
+        is enabled, HYN-view does not receive the user&apos;s Google password.
+      </p>
+
+      <h3>Servers, telemetry and administration</h3>
+      <ul>
+        <li>
+          node name, hostname, OS and agent versions, pairing and last-seen times,
+          settings and administrative status;
+        </li>
+        <li>
+          CPU, memory, load, temperature, storage, network, process-name, service,
+          alert and throughput-test fields sent by the installed agent version;
+        </li>
+        <li>
+          notification destination and delivery metadata, including subject, result
+          and error details;
+        </li>
+        <li>
+          administrator actions and reasons; and
+        </li>
+        <li>the selected visual theme stored locally in the browser.</li>
+      </ul>
+      <p>
+        The Hosted Service is not intended to collect file contents, command
+        arguments, environment variables, keystrokes, database contents or
+        application records. The default <code>notify_access_details=off</code>
+        excludes run-as and session usernames, session source addresses and the
+        source IP with the most rejected logins from notifications. It does not make
+        every notification anonymous: depending on the alert, report and settings, a
+        message can still contain hostname, wireless SSID, local or public IP,
+        gateway, DNS details, mount paths, and process or service context. Setting it
+        to <code>on</code> additionally permits the access identities in messages sent
+        directly to the administrator&apos;s configured destinations.
+      </p>
+      <p>
+        Notification destinations and provider credentials are configured on each
+        monitored server. API keys, SMTP passwords, tokens and webhook URLs are not
+        stored in Supabase or returned by the Hosted Service. They remain in the
+        root-only <code>/etc/hyn-view/secrets</code> file until the server
+        administrator removes them. The agent contacts the selected provider
+        directly and can separately report destination and delivery-result metadata
+        to the Hosted Service.
+      </p>
+
+      <h2>4. Purposes and legal bases</h2>
+      <p>
+        We process data to register and authenticate users; link authorised servers;
+        show requested health information; apply alert rules; send service messages;
+        provide support; maintain security and availability; prevent abuse; enforce
+        the <Link href="/terms">Terms</Link>; and meet legal obligations.
+      </p>
+      <p>
+        Where EU/EEA GDPR applies, the legal bases are performance of the service
+        contract, legitimate interests in operating and securing the service, legal
+        obligation, and consent where applicable law requires it for an optional
+        feature. A customer that submits information about other people must provide
+        its own lawful basis, notices and rights process.
       </p>
       <Important>
-        This means reports and alerts can contain personal data. That is deliberate:
-        on a server that runs unattended, &ldquo;a login from an address I do not
-        recognise&rdquo; is often the most important line in a daily report. Section 6
-        explains how to switch it off.
+        We do <strong>not</strong> sell or rent personal data, use it for behavioural
+        advertising, or use customer telemetry to train AI models.
       </Important>
 
-      <h2>3. What reaches the dashboard</h2>
+      <h2>5. Who can access data</h2>
       <p>
-        Every push — by default one every five minutes — sends the measurements above,
-        including <strong>the account names of the owners of top processes</strong>,
-        plus the machine&apos;s name, hostname, operating system, agent version, the
-        alert rules currently firing, and the last throughput test. After trying to
-        send a notification it also reports the channel, destination, subject, result
-        and any error.
+        Standard accounts can access only their own tenant data through the normal
+        dashboard, enforced by database row-level policies. Authorised NexusV
+        deployment administrators have privileged access across tenants where needed
+        to operate, secure and support the Hosted Service, investigate abuse or
+        comply with law. This access does not transfer ownership of customer data or
+        permit unrelated use.
       </p>
       <p>
-        <strong>Not sent:</strong> file contents, directory listings, command
-        arguments, environment variables, keystrokes, log or journal line text,
-        database or application data, or the source addresses of logged-in sessions.
-      </p>
-      <p>
-        Note the asymmetry: session account names and source addresses{" "}
-        <strong>do</strong> appear in the body of alert and report messages delivered
-        to your own channels — your inbox, your push topic — because that is where
-        they are useful. They are not stored in the dashboard&apos;s database.
+        Providers receive only what is needed for their function. The primary
+        providers are <strong>Vercel</strong> for web hosting and request processing,{" "}
+        <strong>Supabase</strong> for database and authentication, and{" "}
+        <strong>Resend</strong> for transactional email. Google is involved only if
+        enabled and selected for sign-in. Administrator-selected notification
+        destinations are contacted directly by a monitored server only when
+        configured locally. See the{" "}
+        <Link href="/subprocessors">provider and subprocessor list</Link>.
+        Information may also be disclosed when law requires it or where reasonably
+        necessary to protect users and service security, subject to applicable
+        safeguards.
       </p>
 
-      <h2>4. What the dashboard stores about you</h2>
+      <h2>6. Regions and transfers</h2>
+      <p>
+        The operator has configured the Supabase project&apos;s primary database
+        region as <strong>Mumbai, India</strong>. That does not mean every request,
+        copy, log or backup is processed only in Mumbai. Vercel uses distributed
+        infrastructure, and Vercel, Supabase, Resend and optional providers may
+        process data in other countries.
+      </p>
+      <p>
+        Where EU/EEA transfer restrictions apply, an appropriate transfer mechanism
+        and supplementary safeguards must apply before a restricted transfer. A
+        business customer can review the public{" "}
+        <Link href="/dpa">Data Processing Addendum</Link> and request signed
+        data-processing or transfer terms at{" "}
+        <a href={`mailto:${contact}`}>{contact}</a>.
+      </p>
+
+      <h2>7. Security and credentials</h2>
+      <p>
+        Safeguards include HTTPS, Supabase authentication, tenant row-level policies,
+        restricted administrator roles, hashed node credentials and pairing codes,
+        and root-only local secret files where configured. Pairing codes become
+        unusable immediately when they expire after 15 minutes; expired database
+        records are physically deleted on the next pairing request or a maintenance
+        cleanup cycle. No internet service is perfectly secure. Keep node tokens,
+        notification credentials and local root access protected.
+      </p>
+      <p>
+        Report suspected security or privacy incidents privately under the{" "}
+        <Link href="/security">Security Policy</Link> to{" "}
+        <a href={`mailto:${contact}`}>{contact}</a>.
+      </p>
+
+      <h2>8. Retention and deletion</h2>
       <ul>
-        <li>Your email address, and your name if you give one.</li>
         <li>
-          A session cookie so you stay signed in. Strictly necessary.{" "}
-          <strong>No advertising, profiling or third-party tracking cookies are
-          set.</strong>
+          Hosted metrics are ordinarily kept on a rolling 30-day basis and pruned
+          during successful ingestion. If a node stops sending, older rows can remain
+          until maintenance or deletion.
         </li>
         <li>
-          For each machine: name, hostname, operating system, agent version, when it
-          paired, when it last reported, its status and its settings.
+          Pairing codes become unusable after 15 minutes; expired records are
+          physically deleted on the next pairing request or maintenance cleanup
+          cycle.
         </li>
         <li>
-          Notification channels: type, destination, and — only if you choose to store
-          it centrally — the provider API key or password. See section 5.
+          Other configuration, alert, speed-test, notification and administrative
+          records are kept while needed for the account, security or law, or until
+          the related node or account is deleted.
         </li>
-        <li>Every notification attempt, with its result and failure reason.</li>
-        <li>The telemetry in section 3.</li>
         <li>
-          If an administrator pauses, suspends or revokes your machine or account,
-          that action with its reason, time and the administrator&apos;s identity.
+          On the server, default local metric history is 8 days, the default alert
+          log is 31 days, and speed-test history is limited to the latest 90 records.
+          Local configuration remains until removed or purged by the administrator.
         </li>
       </ul>
-      <p>Pairing codes are stored only as a hash and are deleted after they expire.</p>
-
-      <h3>Who can see it</h3>
       <p>
-        You, for your own machines — enforced in the database itself, not just in the
-        interface. <strong>Administrators of this deployment can see every
-        client&apos;s machines, telemetry and notification history</strong>, and can
-        pause, suspend or revoke any of them. If you did not deploy this yourself,
-        assume its operator can see your telemetry. Beyond that: the processors in
-        section 7, and nobody else. Your data is{" "}
-        <strong>not sold, shared for advertising, or used to train models</strong>.
+        <code>sudo hyn unlink</code> stops future submissions but does not delete data
+        already hosted. To request deletion, email{" "}
+        <a href={`mailto:${contact}`}>{contact}</a> from the account email and identify
+        the account and nodes. After verification, we will delete requested data from
+        active Hosted Service systems within <strong>7 days</strong>. Limited copies
+        can remain temporarily in provider backups, security records or where law
+        requires retention; they remain isolated from ordinary use and expire under
+        the applicable schedule.
       </p>
 
-      <h2>5. Where credentials live — your choice</h2>
+      <h2>9. Choices and rights</h2>
       <p>
-        Notification provider credentials can be stored <strong>in the dashboard</strong>,
-        which is convenient because every server picks up a change, at the cost of the
-        credential being in the database. It is protected by being{" "}
-        <strong>write-only from any browser session</strong> — the dashboard can
-        replace a key but can never display one — and is released only to a server
-        presenting its own token.
+        You may use the open-source agent without linking the Hosted Service. Settings
+        can also disable optional public-IP lookups, latency or DNS probes, throughput
+        tests, update checks, service tracking and outbound notifications. Keep{" "}
+        <code>notify_access_details=off</code> unless a legitimate monitoring need,
+        lawful basis and restricted destination justify access identifiers in
+        messages. That setting hides those access identities, not the other system
+        context an alert or report needs to describe the server.
       </p>
       <p>
-        Or store it <strong>on the machine</strong> in <code>/etc/hyn-view/secrets</code>,
-        mode <code>0600</code>, root only. A credential there overrides the dashboard,
-        so central storage is entirely optional.
-      </p>
-      <p>
-        Machine tokens and pairing codes are stored <strong>only as SHA-256
-        hashes</strong>. Tokens never appear in command-line arguments, so other local
-        users cannot read them from the process list. No agent is ever given a key
-        that would bypass database access controls.
-      </p>
-
-      <h2>6. Reducing what is collected</h2>
-      <table>
-        <thead>
-          <tr><th>To stop collecting</th><th>Set</th></tr>
-        </thead>
-        <tbody>
-          <tr><td>The public IP address</td><td><code>public_ip=off</code></td></tr>
-          <tr><td>Node/service tracking</td><td><code>highway_track=off</code></td></tr>
-          <tr><td>Latency probes to third parties</td><td><code>latency_targets=</code></td></tr>
-          <tr><td>DNS probes</td><td><code>dns_probe=off</code></td></tr>
-          <tr><td>Throughput tests</td><td><code>speedtest_per_day=0</code></td></tr>
-          <tr><td>Update checks</td><td><code>auto_update=off</code></td></tr>
-          <tr><td>Logged-in sessions and rejected logins in messages</td><td><code>report_enabled=off</code></td></tr>
-          <tr><td>Sending anything to a dashboard</td><td>never run <code>hyn link</code>, or run <code>sudo hyn unlink</code></td></tr>
-        </tbody>
-      </table>
-
-      <h2>7. Processors and third-party services</h2>
-      <p>
-        Running the dashboard involves <strong>Supabase</strong> (database and
-        authentication) and <Placeholder>[HOSTING PROVIDER]</Placeholder>. State the
-        region your project runs in: <Placeholder>[REGION]</Placeholder>, and, if data
-        leaves your users&apos; jurisdiction, the transfer mechanism you rely on.
-      </p>
-      <p>Only if you enable them: Google (sign-in), your email provider (Resend, Brevo or SMTP), ntfy or Telegram, a Slack or Discord webhook, and an external dead-man&apos;s-switch service.</p>
-      <h3>Contacted by the agent</h3>
-      <table>
-        <thead>
-          <tr><th>Endpoint</th><th>Purpose</th><th>Disable</th></tr>
-        </thead>
-        <tbody>
-          <tr><td><code>api.ipify.org</code>, <code>ifconfig.me</code></td><td>Discover the public IP</td><td><code>public_ip=off</code></td></tr>
-          <tr><td><code>1.1.1.1</code>, <code>8.8.8.8</code></td><td>Latency probes</td><td><code>latency_targets=</code></td></tr>
-          <tr><td><code>cloudflare.com</code></td><td>DNS timing probe</td><td><code>dns_probe=off</code></td></tr>
-          <tr><td><code>speed.cloudflare.com</code></td><td>Throughput tests</td><td><code>speedtest_per_day=0</code></td></tr>
-          <tr><td><code>registry.npmjs.org</code></td><td>Update check</td><td><code>auto_update=off</code></td></tr>
-          <tr><td><code>install.hiwaynetwork.io</code></td><td>Only with node tracking on: compares installed version against published</td><td><code>highway_update_check=off</code></td></tr>
-        </tbody>
-      </table>
-      <p>
-        Each is an ordinary network request, so the operator of that endpoint sees your
-        machine&apos;s IP address. None of them receive your telemetry. We do not
-        control third-party services and are not responsible for them.
+        Subject to applicable law, you may request access, correction, deletion,
+        restriction, objection, portability or withdrawal of consent at{" "}
+        <a href={`mailto:${contact}`}>{contact}</a>. We may verify identity. If NexusV
+        processes telemetry only for your organisation, direct the request to that
+        organisation first. EEA residents may complain to their competent supervisory
+        authority; Indian users may use the grievance contact and available statutory
+        complaint process.
       </p>
 
-      <h2>8. How long it is kept</h2>
-      <table>
-        <thead><tr><th>Data</th><th>Retention</th></tr></thead>
-        <tbody>
-          <tr><td>Telemetry in the dashboard</td><td><strong>30 days</strong>, then deleted automatically</td></tr>
-          <tr><td>Local metric history on the machine</td><td><strong>8 days</strong> by default (<code>metrics_keep_days</code>)</td></tr>
-          <tr><td>Notification history</td><td>Until the account is deleted</td></tr>
-          <tr><td>Administrative audit records</td><td><Placeholder>[STATE PERIOD]</Placeholder></td></tr>
-          <tr><td>Pairing codes</td><td>Expire in 15 minutes, purged within the hour</td></tr>
-        </tbody>
-      </table>
-
-      <h2>9. Legal bases, if UK/EU GDPR applies</h2>
+      <h2>10. Adults, automated decisions and changes</h2>
       <p>
-        <Placeholder>[DECIDE which apply and delete the rest]</Placeholder>{" "}
-        <strong>Contract</strong> — to provide the dashboard you asked for.{" "}
-        <strong>Legitimate interests</strong> — keeping the service secure, preventing
-        abuse, and the administrative oversight in section 4.{" "}
-        <strong>Consent</strong> — where you choose to store a provider credential
-        centrally or to sign in with Google, withdrawable at any time.
+        Registration is for people aged <strong>18 or older</strong>. Alert rules
+        compare measurements with administrator-selected thresholds and do not make
+        decisions producing legal or similarly significant effects about people.
       </p>
       <p>
-        Where telemetry identifies <em>your</em> colleagues rather than you — an
-        account name in a process list — <strong>you</strong> are the controller for
-        that data and are responsible for informing them.
+        For material policy changes we will provide email or prominent dashboard
+        notice at least 30 days in advance where practical. Urgent legal or security
+        changes may take effect sooner, with notice as soon as reasonably possible.
       </p>
 
-      <h2>10. Your rights, and doing it yourself</h2>
       <p>
-        You may request access, correction, deletion, a portable copy, restriction, or
-        object to processing. Write to <Placeholder>[CONTACT EMAIL]</Placeholder>; we
-        aim to reply within 30 days. Most of it you can do immediately:
-      </p>
-      <ul>
-        <li><strong>Stop collection now</strong> — <code>sudo hyn unlink</code> on the machine.</li>
-        <li><strong>Cut a machine off permanently</strong> — revoke it in the dashboard.</li>
-        <li><strong>Delete a machine and all its telemetry</strong> — delete the node; its metrics, speed tests and alerts go with it.</li>
-        <li><strong>Delete demo data</strong> — one click wherever it appears.</li>
-        <li><strong>Delete your account</strong> — <Placeholder>[DESCRIBE THE PROCESS]</Placeholder>.</li>
-      </ul>
-      <p>
-        In the EEA or UK you may complain to your supervisory authority; in the UK
-        that is the ICO.
-      </p>
-
-      <h2>11. Security</h2>
-      <p>
-        Access is restricted per account in the database, not only in the interface.
-        Credentials are hashed or held in a column no browser session can read.
-        Secrets on the machine are <code>0600</code> and root-only. Message bodies pass
-        through restricted temporary files rather than command-line arguments. Text
-        from system journals is escaped before being placed in JSON, because it is
-        attacker-influenced input. No system is perfectly secure and no guarantee is
-        given. Report vulnerabilities to{" "}
-        <Placeholder>[SECURITY CONTACT]</Placeholder> rather than publicly.
-      </p>
-
-      <h2>12. Children, automated decisions, and changes</h2>
-      <p>
-        This is server tooling, not directed at children, and not knowingly offered to
-        anyone under <Placeholder>[16 / 13]</Placeholder>. Alert rules compare readings
-        against thresholds you set; there is no profiling or automated decision-making
-        with legal effects. Material changes to this policy will be announced by{" "}
-        <Placeholder>[HOW]</Placeholder> before taking effect.
+        <strong>Operator:</strong> NEXUSV TECHNOLOGIES PRIVATE LIMITED
+        <br />
+        <strong>Contact:</strong> <a href={`mailto:${contact}`}>{contact}</a>
       </p>
     </LegalPage>
   );

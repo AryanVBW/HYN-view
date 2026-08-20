@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { useMemo, useState, useRef, useEffect } from "react";
+import { useMemo, useState, useRef } from "react";
 import { createPortal, useFrame } from "@react-three/fiber";
 import { useFBO } from "@react-three/drei";
 
@@ -60,7 +60,7 @@ export function Particles({
     m.uniforms.initialPositions.value =
       simulationMaterial.uniforms.positions.value;
     return m;
-  }, [simulationMaterial]);
+  }, [simulationMaterial, target.texture]);
 
   const [scene] = useState(() => new THREE.Scene());
   const [camera] = useState(

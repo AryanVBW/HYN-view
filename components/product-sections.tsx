@@ -120,11 +120,13 @@ export function ProductSections() {
         <span className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <Link className="hover:text-primary" href="/privacy">Privacy</Link>
           <Link className="hover:text-primary" href="/terms">Terms</Link>
+          <Link className="hover:text-primary" href="/acceptable-use">Acceptable use</Link>
+          <Link className="hover:text-primary" href="/security">Security</Link>
           <Link className="hover:text-primary" href="/legal">Disclaimer</Link>
           <span>
             Built by{" "}
-            <a className="text-foreground/80 hover:text-primary" href="https://github.com/AryanVBW" target="_blank" rel="noreferrer">
-              Vivek W
+            <a className="text-foreground/80 hover:text-primary" href="mailto:vivek.aryanvbw@gmail.com">
+              NEXUSV TECHNOLOGIES PRIVATE LIMITED
             </a>
           </span>
         </span>

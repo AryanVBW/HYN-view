@@ -2,14 +2,23 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { AlertTriangle, ShieldAlert } from "lucide-react";
-import { AdminTabs } from "@/components/admin/admin-tabs";
+import { AdminTabs, type AdminTabId } from "@/components/admin/admin-tabs";
 import { AgentVersions } from "@/components/admin/agent-versions";
-import { ChannelManager } from "@/components/admin/channel-manager";
+import { AdminClientDashboard } from "@/components/admin/client-dashboard";
+import { EmailTemplateManager } from "@/components/admin/email-template-manager";
+import {
+  AnimatedAdminStats,
+  FleetOverviewCharts,
+  type AdminStat,
+  type FleetStatusSlice,
+} from "@/components/admin/overview";
 import { PromoteAdminForm } from "@/components/admin/promote-admin-form";
 import { ClientTable, NodeTable } from "@/components/admin/tables";
+import { ParticleField } from "@/components/particle-field";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
 import { claimAdminIfAllowed } from "@/lib/admin-claim";
+import { toFleetTrend } from "@/lib/admin-data";
 import { formatRelative } from "@/lib/dashboard-data";
 import type {
   AdminClient,
@@ -17,11 +26,10 @@ import type {
   AdminNotification,
   AdminOverview,
   AuditEntry,
-  Node,
-  NotificationChannel,
+  Metric,
+  NotificationTemplate,
   Profile,
 } from "@/lib/types";
-import { CHANNEL_COLUMNS } from "@/lib/types";
 
 export const metadata: Metadata = {
   title: "Admin / HYN-view",
@@ -30,7 +38,11 @@ export const metadata: Metadata = {
 
 export const dynamic = "force-dynamic";
 
-export default async function AdminPage() {
+export default async function AdminPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ tab?: string; client?: string; node?: string }>;
+}) {
   if (!isSupabaseConfigured) {
     return (
       <Shell>
@@ -47,6 +59,7 @@ export default async function AdminPage() {
   const supabase = await createClient();
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) redirect("/signin?next=%2Fadmin");
+  const query = await searchParams;
 
   await claimAdminIfAllowed(supabase, auth.user.email);
 
@@ -90,17 +103,34 @@ export default async function AdminPage() {
     );
   }
 
-  const [overviewRes, nodesRes, clientsRes, notifRes, auditRes, ownChannelsRes] = await Promise.all([
+  // This dynamic Server Component needs one request-time snapshot so every
+  // freshness calculation and query uses the same instant.
+  // eslint-disable-next-line react-hooks/purity
+  const renderedAt = Date.now();
+  const since = new Date(renderedAt - 24 * 60 * 60 * 1000).toISOString();
+  const [overviewRes, nodesRes, clientsRes, notifRes, auditRes, templatesRes, fleetMetricsRes] = await Promise.all([
     supabase.rpc("hyn_admin_overview"),
     supabase.rpc("hyn_admin_nodes"),
     supabase.rpc("hyn_admin_clients"),
     supabase.rpc("hyn_admin_notifications", { p_limit: 100 }),
     supabase.rpc("hyn_admin_audit", { p_limit: 50 }),
-    supabase.from("notification_channels").select(CHANNEL_COLUMNS).eq("owner", auth.user.id).order("created_at"),
+    supabase.rpc("hyn_admin_templates"),
+    supabase
+      .from("metrics")
+      .select("node_id,ts,cpu_pct,net_rx_bps,net_tx_bps")
+      .gte("ts", since)
+      .order("ts", { ascending: true })
+      .limit(5000),
   ]);
 
   const rpcError =
-    overviewRes.error ?? nodesRes.error ?? clientsRes.error ?? notifRes.error ?? auditRes.error;
+    overviewRes.error ??
+    nodesRes.error ??
+    clientsRes.error ??
+    notifRes.error ??
+    auditRes.error ??
+    templatesRes.error ??
+    fleetMetricsRes.error;
   if (rpcError) {
     return (
       <Shell email={auth.user.email}>
@@ -123,27 +153,85 @@ export default async function AdminPage() {
   const clients = (clientsRes.data ?? []) as AdminClient[];
   const notifications = (notifRes.data ?? []) as AdminNotification[];
   const audit = (auditRes.data ?? []) as AuditEntry[];
-  const ownChannels = (ownChannelsRes.data ?? []) as NotificationChannel[];
-  // The channel manager's "applies to one specific machine" picker only makes
-  // sense scoped to nodes this admin's own clients actually have, so it does
-  // not offer every machine in the fleet by name.
-  const ownClientIds = new Set(clients.filter((c) => c.role !== "admin").map((c) => c.id));
-  const scopableNodes = nodes.filter((n) => n.owner_id && ownClientIds.has(n.owner_id)) as unknown as Node[];
+  const templates = (templatesRes.data ?? []) as NotificationTemplate[];
+  const fleetMetrics = (fleetMetricsRes.data ?? []) as Pick<
+    Metric,
+    "ts" | "cpu_pct" | "net_rx_bps" | "net_tx_bps"
+  >[];
+  const fleetTrend = toFleetTrend(fleetMetrics);
 
-  const cards: { label: string; value: number; tone?: "bad" | "warn" }[] = [
-    { label: "Clients", value: overview.clients_total },
-    { label: "Machines", value: overview.nodes_total },
-    { label: "Reporting", value: overview.nodes_active },
-    { label: "Gone quiet", value: overview.nodes_stale, tone: overview.nodes_stale ? "bad" : undefined },
-    { label: "Paused", value: overview.nodes_paused, tone: overview.nodes_paused ? "warn" : undefined },
-    { label: "Suspended", value: overview.nodes_suspended, tone: overview.nodes_suspended ? "bad" : undefined },
-    { label: "Open alerts", value: overview.alerts_open, tone: overview.alerts_open ? "warn" : undefined },
+  const cards: AdminStat[] = [
+    { label: "Clients", value: overview.clients_total, note: `${overview.admins} administrators` },
+    { label: "Machines", value: overview.nodes_total, note: `${overview.nodes_active} enabled` },
+    { label: "Gone quiet", value: overview.nodes_stale, note: "No check-in for 15 minutes", tone: overview.nodes_stale ? "bad" : undefined },
+    { label: "Open alerts", value: overview.alerts_open, note: "Across the whole fleet", tone: overview.alerts_open ? "warn" : undefined },
+    { label: "Paused", value: overview.nodes_paused, note: "Maintenance or operator hold", tone: overview.nodes_paused ? "warn" : undefined },
+    { label: "Suspended", value: overview.nodes_suspended, note: "Telemetry refused", tone: overview.nodes_suspended ? "bad" : undefined },
+    { label: "Readings · 24h", value: overview.metrics_24h, note: "Telemetry samples received" },
     {
-      label: "Notifs failed 24h",
+      label: "Failed deliveries · 24h",
       value: overview.notifications_failed_24h,
+      note: `${overview.notifications_24h} total attempts`,
       tone: overview.notifications_failed_24h ? "bad" : undefined,
     },
   ];
+
+  const statusCounts = nodes.reduce(
+    (counts, node) => {
+      if (node.revoked) counts.revoked += 1;
+      else if (node.status === "suspended") counts.suspended += 1;
+      else if (node.status === "paused") counts.paused += 1;
+      else if (
+        !node.last_seen_at ||
+        renderedAt - new Date(node.last_seen_at).getTime() > 15 * 60 * 1000
+      ) counts.quiet += 1;
+      else counts.reporting += 1;
+      return counts;
+    },
+    { reporting: 0, quiet: 0, paused: 0, suspended: 0, revoked: 0 }
+  );
+  const statusSlices: FleetStatusSlice[] = [
+    { key: "reporting", label: "Reporting", value: statusCounts.reporting, color: "var(--chart-1)" },
+    { key: "quiet", label: "Gone quiet", value: statusCounts.quiet, color: "var(--chart-5)" },
+    { key: "paused", label: "Paused", value: statusCounts.paused, color: "var(--chart-2)" },
+    { key: "suspended", label: "Suspended", value: statusCounts.suspended, color: "var(--destructive)" },
+    { key: "revoked", label: "Revoked", value: statusCounts.revoked, color: "var(--chart-4)" },
+  ];
+
+  const selectedClient = clients.find((client) => client.id === query.client) ?? null;
+  const selectedNodes = selectedClient
+    ? nodes.filter((node) => node.owner_id === selectedClient.id)
+    : [];
+  const selectedNode =
+    selectedNodes.find((node) => node.id === query.node) ?? selectedNodes[0] ?? null;
+  let selectedMetrics: Metric[] = [];
+  if (selectedNode) {
+    const { data, error } = await supabase
+      .from("metrics")
+      .select("*")
+      .eq("node_id", selectedNode.id)
+      .gte("ts", since)
+      .order("ts", { ascending: true })
+      .limit(600);
+    if (error) {
+      return (
+        <Shell email={auth.user.email}>
+          <div className="terminal-panel p-8 font-mono text-sm text-destructive">
+            Could not load the selected client dashboard: {error.message}
+          </div>
+        </Shell>
+      );
+    }
+    selectedMetrics = (data ?? []) as Metric[];
+  }
+
+  const allowedTabs: AdminTabId[] = ["overview", "clients", "client", "fleet", "templates", "notifications", "audit"];
+  const requestedTab = allowedTabs.includes(query.tab as AdminTabId)
+    ? (query.tab as AdminTabId)
+    : selectedClient
+      ? "client"
+      : "overview";
+  const initialActive = requestedTab === "client" && !selectedClient ? "clients" : requestedTab;
 
   const attentionCount = overview.nodes_stale + overview.notifications_failed_24h;
 
@@ -164,26 +252,9 @@ export default async function AdminPage() {
         </div>
       ) : null}
 
-      <div className="grid gap-px overflow-hidden border border-border bg-border sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8">
-        {cards.map((c) => (
-          <div key={c.label} className="bg-card px-4 py-5">
-            <p className="font-mono text-[0.6rem] uppercase tracking-wide text-muted-foreground">
-              {c.label}
-            </p>
-            <p
-              className={`mt-3 font-sentient text-2xl ${
-                c.tone === "bad"
-                  ? "text-destructive"
-                  : c.tone === "warn"
-                    ? "text-[#e8a400]"
-                    : "text-card-foreground"
-              }`}
-            >
-              {c.value}
-            </p>
-          </div>
-        ))}
-      </div>
+      <AnimatedAdminStats stats={cards} />
+
+      <FleetOverviewCharts trend={fleetTrend} statuses={statusSlices} />
 
       <p className="max-w-3xl font-mono text-sm leading-7 text-muted-foreground">
         {overview.nodes_total} machines across {overview.clients_total} accounts ·{" "}
@@ -297,11 +368,22 @@ export default async function AdminPage() {
 
       <AdminTabs
         overview={overviewPanel}
-        channels={<ChannelManager channels={ownChannels} nodes={scopableNodes} />}
         clients={<ClientTable clients={clients} selfId={auth.user.id} />}
+        client={
+          selectedClient ? (
+            <AdminClientDashboard
+              client={selectedClient}
+              nodes={selectedNodes}
+              current={selectedNode}
+              metrics={selectedMetrics}
+            />
+          ) : undefined
+        }
         fleet={<NodeTable nodes={nodes} />}
+        templates={<EmailTemplateManager templates={templates} />}
         notifications={notificationsPanel}
         audit={auditPanel}
+        initialActive={initialActive}
         badges={{
           fleet: overview.nodes_stale || undefined,
           notifications: overview.notifications_failed_24h || undefined,
@@ -314,6 +396,7 @@ export default async function AdminPage() {
 function Shell({ children, email }: { children: React.ReactNode; email?: string | null }) {
   return (
     <div className="min-h-screen bg-background">
+      <ParticleField blur="subtle" />
       <main className="container pt-32 pb-10 md:pt-44">{children}</main>
       <footer className="container flex flex-col gap-3 border-t border-border py-8 font-mono text-xs text-muted-foreground md:flex-row md:items-center md:justify-between">
         <span className="flex flex-wrap items-center gap-x-4 gap-y-2">

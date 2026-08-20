@@ -4,50 +4,71 @@ import { useState, type ReactNode } from "react";
 import {
   Activity,
   Bell,
+  LayoutDashboard,
+  Mail,
   History,
-  Radio,
   Server,
   Users,
 } from "lucide-react";
 
-type TabId = "overview" | "channels" | "clients" | "fleet" | "notifications" | "audit";
+export type AdminTabId =
+  | "overview"
+  | "clients"
+  | "client"
+  | "fleet"
+  | "templates"
+  | "notifications"
+  | "audit";
 
-const TABS: { id: TabId; label: string; icon: typeof Activity }[] = [
+const BASE_TABS: { id: AdminTabId; label: string; icon: typeof Activity }[] = [
   { id: "overview", label: "Overview", icon: Activity },
-  { id: "channels", label: "Your channels", icon: Radio },
   { id: "clients", label: "Clients", icon: Users },
   { id: "fleet", label: "Fleet", icon: Server },
+  { id: "templates", label: "Email templates", icon: Mail },
   { id: "notifications", label: "Deliveries", icon: Bell },
   { id: "audit", label: "Audit trail", icon: History },
 ];
 
-// A single long scroll stopped scaling once channel management joined nodes,
-// clients, deliveries and audit on the same page. Tabs give each concern its
+// A single long scroll stopped scaling once nodes, clients, deliveries and
+// audit shared the page. Tabs give each concern its
 // own space without hiding it behind a click that also refetches data --
 // everything below is server-fetched once and just shown or hidden here.
 export function AdminTabs({
   overview,
-  channels,
   clients,
+  client,
   fleet,
+  templates,
   notifications,
   audit,
   badges,
+  initialActive = "overview",
 }: {
   overview: ReactNode;
-  channels: ReactNode;
   clients: ReactNode;
+  client?: ReactNode;
   fleet: ReactNode;
+  templates: ReactNode;
   notifications: ReactNode;
   audit: ReactNode;
-  badges: Partial<Record<TabId, number>>;
+  badges: Partial<Record<AdminTabId, number>>;
+  initialActive?: AdminTabId;
 }) {
-  const [active, setActive] = useState<TabId>("overview");
-  const panels: Record<TabId, ReactNode> = {
+  const tabs = client
+    ? [
+        ...BASE_TABS.slice(0, 2),
+        { id: "client" as const, label: "Client view", icon: LayoutDashboard },
+        ...BASE_TABS.slice(2),
+      ]
+    : BASE_TABS;
+  const safeInitial = tabs.some((tab) => tab.id === initialActive) ? initialActive : "overview";
+  const [active, setActive] = useState<AdminTabId>(safeInitial);
+  const panels: Record<AdminTabId, ReactNode> = {
     overview,
-    channels,
     clients,
+    client: client ?? null,
     fleet,
+    templates,
     notifications,
     audit,
   };
@@ -59,7 +80,7 @@ export function AdminTabs({
         aria-label="Admin sections"
         className="sticky top-[4.5rem] z-20 -mx-1 flex gap-1 overflow-x-auto border-b border-border bg-background/95 px-1 py-2 backdrop-blur-sm md:top-24"
       >
-        {TABS.map((tab) => {
+        {tabs.map((tab) => {
           const Icon = tab.icon;
           const isActive = active === tab.id;
           const badge = badges[tab.id];
@@ -93,7 +114,7 @@ export function AdminTabs({
       </div>
 
       <div className="mt-8 space-y-10">
-        {TABS.map((tab) => (
+        {tabs.map((tab) => (
           <div key={tab.id} role="tabpanel" hidden={active !== tab.id}>
             {panels[tab.id]}
           </div>
