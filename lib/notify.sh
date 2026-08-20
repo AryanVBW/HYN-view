@@ -506,6 +506,32 @@ ch_stdout() {
 # it around a send; 'alert' is the common case so it is the default.
 NOTIFY_CATEGORY=alert
 
+notification_template_path() {
+  local category=${1:-alert}
+  state_dir_v
+  printf '%s/email-template-%s.html' "$STATE_DIR" "$category"
+}
+
+# Apply the admin-managed presentation wrapper immediately before delivery.
+# The generated incident/report markup is the trusted {{content}} insertion;
+# scalar placeholders are escaped because hostnames and subjects can contain
+# text that must never become active HTML.
+notify_apply_template() {
+  local category=$1 sev=$2 subject=$3 html=$4 path template
+  path=$(notification_template_path "$category")
+  [[ -r $path ]] || { HTML_OUT=$html; return 0; }
+  template=$(<"$path")
+  [[ $template == *'{{content}}'* ]] || { HTML_OUT=$html; return 0; }
+
+  template=${template//"{{hostname}}"/"$(html_escape "${HOSTNAME_S:-unknown}")"}
+  template=${template//"{{version}}"/"$(html_escape "${HYN_VERSION:-unknown}")"}
+  template=${template//"{{severity}}"/"$(html_escape "$sev")"}
+  template=${template//"{{subject}}"/"$(html_escape "$subject")"}
+  template=${template//"{{content}}"/"$html"}
+  HTML_OUT=$template
+  return 0
+}
+
 # Where a channel delivers to, for the log. Never the credential -- only the
 # destination, and the webhook URL is reduced to its host because the path of a
 # Slack or Discord webhook IS the secret.
@@ -535,6 +561,8 @@ notify_send() {
   fi
 
   [[ -z $html ]] && html="<pre style=\"font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace\">$(html_escape "$text")</pre>"
+  notify_apply_template "${NOTIFY_CATEGORY:-alert}" "$sev" "$subject" "$html"
+  html=$HTML_OUT
 
   local oIFS=$IFS
   IFS=,

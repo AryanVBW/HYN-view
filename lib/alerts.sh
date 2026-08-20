@@ -485,13 +485,23 @@ alerts_body() {
 # The numbers someone will immediately want after reading the alert, so they do
 # not have to ssh in to get context.
 alerts_context() {
-  printf 'host     %s   running as %s (uid %s)\n' "$HOSTNAME_S" "${RUN_AS:-?}" "${RUN_UID:-?}"
+  local access_detail=0
+  cfg_on notify_access_details && access_detail=1
+  printf 'host     %s\n' "$HOSTNAME_S"
+  if ((access_detail)); then
+    printf 'account  running as %s (uid %s)%s\n' "${RUN_AS:-?}" "${RUN_UID:-?}" \
+      "$( [[ -n ${LOGIN_USER:-} && $LOGIN_USER != "${RUN_AS:-}" ]] && printf '  invoked by %s' "$LOGIN_USER" )"
+  fi
   if ((${#SESS_USER[@]} > 0)); then
-    local si out=''
-    for ((si = 0; si < ${#SESS_USER[@]} && si < 5; si++)); do
-      out+="${out:+, }${SESS_USER[si]}@${SESS_FROM[si]}"
-    done
-    printf 'logged in %s\n' "$out"
+    if ((access_detail)); then
+      local si out=''
+      for ((si = 0; si < ${#SESS_USER[@]} && si < 5; si++)); do
+        out+="${out:+, }${SESS_USER[si]}@${SESS_FROM[si]}"
+      done
+      printf 'logged in %s\n' "$out"
+    else
+      printf 'logged in %s session(s)\n' "${#SESS_USER[@]}"
+    fi
   else
     printf 'logged in nobody\n'
   fi
@@ -548,6 +558,8 @@ alerts_context() {
 # second, so the severity, host and headline all appear before any detail.
 alerts_html() {
   local newlist=$1 onglist=$2 worst=$3 i
+  local access_detail=0
+  cfg_on notify_access_details && access_detail=1
   local nnew=0 nong=0
   for i in $newlist; do [[ $i =~ ^[0-9]+$ ]] && ((nnew++)); done
   for i in $onglist; do [[ $i =~ ^[0-9]+$ ]] && ((nong++)); done
@@ -644,18 +656,22 @@ alerts_html() {
 
     e_section 'Access'
     e_kv_open
-    local ranas="${RUN_AS:-?} (uid ${RUN_UID:-?})"
-    [[ -n ${LOGIN_USER:-} && $LOGIN_USER != "${RUN_AS:-}" ]] && ranas+=" · invoked by $LOGIN_USER"
-    e_kv 'Running as' "$ranas"
+    if ((access_detail)); then
+      local ranas="${RUN_AS:-?} (uid ${RUN_UID:-?})"
+      [[ -n ${LOGIN_USER:-} && $LOGIN_USER != "${RUN_AS:-}" ]] && ranas+=" · invoked by $LOGIN_USER"
+      e_kv 'Running as' "$ranas"
+    fi
     if ((${#SESS_USER[@]} == 0)); then
       e_kv 'Logged in now' 'nobody'
-    else
+    elif ((access_detail)); then
       local si
       for ((si = 0; si < ${#SESS_USER[@]} && si < 6; si++)); do
         local scol=$E_INK
         [[ ${SESS_FROM[si]} == local ]] && scol=$E_MUTED
         e_kv "Session ${SESS_TTY[si]}" "${SESS_USER[si]} from ${SESS_FROM[si]} since ${SESS_WHEN[si]}" "$scol"
       done
+    else
+      e_kv 'Logged in now' "${#SESS_USER[@]} session(s)"
     fi
     e_kv_close
 

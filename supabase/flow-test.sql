@@ -23,6 +23,32 @@ create temporary table t (k text primary key, v text);
 -- by each of them.
 grant all on t to anon, authenticated;
 
+-- Provider destinations, credentials and routing preferences must remain on
+-- each monitored server. A portal table creates a cross-tenant credential
+-- boundary that a node token must never be able to cross, so the safe schema
+-- has no central notification configuration storage at all.
+do $$
+begin
+  if to_regclass('public.notification_channels') is not null then
+    raise exception 'notification_channels still stores central provider credentials';
+  end if;
+  if to_regclass('public.notify_prefs') is not null then
+    raise exception 'notify_prefs still stores central notification routing preferences';
+  end if;
+  raise notice 'PASS  provider credentials and routing preferences have no central storage';
+end $$;
+
+do $$
+begin
+  if to_regprocedure('public.hyn_list_admins()') is not null then
+    raise exception 'the notification-routing administrator directory is still exposed';
+  end if;
+  raise notice 'PASS  no notification-routing administrator directory is exposed';
+end $$;
+
+set local role anon;
+set local "test.uid" = '';
+
 -- ---------------------------------------------------------------------------
 -- 1. the headless agent requests a code (as anon)
 -- ---------------------------------------------------------------------------
@@ -57,6 +83,210 @@ begin
   if n <> 1 then raise exception 'device_code hash was not stored'; end if;
   set local role anon;
   raise notice 'PASS  device code is stored hashed, not in plaintext';
+end $$;
+
+-- The shorter human code needs a slow, independently salted verifier. A fast
+-- deterministic digest leaks which pending rows share a code and makes an
+-- offline database dump much cheaper to brute-force.
+do $$
+declare
+  n integer;
+  v_code text := (select v from t where k = 'user_code');
+  v_verifier text;
+begin
+  set local role postgres;
+  select user_code_verifier into v_verifier
+    from public.device_codes
+   where user_code_verifier = extensions.crypt(upper(trim(v_code)), user_code_verifier)
+   limit 1;
+
+  if v_verifier is null then raise exception 'no salted user-code verifier was stored'; end if;
+  if v_verifier !~ '^\$2[abxy]\$10\$[./A-Za-z0-9]{53}$' then
+    raise exception 'user-code verifier is not a cost-10 bcrypt value: %', v_verifier;
+  end if;
+  if v_verifier = encode(extensions.digest(upper(trim(v_code)), 'sha256'), 'hex') then
+    raise exception 'user-code verifier is still a deterministic SHA-256 digest';
+  end if;
+  if v_verifier = extensions.crypt('WRONG-CODE', v_verifier) then
+    raise exception 'user-code verifier accepted the wrong code';
+  end if;
+  select count(*) into n from public.device_codes
+   where to_jsonb(device_codes)::text like
+         '%' || to_jsonb(v_code)::text || '%';
+  if n <> 0 then raise exception 'user_code was stored in plaintext'; end if;
+  set local role anon;
+  raise notice 'PASS  human pairing code uses a slow salted verifier';
+end $$;
+
+-- Expiry is a storage boundary, not only a validation check. Every public
+-- pairing entry point invokes cleanup, including for rows that expired less
+-- than an hour ago. No wall-clock deletion is claimed between pairing calls.
+do $$
+declare r json; expired_device_code text; n integer;
+begin
+  r := public.hyn_device_start('expired-by-start', 'Ubuntu', 'test');
+  expired_device_code := r->>'device_code';
+  set local role postgres;
+  update public.device_codes set expires_at = now() - interval '1 minute'
+   where device_code_hash = public._hyn_sha256(expired_device_code);
+  set local role anon;
+  perform public.hyn_device_start('start-cleanup-trigger', 'Ubuntu', 'test');
+  set local role postgres;
+  select count(*) into n from public.device_codes
+   where device_code_hash = public._hyn_sha256(expired_device_code);
+  if n <> 0 then raise exception 'device_start retained an expired pairing row'; end if;
+  set local role anon;
+  raise notice 'PASS  device_start removes newly expired pairing rows';
+end $$;
+
+do $$
+declare r json; expired_user_code text; expired_device_code text; n integer;
+begin
+  r := public.hyn_device_start('expired-by-lookup', 'Ubuntu', 'test');
+  expired_user_code := r->>'user_code';
+  expired_device_code := r->>'device_code';
+  set local role postgres;
+  update public.device_codes set expires_at = now() - interval '1 minute'
+   where device_code_hash = public._hyn_sha256(expired_device_code);
+  set local role authenticated;
+  perform set_config('test.uid', '11111111-1111-1111-1111-111111111111', true);
+  r := public.hyn_device_lookup(expired_user_code);
+  if r->>'status' <> 'expired' then raise exception 'lookup: expected expired, got %', r->>'status'; end if;
+  set local role postgres;
+  select count(*) into n from public.device_codes
+   where device_code_hash = public._hyn_sha256(expired_device_code);
+  if n <> 0 then raise exception 'device_lookup retained its expired pairing row'; end if;
+  set local role anon;
+  perform set_config('test.uid', '', true);
+  raise notice 'PASS  device_lookup reports and removes an expired pairing row';
+end $$;
+
+do $$
+declare r json; expired_user_code text; expired_device_code text; n integer;
+begin
+  r := public.hyn_device_start('expired-by-approve', 'Ubuntu', 'test');
+  expired_user_code := r->>'user_code';
+  expired_device_code := r->>'device_code';
+  set local role postgres;
+  update public.device_codes set expires_at = now() - interval '1 minute'
+   where device_code_hash = public._hyn_sha256(expired_device_code);
+  set local role authenticated;
+  perform set_config('test.uid', '11111111-1111-1111-1111-111111111111', true);
+  r := public.hyn_device_approve(expired_user_code, 'must-not-exist');
+  if r->>'status' <> 'expired' then raise exception 'approve: expected expired, got %', r->>'status'; end if;
+  set local role postgres;
+  select count(*) into n from public.device_codes
+   where device_code_hash = public._hyn_sha256(expired_device_code);
+  if n <> 0 then raise exception 'device_approve retained its expired pairing row'; end if;
+  if exists (select 1 from public.nodes where name = 'must-not-exist') then
+    raise exception 'device_approve created a node from an expired code';
+  end if;
+  set local role anon;
+  perform set_config('test.uid', '', true);
+  raise notice 'PASS  device_approve reports and removes an expired pairing row';
+end $$;
+
+do $$
+declare r json; expired_device_code text; n integer;
+begin
+  r := public.hyn_device_start('expired-by-poll', 'Ubuntu', 'test');
+  expired_device_code := r->>'device_code';
+  set local role postgres;
+  update public.device_codes set expires_at = now() - interval '1 minute'
+   where device_code_hash = public._hyn_sha256(expired_device_code);
+  set local role anon;
+  r := public.hyn_device_poll(expired_device_code);
+  if r->>'status' <> 'expired' then raise exception 'poll: expected expired, got %', r->>'status'; end if;
+  set local role postgres;
+  select count(*) into n from public.device_codes
+   where device_code_hash = public._hyn_sha256(expired_device_code);
+  if n <> 0 then raise exception 'device_poll retained its expired pairing row'; end if;
+  set local role anon;
+  raise notice 'PASS  device_poll reports and removes an expired pairing row';
+end $$;
+
+-- Approval creates the portal node before the agent claims its one-time token.
+-- If that final poll never arrives before expiry, cleanup must also remove the
+-- unusable node; otherwise the account accumulates a node it can never connect.
+do $$
+declare r json; expired_user_code text; expired_device_code text; orphan_node_id uuid; n integer;
+begin
+  set local role anon;
+  perform set_config('test.uid', '', true);
+  r := public.hyn_device_start('expires-after-approval', 'Ubuntu', 'test');
+  expired_user_code := r->>'user_code';
+  expired_device_code := r->>'device_code';
+
+  set local role authenticated;
+  perform set_config('test.uid', '11111111-1111-1111-1111-111111111111', true);
+  r := public.hyn_device_approve(expired_user_code, 'unclaimed-expired-node');
+  orphan_node_id := (r->>'node_id')::uuid;
+
+  set local role postgres;
+  update public.device_codes set expires_at = now() - interval '1 minute'
+   where device_code_hash = public._hyn_sha256(expired_device_code);
+
+  set local role anon;
+  perform set_config('test.uid', '', true);
+  r := public.hyn_device_poll(expired_device_code);
+  if r->>'status' <> 'expired' then
+    raise exception 'unclaimed poll: expected expired, got %', r->>'status';
+  end if;
+
+  set local role postgres;
+  select count(*) into n from public.nodes where id = orphan_node_id;
+  if n <> 0 then raise exception 'expiry cleanup retained an unclaimable node'; end if;
+  set local role anon;
+  raise notice 'PASS  expiry cleanup removes an approved but unclaimed node';
+end $$;
+
+-- Once the agent has claimed its token, only the pairing row is temporary. A
+-- later expiry cleanup must not delete the now-usable monitored node.
+do $$
+declare
+  r json;
+  claimed_user_code text;
+  claimed_device_code text;
+  claimed_node_id uuid;
+  claimed_node_token text;
+  n integer;
+begin
+  set local role anon;
+  perform set_config('test.uid', '', true);
+  r := public.hyn_device_start('claimed-before-expiry', 'Ubuntu', 'test');
+  claimed_user_code := r->>'user_code';
+  claimed_device_code := r->>'device_code';
+
+  set local role authenticated;
+  perform set_config('test.uid', '11111111-1111-1111-1111-111111111111', true);
+  r := public.hyn_device_approve(claimed_user_code, 'claimed-node-survives');
+  claimed_node_id := (r->>'node_id')::uuid;
+
+  set local role anon;
+  perform set_config('test.uid', '', true);
+  r := public.hyn_device_poll(claimed_device_code);
+  claimed_node_token := r->>'node_token';
+
+  set local role postgres;
+  update public.device_codes set expires_at = now() - interval '1 minute'
+   where device_code_hash = public._hyn_sha256(claimed_device_code);
+
+  set local role anon;
+  perform public.hyn_device_start('claimed-cleanup-trigger', 'Ubuntu', 'test');
+
+  set local role postgres;
+  select count(*) into n from public.device_codes
+   where device_code_hash = public._hyn_sha256(claimed_device_code);
+  if n <> 0 then raise exception 'claimed pairing row survived expiry cleanup'; end if;
+
+  select count(*) into n from public.nodes
+   where id = claimed_node_id
+     and token_hash = public._hyn_sha256(claimed_node_token);
+  if n <> 1 then raise exception 'expiry cleanup removed or changed a claimed node'; end if;
+
+  delete from public.nodes where id = claimed_node_id;
+  set local role anon;
+  raise notice 'PASS  expiry cleanup preserves a claimed node';
 end $$;
 
 -- ---------------------------------------------------------------------------
@@ -454,8 +684,79 @@ update public.nodes
    set config = '{"alert_mem_pct": 80, "report_at": "07:30"}'::jsonb
  where id = (select v from t where k = 'node_id')::uuid;
 
-insert into public.notification_channels (owner, node_id, kind, target, secret)
-values ('11111111-1111-1111-1111-111111111111', null, 'resend', 'ops@alice.example', 're_secret_key');
+-- A browser may call PostgREST directly, so the database must reject every
+-- config key the account settings UI does not expose. UI filtering alone would
+-- still let an owner smuggle a webhook or other destination to the node.
+set local role authenticated;
+set local "test.uid" = '11111111-1111-1111-1111-111111111111';
+
+do $$
+declare rejected boolean := false;
+begin
+  begin
+    update public.nodes
+       set config = config || '{"webhook_url":"https://attacker.example/hook"}'::jsonb
+     where id = (select v from t where k = 'node_id')::uuid;
+  exception when check_violation then
+    rejected := true;
+  end;
+  if not rejected then
+    raise exception 'direct API update stored a local-only notification destination';
+  end if;
+  raise notice 'PASS  direct API updates reject config keys outside the portal allowlist';
+end $$;
+
+-- Allowed key names are not enough: alert values are later consumed by Bash
+-- arithmetic in a root-run service. Reject command substitutions, malformed
+-- enums/times, wrong JSON types and out-of-range values at the database edge.
+do $$
+declare
+  candidate jsonb;
+  rejected boolean;
+begin
+  foreach candidate in array array[
+    '{"alert_disk_pct":"x[$(touch${IFS}/tmp/hyn-view-rce)]"}'::jsonb,
+    '{"alert_disk_pct":"08"}'::jsonb,
+    '{"alert_mem_pct":"101"}'::jsonb,
+    '{"alert_latency_ms":{}}'::jsonb,
+    '{"alert_min_severity":"root"}'::jsonb,
+    '{"report_at":"99:99"}'::jsonb,
+    '{"cloud_push_min":"0"}'::jsonb
+  ] loop
+    rejected := false;
+    begin
+      update public.nodes
+         set config = candidate
+       where id = (select v from t where k = 'node_id')::uuid;
+    exception when check_violation then
+      rejected := true;
+    end;
+    if not rejected then
+      raise exception 'direct API accepted unsafe config value: %', candidate;
+    end if;
+  end loop;
+  raise notice 'PASS  direct API rejects unsafe portal-config values';
+end $$;
+
+update public.nodes
+   set config = '{
+     "alert_mem_pct":"80", "alert_disk_pct":"85", "alert_temp_c":"75",
+     "alert_load_per_core":"400", "alert_latency_ms":"250",
+     "alert_min_severity":"warn", "alert_repeat_hours":"6",
+     "report_at":"07:30", "notify_max_per_day":"25", "cloud_push_min":"5"
+   }'::jsonb
+ where id = (select v from t where k = 'node_id')::uuid;
+
+do $$
+declare n integer;
+begin
+  select count(*) into n
+    from public.nodes nrow,
+         lateral jsonb_object_keys(nrow.config)
+   where nrow.id = (select v from t where k = 'node_id')::uuid;
+  if n <> 10 then raise exception 'portal allowlist rejected a supported setting'; end if;
+  raise notice 'PASS  every portal-exposed monitoring setting remains writable';
+end $$;
 
 set local role anon;
 set local "test.uid" = '';
@@ -468,14 +769,14 @@ begin
   if (r#>>'{config,report_at}') <> '07:30' then
     raise exception 'config did not round-trip: %', r->'config';
   end if;
-  if (r#>>'{channels,0,kind}') <> 'resend' then
-    raise exception 'channels missing from config pull: %', r->'channels';
+  if r::jsonb ? 'channels' then
+    raise exception 'config pull exposed a central notification channel surface: %', r->'channels';
   end if;
-  -- The agent needs the provider key to be able to send at all.
-  if (r#>>'{channels,0,secret}') <> 're_secret_key' then
-    raise exception 'the node token should receive the channel secret';
+  if convert_from(decode(r->>'alert_template_b64', 'base64'), 'UTF8') <> '{{content}}'
+     or convert_from(decode(r->>'report_template_b64', 'base64'), 'UTF8') <> '{{content}}' then
+    raise exception 'config pull did not include the installed presentation templates: %', r;
   end if;
-  raise notice 'PASS  the agent pulls its own config and channels by node token';
+  raise notice 'PASS  the agent pulls settings without notification targets or credentials';
 end $$;
 
 do $$
@@ -498,34 +799,6 @@ begin
   if seen is null then raise exception 'last_config_pull_at was not recorded'; end if;
   set local role anon;
   raise notice 'PASS  a config pull is recorded against the node';
-end $$;
-
--- The dashboard must be able to manage channels without being able to read a
--- secret back out. This is enforced by a column grant, not by convention.
-set local role authenticated;
-set local "test.uid" = '11111111-1111-1111-1111-111111111111';
-
-do $$
-declare ok boolean := false; n integer;
-begin
-  -- Non-secret columns are readable.
-  select count(*) into n from public.notification_channels;
-  if n <> 1 then raise exception 'alice should see her 1 channel, saw %', n; end if;
-  begin
-    perform secret from public.notification_channels;
-  exception when insufficient_privilege then ok := true;
-  end;
-  if not ok then raise exception 'a browser session could read a channel secret'; end if;
-  raise notice 'PASS  channel secrets are write-only from a session';
-end $$;
-
-do $$
-declare n integer;
-begin
-  set local "test.uid" = '22222222-2222-2222-2222-222222222222';
-  select count(*) into n from public.notification_channels;
-  if n <> 0 then raise exception 'bob can see % of alice''s channels', n; end if;
-  raise notice 'PASS  channels are private to their owner';
 end $$;
 
 -- ---------------------------------------------------------------------------
@@ -586,7 +859,9 @@ begin
     'select public.hyn_admin_nodes()',
     'select public.hyn_admin_clients()',
     'select public.hyn_admin_notifications(10)',
-    'select public.hyn_admin_audit(10)'
+    'select public.hyn_admin_audit(10)',
+    'select public.hyn_admin_templates()',
+    'select public.hyn_admin_save_template(''alert'', ''{{content}}'')'
   ] loop
     ok := false;
     begin
@@ -596,6 +871,17 @@ begin
     if not ok then raise exception 'a non-admin was allowed: %', fn; end if;
   end loop;
   raise notice 'PASS  a non-admin is refused every admin read';
+end $$;
+
+do $$
+declare ok boolean := false;
+begin
+  begin
+    perform 1 from public.notification_templates;
+  exception when insufficient_privilege then ok := true;
+  end;
+  if not ok then raise exception 'a browser session could read notification template storage directly'; end if;
+  raise notice 'PASS  template storage is reachable only through admin-checked RPCs';
 end $$;
 
 do $$
@@ -774,6 +1060,44 @@ begin
   select count(*) into n from json_array_elements(r);
   if n <> 3 then raise exception 'admin client list should have 3 rows, got %', n; end if;
   raise notice 'PASS  admin client list covers every account';
+end $$;
+
+do $$
+declare r json; pulled json; rendered text; rejected boolean;
+begin
+  r := public.hyn_admin_templates();
+  if json_array_length(r) <> 2 then
+    raise exception 'admin template list should contain alert and report wrappers: %', r;
+  end if;
+
+  r := public.hyn_admin_save_template(
+    'alert',
+    '<section data-template="alert">{{content}}</section>'
+  );
+  if r->>'status' <> 'ok' then raise exception 'template save failed: %', r; end if;
+
+  rejected := false;
+  begin
+    perform public.hyn_admin_save_template('report', '<script>alert(1)</script>{{content}}');
+  exception when others then rejected := true;
+  end;
+  if not rejected then raise exception 'active HTML was accepted as an email template'; end if;
+
+  rejected := false;
+  begin
+    perform public.hyn_admin_save_template('report', '<p>missing placeholder</p>');
+  exception when others then rejected := true;
+  end;
+  if not rejected then raise exception 'a template without {{content}} was accepted'; end if;
+
+  set local role anon;
+  pulled := public.hyn_fetch_config((select v from t where k = 'node_token'));
+  rendered := convert_from(decode(pulled->>'alert_template_b64', 'base64'), 'UTF8');
+  if rendered <> '<section data-template="alert">{{content}}</section>' then
+    raise exception 'saved template did not reach the node config pull: %', rendered;
+  end if;
+  set local role authenticated;
+  raise notice 'PASS  an admin template edit reaches the node without centralising delivery credentials';
 end $$;
 
 -- Cross-tenant reads: the admin can see another client's telemetry.

@@ -37,125 +37,13 @@ trap 'rm -rf "$TMP"; [[ -n ${SRV_PID:-} ]] && kill "$SRV_PID" 2>/dev/null' EXIT
 # mock PostgREST
 # ---------------------------------------------------------------------------
 # Records every request as JSON lines so the test can assert on headers and
-# bodies after the fact.
-cat >"$TMP/mock.py" <<'PY'
-import json, sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
-LOG = sys.argv[2]
-state = {"polls": 0, "node_status": "active"}
-
-class H(BaseHTTPRequestHandler):
-    def log_message(self, *a):
-        pass
-
-    def do_GET(self):
-        # Test-only lever to flip the node's administrative status.
-        if self.path.startswith("/status/"):
-            state["node_status"] = self.path.rsplit("/", 1)[-1]
-            self.send_response(200)
-            self.send_header("Content-Length", "2")
-            self.end_headers()
-            self.wfile.write(b'ok')
-            return
-        self.send_response(404)
-        self.end_headers()
-
-    def do_POST(self):
-        n = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(n).decode()
-        with open(LOG, "a") as f:
-            f.write(json.dumps({
-                "path": self.path,
-                "headers": {k.lower(): v for k, v in self.headers.items()},
-                "body": raw,
-            }) + "\n")
-
-        fn = self.path.rsplit("/", 1)[-1]
-        if fn == "hyn_device_start":
-            out = {"user_code": "QKB8-D6VQ",
-                   "device_code": "a" * 64,
-                   "expires_at": "2026-08-19T13:00:00Z",
-                   "interval": 1}
-        elif fn == "hyn_device_poll":
-            state["polls"] += 1
-            # Pending once, so the client's polling loop is genuinely exercised.
-            if state["polls"] < 2:
-                out = {"status": "pending", "interval": 1}
-            else:
-                out = {"status": "approved",
-                       "node_id": "3f7a0000-0000-4000-8000-000000000001",
-                       "node_token": "b" * 64,
-                       "node_name": "web-01"}
-        elif fn == "hyn_fetch_config":
-            body = json.loads(raw)
-            if body.get("p_node_token") != "b" * 64:
-                self.send_response(401)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"message":"invalid node token"}')
-                return
-            out = {"status": "ok",
-                   "node_id": "3f7a0000-0000-4000-8000-000000000001",
-                   "node_name": "web-01",
-                   "node_status": state["node_status"],
-                   "paused_until": None,
-                   "status_reason": None,
-                   "config": {"alert_mem_pct": 80, "report_at": "07:30",
-                              "interval": "2.0", "not_a_real_key": "x"},
-                   "channels": [{"kind": "resend", "target": "ops@example.com",
-                                 "secret": "re_secret", "extra": {}}]}
-        elif fn == "hyn_report_notification":
-            body = json.loads(raw)
-            if body.get("p_node_token") != "b" * 64:
-                self.send_response(401)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"message":"invalid node token"}')
-                return
-            out = {"status": "ok", "written": len(body.get("p_events") or [])}
-        elif fn == "hyn_ingest":
-            body = json.loads(raw)
-            if body.get("p_node_token") != "b" * 64:
-                self.send_response(401)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"message":"invalid node token"}')
-                return
-            if state["node_status"] == "paused":
-                self.send_response(400)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"message":"node paused until 2026-08-19T18:00:00Z"}')
-                return
-            if state["node_status"] == "suspended":
-                self.send_response(400)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"message":"node suspended: abuse investigation"}')
-                return
-            out = {"status": "ok", "node_id": "3f7a0000-0000-4000-8000-000000000001"}
-        else:
-            self.send_response(404)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"message":"no such function"}')
-            return
-
-        payload = json.dumps(out).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
-PY
+# bodies after the fact. Keeping the fixture in a real file also avoids a Bash
+# 5.3 macOS deadlock while preparing a large heredoc.
 
 PORT=54330
 REQLOG="$TMP/requests.jsonl"
 : >"$REQLOG"
-python3 "$TMP/mock.py" "$PORT" "$REQLOG" &
+python3 "$HERE/cloud-mock.py" "$PORT" "$REQLOG" &
 SRV_PID=$!
 for _ in $(seq 1 40); do
   curl -s -o /dev/null "http://127.0.0.1:$PORT/rest/v1/rpc/nope" -X POST -d '{}' && break
@@ -185,6 +73,9 @@ alerts_evaluate() { AL_ID=(disk_root); AL_SEV=(warn); AL_MSG=('Disk / at 86%'); 
 # Reads /proc/sys/net/*, which does not exist on every machine this test runs on,
 # and it would clear the TUNE values the payload assertions below rely on.
 net_tuning() { :; }
+# Keep a fixed process row so this transport test can inspect the exact cloud
+# boundary; process collection itself is covered by test/selfcheck.sh.
+proc_sample() { :; }
 is_root() { return 0; }
 
 HOSTNAME_S=web-01 DISTRO='Ubuntu 24.04 LTS' KERNEL='6.8.0-31-generic'
@@ -200,6 +91,9 @@ NET_RERR[eth0]=0 NET_TERR[eth0]=0 NET_RDROP[eth0]=0 NET_TDROP[eth0]=0
 NET_RETRANS_PM=3.1 CT_PCT=4
 LAT_MS[1.1.1.1]=8620 LAT_MS[gateway]=1200
 ST_LAST_TS=1755600000 ST_LAST_DOWN=105000000 ST_LAST_UP=54000000 ST_LAST_LAT=8600 ST_LAST_NOTE=''
+PROC_TOTAL=42 PROCS_RUN=2 PROCS_BLK=0
+P_PID=(4242) P_NAME=('queue-worker') P_CPU=(123) P_RSS=(8388608) P_THR=(4)
+P_USER=('private-operator')
 
 # A Highway node as the collectors would leave it: two units, one of them
 # crash-looping, a live process, a mesh tunnel, and an unset MemoryCurrent on the
@@ -287,6 +181,10 @@ assert body[\"p_payload\"][\"cpu\"][\"temp_c\"] == 52
 assert body[\"p_payload\"][\"disk\"][\"pct\"] == 58.4
 assert body[\"p_payload\"][\"alerts\"][0][\"severity\"] == \"warn\"
 assert body[\"p_payload\"][\"latency_ms\"] == 1.20, body[\"p_payload\"][\"latency_ms\"]
+top = body[\"p_payload\"][\"processes\"][\"top\"][0]
+assert top[\"name\"] == \"queue-worker\", top
+assert \"user\" not in top, top
+assert \"private-operator\" not in json.dumps(body[\"p_payload\"]), body[\"p_payload\"][\"processes\"]
 "'
 
 # The Highway section of the portal is only as good as what the agent sends, so
@@ -316,7 +214,9 @@ assert hw[\"mesh_tx_bps\"] == 980000 and hw[\"mesh_drops\"] == 1, hw
 assert hw[\"qdisc\"] == \"fq_codel\" and hw[\"qdisc_drops\"] == 12, hw
 assert hw[\"congestion\"] == \"bbr\" and hw[\"nft_tables\"] == 3, hw
 assert (hw[\"journal_err_1h\"], hw[\"journal_warn_1h\"]) == (2, 5), hw
-assert hw[\"journal_tail\"][-1] == \"reconnecting to lighthouse\", hw[\"journal_tail\"]
+assert \"journal_tail\" not in hw, hw
+assert \"peer handshake timeout\" not in json.dumps(hw), hw
+assert \"reconnecting to lighthouse\" not in json.dumps(hw), hw
 assert hw[\"bin_path\"] == \"/usr/local/bin/highway\" and hw[\"bin_size\"] == 48234496, hw
 "'
 
@@ -325,6 +225,13 @@ assert hw[\"bin_path\"] == \"/usr/local/bin/highway\" and hw[\"bin_size\"] == 48
 # ---------------------------------------------------------------------------
 printf '\nconfig pull\n'
 
+# Versions before local-only notification configuration wrote provider JSON to
+# this state cache. A safe pull must remove that copy even if an old or
+# malicious portal still returns a channel payload.
+chcache=$(cloud_channels_cache)
+printf '%s\n' '[{"kind":"resend","target":"old@example.com","secret":"legacy_secret"}]' >"$chcache"
+chmod 600 "$chcache"
+
 truthy 'config pull succeeds' 'cloud_config_pull 1'
 
 cache=$(cloud_config_cache)
@@ -332,9 +239,18 @@ truthy 'a config cache is written' '[[ -s $cache ]]'
 cachetext=$(<"$cache")
 contains 'pulled setting is cached'      'alert_mem_pct=80' "$cachetext"
 contains 'second pulled setting'         'report_at=07:30'  "$cachetext"
+missing  'unsafe allowed-key value is not cached' 'alert_disk_pct' "$cachetext"
 # A key the agent does not recognise must be dropped, not written, or every
 # subsequent load would warn about it forever.
 missing  'unknown key is not cached'     'not_a_real_key'   "$cachetext"
+missing  'remote access-detail opt-in is not cached' 'notify_access_details' "$cachetext"
+missing  'remote webhook is not cached'       'webhook_url'        "$cachetext"
+missing  'remote heartbeat is not cached'     'heartbeat_url'      "$cachetext"
+missing  'remote recipient is not cached'     'notify_to'          "$cachetext"
+missing  'remote Telegram target is not cached' 'telegram_chat_id' "$cachetext"
+missing  'remote ntfy target is not cached'   'ntfy_topic'         "$cachetext"
+missing  'remote portal URL is not cached'    'cloud_url'          "$cachetext"
+missing  'remote refresh interval is not cached' 'interval='       "$cachetext"
 
 # Reloading must apply the pulled values, and a local line must still win --
 # central management that silently overrides a deliberate local edit is
@@ -343,13 +259,26 @@ config_set interval 1.0 >/dev/null
 cfg_load
 eq 'pulled setting is applied'          '80'    "${CFG[alert_mem_pct]}"
 eq 'local config still overrides cloud' '1.0'   "${CFG[interval]}"
+eq 'notification access details remain private' 'off' "${CFG[notify_access_details]}"
+# This arithmetic shape mirrors the alert engine. Before value validation, the
+# mock response's command substitution created this harmless marker.
+x=0
+: $(( ${CFG[alert_disk_pct]} - 5 ))
+truthy 'rejected remote arithmetic never executes' '[[ ! -e $HYN_VAR/cloud-rce-marker ]]'
 
-chcache=$(cloud_channels_cache)
-truthy 'channels are cached'          '[[ -s $chcache ]]'
-truthy 'channel cache is 0600'        '[[ $(stat -f "%Lp" "$chcache" 2>/dev/null || stat -c "%a" "$chcache") == 600 ]]'
-contains 'channel secret is cached for sending' 're_secret' "$(<"$chcache")"
+truthy 'legacy central channel cache is deleted' '[[ ! -e $chcache ]]'
 # The world-readable config cache must never hold a credential.
 missing 'secret is NOT in the config cache' 're_secret' "$cachetext"
+
+alert_template=$(notification_template_path alert)
+report_template=$(notification_template_path report)
+truthy 'alert template is cached locally' '[[ -s $alert_template ]]'
+truthy 'report template is cached locally' '[[ -s $report_template ]]'
+contains 'alert template keeps its content slot' '{{content}}' "$(<"$alert_template")"
+notify_apply_template alert warn 'Disk <full>' '<strong>generated alert</strong>'
+contains 'pulled wrapper reaches the actual send renderer' 'data-template="alert"' "$HTML_OUT"
+contains 'generated HTML is inserted into the wrapper' '<strong>generated alert</strong>' "$HTML_OUT"
+contains 'scalar placeholders are escaped' 'Disk' "$HTML_OUT"
 
 reqs=$(<"$REQLOG")
 contains 'fetch_config was called' '/rest/v1/rpc/hyn_fetch_config' "$reqs"

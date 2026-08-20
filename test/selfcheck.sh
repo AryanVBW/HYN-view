@@ -205,6 +205,10 @@ HYN_LIB="$ROOT/lib"
 HYN_ROOT="$ROOT"
 export HYN_LIB HYN_ROOT
 export TERM=xterm-256color COLORTERM=truecolor
+# This fixture explicitly exercises ANSI reset behavior. Developer shells and
+# CI may export NO_COLOR globally; leave product support for that variable
+# intact, but make the colour-specific test environment deterministic.
+unset NO_COLOR
 
 for m in core ui net collect highway speedtest notify alerts report update panels cloud; do
   # shellcheck source=/dev/null
@@ -212,6 +216,7 @@ for m in core ui net collect highway speedtest notify alerts report update panel
 done
 
 cfg_load
+eq 'notification access details default off' 'off' "${CFG[notify_access_details]:-missing}"
 color_detect
 theme_load hiway || { printf 'theme load failed\n' >&2; exit 1; }
 ui_init
@@ -354,6 +359,69 @@ if ((${#CFG_WARNINGS[@]} >= 1)); then ok; else bad 'unknown config key should wa
 falsy 'unknown key not applied' '[[ -v CFG[bogus_key] ]]'
 CFG[net_unit]=bits
 CFG[theme]=hiway
+
+# Identity-bearing notification detail is a local privacy decision. A portal
+# response must not write it into the cloud cache, and an old cache line from a
+# previous version must not silently turn it back on. A deliberate local config
+# line remains a valid opt-in.
+remote_cfg=$(
+  STATE_DIR=''
+  HYN_VAR="$TMP/remote-var" HYN_ETC="$TMP/remote-etc"
+  HOME="$TMP/remote-home" XDG_CONFIG_HOME="$TMP/remote-xdg" HYN_CONFIG=''
+  mkdir -p "$HYN_VAR" "$HYN_ETC" "$XDG_CONFIG_HOME"
+  cloud_configured() { return 0; }
+  cloud_linked() { return 0; }
+  secret() { printf 'test-token'; }
+  _cloud_rpc() {
+    CLOUD_LAST_BODY='{"node_status":"active","config":{"alert_mem_pct":80,"notify_access_details":"on","webhook_url":"https://attacker.example/hook","heartbeat_url":"https://attacker.example/ping","notify_to":"attacker@example.com","telegram_chat_id":"12345","ntfy_topic":"attacker-topic","cloud_url":"https://attacker.example","interval":"0.1"},"channels":[]}'
+    return 0
+  }
+  cloud_config_pull 1 || exit 1
+  printf '%s' "$(<"$(cloud_config_cache)")"
+)
+contains 'ordinary portal setting is cached' 'alert_mem_pct=80' "$remote_cfg"
+falsy 'portal cannot opt in to identity details' '[[ $remote_cfg == *"notify_access_details"* ]]'
+falsy 'portal cannot cache local destinations or connection settings' '[[ $remote_cfg == *"webhook_url"* || $remote_cfg == *"heartbeat_url"* || $remote_cfg == *"notify_to"* || $remote_cfg == *"telegram_chat_id"* || $remote_cfg == *"ntfy_topic"* || $remote_cfg == *"cloud_url"* || $remote_cfg == *"interval="* ]]'
+
+stale_access=$(
+  STATE_DIR=''
+  HYN_VAR="$TMP/stale-var" HYN_ETC="$TMP/stale-etc"
+  HOME="$TMP/stale-home" XDG_CONFIG_HOME="$TMP/stale-xdg" HYN_CONFIG=''
+  mkdir -p "$HYN_VAR" "$HYN_ETC" "$XDG_CONFIG_HOME"
+  printf '%s\n' \
+    'alert_mem_pct=80' \
+    'alert_disk_pct=x[$(touch${IFS}$HYN_VAR/stale-rce-marker)]' \
+    'notify_access_details=on' \
+    'webhook_url=https://attacker.example/hook' \
+    'heartbeat_url=https://attacker.example/ping' \
+    'notify_to=attacker@example.com' \
+    'telegram_chat_id=12345' \
+    'ntfy_topic=attacker-topic' \
+    'cloud_url=https://attacker.example' \
+    'interval=0.1' >"$(cloud_config_cache)"
+  CFG[alert_disk_pct]=85 CFG[notify_access_details]=off
+  CFG[webhook_url]='' CFG[heartbeat_url]='' CFG[notify_to]=''
+  CFG[telegram_chat_id]='' CFG[ntfy_topic]='' CFG[cloud_url]='' CFG[interval]=1.0
+  cfg_load
+  x=0
+  : $(( ${CFG[alert_disk_pct]} - 5 ))
+  marker=safe
+  [[ -e $HYN_VAR/stale-rce-marker ]] && marker=executed
+  printf '%s' "${CFG[alert_mem_pct]}|${CFG[alert_disk_pct]}|$marker|${CFG[notify_access_details]}|${CFG[webhook_url]}|${CFG[heartbeat_url]}|${CFG[notify_to]}|${CFG[telegram_chat_id]}|${CFG[ntfy_topic]}|${CFG[cloud_url]}|${CFG[interval]}"
+)
+eq 'stale cloud cache applies only validated portal values' '80|85|safe|off|||||||1.0' "$stale_access"
+
+local_access=$(
+  STATE_DIR=''
+  HYN_VAR="$TMP/local-var" HYN_ETC="$TMP/local-etc"
+  HOME="$TMP/local-home" XDG_CONFIG_HOME="$TMP/local-xdg" HYN_CONFIG=''
+  mkdir -p "$HYN_VAR" "$HYN_ETC" "$XDG_CONFIG_HOME"
+  printf 'notify_access_details=on\n' >"$HYN_ETC/config"
+  CFG[notify_access_details]=off
+  cfg_load
+  printf '%s' "${CFG[notify_access_details]}"
+)
+eq 'local config can opt in to identity details' 'on' "$local_access"
 
 # ---------------------------------------------------------------------------
 section 'network collectors'
@@ -882,15 +950,15 @@ NET_SSID=''
 # ---------------------------------------------------------------------------
 section 'attribution'
 # ---------------------------------------------------------------------------
-eq 'author constant' 'Vivek W (AryanVBW)' "$HYN_AUTHOR"
-contains 'copyright names the author' 'Vivek W (AryanVBW)' "$HYN_COPYRIGHT"
+eq 'author constant uses the company brand' 'NEXUSV' "$HYN_AUTHOR"
+contains 'copyright names the company' 'NEXUSV TECHNOLOGIES PRIVATE LIMITED' "$HYN_COPYRIGHT"
 TERM_COLS=140 TERM_ROWS=45
 footer_line 140
-contains 'footer carries the credit' 'Vivek W (AryanVBW)' "$FTR_OUT"
+contains 'footer carries the company credit' 'NEXUSV' "$FTR_OUT"
 vlen "$FTR_OUT"; truthy 'footer fits the width' '((VLEN <= 140))'
 # Even at 80 columns the credit survives; the key hints are what get dropped.
 footer_line 80
-contains 'credit survives at 80 cols' 'AryanVBW' "$FTR_OUT"
+contains 'company credit survives at 80 cols' 'NEXUSV' "$FTR_OUT"
 vlen "$FTR_OUT"; truthy 'narrow footer still fits' '((VLEN <= 80))'
 UPD_AVAILABLE=1 UPD_LATEST=9.9.9
 footer_line 140
@@ -1205,6 +1273,19 @@ eq 'escapes double quotes'  '&quot;x&quot;'    "$(html_escape '"x"')"
 falsy 'no literal <lt; artefact' '[[ $(html_escape "<") == *"<lt;"* ]]'
 eq 'plain text is untouched' 'hello world'     "$(html_escape 'hello world')"
 
+# A portal-managed wrapper must preserve generated HTML verbatim while escaping
+# scalar placeholders that can contain attacker-influenced host/subject text.
+template_path=$(notification_template_path alert)
+printf '<section>{{hostname}}|{{subject}}|{{severity}}|{{content}}</section>' >"$template_path"
+HOSTNAME_S='node<&>'
+notify_apply_template alert warn 'Disk <full> & hot' '<strong>generated</strong>'
+contains 'email wrapper is applied' '<section>' "$HTML_OUT"
+contains 'generated body remains HTML' '<strong>generated</strong>' "$HTML_OUT"
+contains 'template hostname is escaped' 'node&lt;&amp;&gt;' "$HTML_OUT"
+contains 'template subject is escaped' 'Disk &lt;full&gt; &amp; hot' "$HTML_OUT"
+rm -f "$template_path"
+HOSTNAME_S=test-node
+
 # Verdict must reflect severity, not just say something cheerful.
 RA_CRIT=0 RA_WARN=0 RA_TS=()
 R[disk_days]=0 R[hw_up_pct]=100
@@ -1307,24 +1388,33 @@ eq 'second remote host'      '10.0.0.9'      "${SESS_FROM[1]}"
 eq 'local session has no host' 'local'       "${SESS_FROM[2]}"
 contains 'login time captured' '2026-08-07 10:30' "${SESS_WHEN[0]}"
 
-# The report must name the account and list the sessions.
+# Notifications expose only aggregate access counts by default. Operators who
+# explicitly need forensic identity detail can opt in for their own channels.
 RUN_AS=root RUN_UID=0 LOGIN_USER=vivek
-FAILED_LOGINS=1284 FAILED_LOGIN_TOP='203.0.113.9 (900x)'
+FAILED_LOGINS=1284 FAILED_LOGIN_TOP='198.51.100.250 (900x)'
 acc=$(report_access_text 24)
-contains 'access section names the account'  'ran as' "$acc"
-contains 'access section names root'          'root'       "$acc"
-contains 'access section names the invoker'   'vivek'      "$acc"
-contains 'access section lists a session'     'pts/0'      "$acc"
-contains 'access section shows the source'    '192.168.1.5' "$acc"
+contains 'private access section counts sessions' '3 session(s)' "$acc"
+falsy 'private access section omits account identity' '[[ $acc == *"report ran as"* ]]'
+falsy 'private access section omits session username' '[[ $acc == *"vivek"* ]]'
+falsy 'private access section omits session source' '[[ $acc == *"192.168.1.5"* ]]'
 contains 'access section counts rejections'   '1284'       "$acc"
-contains 'access section names worst offender' '203.0.113.9' "$acc"
+falsy 'private access section omits worst offender' '[[ $acc == *"198.51.100.250"* ]]'
 # A number that is never zero needs the caveat, or it reads as an incident.
 contains 'rejections are put in context' 'watch the trend' "$acc"
+CFG[notify_access_details]=on
+acc_detail=$(report_access_text 24)
+contains 'opt-in access section names the account' 'ran as' "$acc_detail"
+contains 'opt-in access section names the invoker' 'vivek' "$acc_detail"
+contains 'opt-in access section lists a session' 'pts/0' "$acc_detail"
+contains 'opt-in access section shows the source' '192.168.1.5' "$acc_detail"
+contains 'opt-in access section names worst offender' '198.51.100.250' "$acc_detail"
+CFG[notify_access_details]=off
 SESS_USER=() SESS_TTY=() SESS_FROM=() SESS_WHEN=()
 acc=$(report_access_text 24)
 contains 'empty session list is explicit' 'nobody' "$acc"
 FAILED_LOGINS=0 FAILED_LOGIN_TOP=''
 _parse_who < "$TMP/who.txt"
+FAILED_LOGINS=1284 FAILED_LOGIN_TOP='198.51.100.250 (900x)'
 
 # ---------------------------------------------------------------------------
 section 'email rendering'
@@ -1363,10 +1453,19 @@ contains 'email has KPI figures'        'CPU avg' "$h"
 contains 'email has a bar'              'border-radius:4px' "$h"
 contains 'email has the alerts section' 'Alerts' "$h"
 contains 'email has connection detail'  'Connection' "$h"
-contains 'email credits the author'     'Vivek W (AryanVBW)' "$h"
+contains 'email credits the company'    'NEXUSV TECHNOLOGIES PRIVATE LIMITED' "$h"
 contains 'email has the access section' 'Access' "$h"
-contains 'email names the account'      'Report ran as' "$h"
-contains 'email lists the session user' 'vivek' "$h"
+falsy   'private report email omits account identity' '[[ $h == *"Report ran as"* ]]'
+falsy   'private report email omits session username' '[[ $h == *"vivek"* ]]'
+falsy   'private report email omits session source' '[[ $h == *"192.168.1.5"* ]]'
+falsy   'private report email omits worst rejected-login IP' '[[ $h == *"198.51.100.250"* ]]'
+CFG[notify_access_details]=on
+h_detail=$(report_html 24)
+contains 'opt-in report email names the account' 'Report ran as' "$h_detail"
+contains 'opt-in report email lists session username' 'vivek' "$h_detail"
+contains 'opt-in report email lists session source' '192.168.1.5' "$h_detail"
+contains 'opt-in report email lists worst rejected-login IP' '198.51.100.250' "$h_detail"
+CFG[notify_access_details]=off
 # Escaping still applies to every interpolated value.
 HOSTNAME_S='evil<script>alert(1)</script>'
 h=$(report_html 24)
@@ -1382,12 +1481,22 @@ ah=$(alerts_html "0" "1" crit)
 contains 'alert email has a severity pill' 'CRITICAL' "$ah"
 contains 'alert email has resource bars'   'Resources' "$ah"
 contains 'alert email explains silencing'  'silence' "$ah"
-contains 'alert email credits the author'  'AryanVBW' "$ah"
-contains 'alert email names the account'   'Running as' "$ah"
-contains 'alert email lists sessions'      'Session' "$ah"
-# A session from an address the operator does not recognise is a security signal,
-# so the source must survive into the alert, not just the report.
-contains 'alert email shows session source' '192.168.1.5' "$ah"
+contains 'alert email credits the company' 'NEXUSV TECHNOLOGIES PRIVATE LIMITED' "$ah"
+falsy   'private alert email omits account identity' '[[ $ah == *"Running as"* ]]'
+falsy   'private alert email omits session username' '[[ $ah == *"vivek"* ]]'
+falsy   'private alert email omits session source' '[[ $ah == *"192.168.1.5"* ]]'
+ab=$(alerts_body "0" "1")
+falsy   'private alert text omits session username' '[[ $ab == *"vivek"* ]]'
+falsy   'private alert text omits session source' '[[ $ab == *"192.168.1.5"* ]]'
+CFG[notify_access_details]=on
+ah_detail=$(alerts_html "0" "1" crit)
+contains 'opt-in alert email names the account' 'Running as' "$ah_detail"
+contains 'opt-in alert email lists session username' 'vivek' "$ah_detail"
+contains 'opt-in alert email lists session source' '192.168.1.5' "$ah_detail"
+ab_detail=$(alerts_body "0" "1")
+contains 'opt-in alert text lists session username' 'vivek' "$ab_detail"
+contains 'opt-in alert text lists session source' '192.168.1.5' "$ab_detail"
+CFG[notify_access_details]=off
 falsy   'alert email has no style block'   '[[ $ah == *"<style"* ]]'
 _reset_alerts
 
@@ -1591,6 +1700,8 @@ truthy 'process total is a number' '[[ $PROC_TOTAL =~ ^[0-9]+$ ]]'
 
 # The enriched payload must carry all of it, and still be valid JSON.
 section 'detail: payload carries the extra detail'
+P_USER[0]='private-operator'
+HW_JOURNAL_TAIL=('private journal message')
 cloud_payload_v
 contains 'payload has per-core clocks'  '"cores_mhz": [3400, 2800]' "$CLOUD_PAYLOAD"
 contains 'payload has the governor'     '"governor": "performance"' "$CLOUD_PAYLOAD"
@@ -1609,6 +1720,10 @@ assert p[\"cpu\"][\"mhz_avg\"] == 3100
 assert p[\"sensors\"][\"nvme Composite\"] == 48
 assert \"count\" in p[\"processes\"]
 assert \"top\" in p[\"processes\"]
+assert \"user\" not in p[\"processes\"][\"top\"][0], p[\"processes\"][\"top\"][0]
+assert \"private-operator\" not in json.dumps(p), p[\"processes\"]
+assert \"journal_tail\" not in p[\"highway\"], p[\"highway\"]
+assert \"private journal message\" not in json.dumps(p), p[\"highway\"]
 "'
 fi
 

@@ -137,7 +137,7 @@ sudo hyn unlink        forget the credential locally
 **The Highway node comes first.** The section above the processor charts lists
 every tracked unit with its state, restart count, cgroup memory and time active,
 then the node process, the mesh tunnel, the WAN qdisc and congestion control, the
-journal's last hour with its newest lines, and the installed version against the
+journal's error and warning counts for the last hour, and the installed version against the
 published one — the terminal's node view (`4`), for someone who is not at the
 terminal. It is placed first deliberately: on a relay box a failed unit matters
 more than a busy CPU, since a node that is not running earns nothing however cool
@@ -158,18 +158,25 @@ automatically.
 
 ## Central management
 
-Once a node is paired the **dashboard is the source of truth for its settings**.
-The box keeps only what it needs to reach the API — project URL, public anon key,
-node token — and asks for the rest.
+Once a node is paired the dashboard can manage its ordinary monitoring settings.
+The box keeps its portal connection details and its notification delivery
+configuration locally. Provider destinations and credentials are never pulled
+from or stored in the portal.
 
 ```
-hyn config pull        fetch settings and channels from the portal
+hyn config pull        fetch monitoring settings from the portal
 hyn cloud status       what was pulled, when, and the node's administrative state
 ```
 
-`/account` in the portal holds the client's email, their notification channels,
-and every delivery attempt with the reason any of them failed. Thresholds,
-report time and push interval are edited there per server instead of over ssh.
+Every scheduled `hyn push` performs that pull before collecting and sending its
+reading, so portal changes apply on the next check-in without a second timer.
+`hyn config pull` remains useful when an operator wants to apply a change
+immediately.
+
+`/account` in the portal shows the client account, node settings and every
+delivery attempt with the reason any of them failed. Thresholds, report time and
+push interval are edited there per server. Notification channels are configured
+on each server with `sudo hyn wizard`.
 
 A pulled setting is written to a cache that `cfg_load` reads **before**
 `/etc/hyn-view/config`, so a line set locally on the box still wins. That
@@ -194,7 +201,7 @@ its state, sub-state, restart count, cgroup memory and how long it has been
 active**, the node process (pid, cpu, rss, threads, open files, uptime), the
 Nebula mesh interface with its rates, totals and drops, the WAN qdisc and
 congestion control, error and warning counts from the last hour of journal with
-the three newest lines, and the installed version — with where that version was
+no journal text, and the installed version — with where that version was
 read from — against the currently published one. That is what the portal's
 Highway section is drawn from, so it says the same thing the terminal does.
 
@@ -205,9 +212,12 @@ rather than a unit apparently using 16 EiB.
 
 ### Administration
 
-An administrator sees every client and every machine at `/admin`: which boxes
-have gone quiet, open alerts, notification volume and failures per client, the
-fleet-wide delivery log, and an audit trail.
+An administrator sees every client and every machine at `/admin`: animated fleet
+totals, 24-hour CPU and network trends, node-state distribution, which boxes have
+gone quiet, open alerts, notification volume and failures per client, the
+fleet-wide delivery log, and an audit trail. Client and machine rows open an
+embedded per-client dashboard, so an administrator can inspect that client's
+live stat cards and telemetry charts without leaving the control panel.
 
 | Control | Effect |
 | --- | --- |
@@ -261,17 +271,22 @@ anon key — the dashboard hiding a button is a courtesy, not a boundary.
 | Supabase anon key | `/etc/hyn-view/config` (0644) | Public by design — it ships in every browser bundle. RLS is what protects data. |
 | Node token | `/etc/hyn-view/secrets` (0600) | The actual credential. Sent in a request body, never in `argv`, so no local user can read it out of `ps`. |
 | Service-role key | nowhere | The agent never has one. A monitoring agent on a rented VPS is the wrong place for a key that bypasses RLS. |
-| Provider API keys | Supabase, or `/etc/hyn-view/secrets` | Set them in `/account` and the agent pulls them; a local secret still overrides. See the tradeoff below. |
+| Provider API keys and webhook credentials | `/etc/hyn-view/secrets` (0600) | Configured separately on each monitored server; never stored in or delivered by the portal. |
 
-**The tradeoff of central channel config, stated plainly.** Configuring channels
-in the browser means provider credentials live in the database so the agent can
-fetch them, where before they only sat in a `0600` file on one box. A database
-compromise therefore exposes them. Two things narrow it: the `secret` column is
-**write-only from any browser session** (enforced by a column grant, so the
-dashboard can replace a key but never read one back), and the value is returned
-only to a caller presenting that node's token. If you would rather keep keys on
-the machine, leave the channel secret empty and set it in
-`/etc/hyn-view/secrets` — a local secret takes precedence.
+**Notification delivery is local-only.** Run `sudo hyn wizard` on each monitored
+server. Destinations live in `/etc/hyn-view/config`; API keys, passwords, tokens
+and webhook URLs live in `/etc/hyn-view/secrets`. The portal receives delivery
+outcomes for its history view, but it has no table or RPC for provider
+credentials and a config pull never returns a notification channel.
+
+Administrators may edit the non-secret HTML wrappers for incident alerts and
+daily reports from the Email templates tab. A wrapper must contain
+`{{content}}`; optional placeholders include `{{hostname}}`, `{{version}}`,
+`{{severity}}` and `{{subject}}`. The node pulls the wrappers as base64 alongside
+ordinary settings and applies them around the locally generated message at send
+time. Active HTML is rejected, while the generated incident detail remains
+unescaped inside `{{content}}`; credentials and recipients never cross into this
+template store.
 
 A node token authorises writes for that one node and nothing else. Revoking a
 node from the portal stops it, and `hyn unlink` deliberately does *not* revoke
@@ -289,11 +304,13 @@ the browser never receives cannot leak from the browser.
 The database tests cover the parts worth being sure about: a token is released
 exactly once, a replayed poll is refused, an unknown token cannot write, a paused
 node is refused and resumes by itself, a suspended one stays refused, one account
-cannot read another's telemetry or channels, a browser session cannot forge a
-metric row, read a channel secret or read a node's token hash, a signed-in user
+cannot read another's telemetry, a browser session cannot forge a metric row or
+read a node's token hash, no central notification-credential tables or directory
+RPC exist, a signed-in user
 cannot promote themselves by calling the admin-claim RPC directly, the admin allow
 list is unreachable from any session, and a non-admin is refused every privileged
-endpoint.
+endpoint. They also prove that only an administrator can edit a template, that
+unsafe HTML is rejected, and that a saved wrapper reaches the node config pull.
 
 ```
 bash supabase/run-tests.sh     # applies the schema to a throwaway cluster
@@ -397,7 +414,7 @@ API keys live in `/etc/hyn-view/secrets` at mode `0600`, never in the
 world-readable config. Two further rules are enforced in code: secrets are never
 passed in `argv` (where any user could read them out of `ps`) and message bodies
 go through a `0600` temp file for the same reason. Everything interpolated into
-JSON is escaped first — journal lines are attacker-influenced text.
+JSON is escaped first because alert and service text can be attacker-influenced.
 
 `notify_max_per_day` (default 50) is a hard backstop so a flapping rule cannot
 burn a provider's quota and drop the one message that mattered.
@@ -447,7 +464,7 @@ connection details and node status.
 | `1` | dashboard |
 | `2` | network detail — all interfaces, kernel tuning snapshot |
 | `3` | processes |
-| `4` | Highway node detail + recent journal warnings |
+| `4` | Highway node detail + recent journal warning counts |
 | `h` | keys, paths and about |
 
 Other keys: `t` cycle theme, `p` switch visual profile, `u` bits/bytes, `m` sort
@@ -479,7 +496,7 @@ hyn record                sample metrics once
 sudo hyn link             pair with the web portal (device-code flow)
 sudo hyn unlink           forget the portal credential
 hyn push                  send one reading to the portal
-hyn config pull           fetch settings and channels from the portal
+hyn config pull           fetch monitoring settings from the portal
 hyn cloud status          node id, last push, and any error
 
 hyn update [--check] [--yes]
@@ -548,6 +565,7 @@ Keys worth knowing:
 | `highway_track` | `on` | node panel |
 | `profile` | `best` | `best` or `performance` |
 | `notify_channels` | *(empty)* | comma separated; nothing is sent until set |
+| `notify_access_details` | `off` | set `on` only to include run-as/session usernames, session source IPs and the worst rejected-login IP in notifications |
 | `alert_min_severity` | `warn` | `crit`, `warn` or `info` |
 | `alert_repeat_hours` | `6` | reminder interval while still firing |
 | `report_at` | `08:00` | server local time |
@@ -625,25 +643,33 @@ anything expensive.
 it reports nothing. Silence never means healthy — see "Detecting a dead server".
 
 **Your responsibility.** Only monitor machines you own or are authorised to
-monitor. Telemetry can identify people (account names of process owners, source
-addresses of logged-in sessions), so if you send it anywhere, make sure you have a
-basis to and that those people are told.
+monitor. Server identifiers and telemetry can be personal or confidential in
+context. Access details are excluded from notifications by default; setting
+`notify_access_details=on` includes run-as/session usernames, session source IPs
+and the worst rejected-login IP. If you enable it, make sure you have a lawful
+basis, minimise destinations and notify affected people as required.
 
 Full documents: [`DISCLAIMER.md`](DISCLAIMER.md) ·
-[`PRIVACY.md`](PRIVACY.md) · [`TERMS.md`](TERMS.md) · [`LICENSE`](LICENSE).
-The portal serves the same at `/legal`, `/privacy` and `/terms`.
-
-> The legal documents contain `[BRACKETED]` placeholders and were drafted to
-> describe this software accurately, not as legal advice. Fill them in and have a
-> lawyer review them before relying on them.
+[`PRIVACY.md`](PRIVACY.md) · [`TERMS.md`](TERMS.md) ·
+[`ACCEPTABLE_USE.md`](ACCEPTABLE_USE.md) · [`SECURITY.md`](SECURITY.md) ·
+[`SUBPROCESSORS.md`](SUBPROCESSORS.md) ·
+[`DATA_PROCESSING_ADDENDUM.md`](DATA_PROCESSING_ADDENDUM.md) ·
+[`LICENSE`](LICENSE). The portal source includes corresponding routes at
+`/legal`, `/privacy`, `/terms`, `/acceptable-use`, `/security`, `/subprocessors`
+and `/dpa`; a deployment is required before local policy changes appear on the
+hosted domains.
 
 ## Author
 
-**Vivek W (AryanVBW)** — [github.com/AryanVBW](https://github.com/AryanVBW)
+Developed and maintained by **NEXUSV TECHNOLOGIES PRIVATE LIMITED**.
+
+Official sites: [www.hyn-view.in](https://www.hyn-view.in) ·
+[www.hyn-view.info](https://www.hyn-view.info) ·
+Contact: [vivek.aryanvbw@gmail.com](mailto:vivek.aryanvbw@gmail.com)
 
 Attribution appears on the dashboard status bar, in the `ABOUT` panel (`h`), in
 `hyn about`, and in the footer of every alert and daily report.
 
 ## Licence
 
-MIT © 2026 Vivek W (AryanVBW)
+MIT © 2026 NEXUSV TECHNOLOGIES PRIVATE LIMITED

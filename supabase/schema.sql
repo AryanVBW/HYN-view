@@ -1,7 +1,10 @@
 -- hyn-view <-> web portal integration schema
 --
 -- Apply this in the Supabase SQL editor (or `supabase db push`) before pairing
--- any node. Everything below is idempotent, so re-running it is safe.
+-- any node. Definitions are written to support reapplication, but reapplying
+-- this file is not universally non-destructive: its in-place privacy upgrades
+-- remove legacy central notification tables and discard unsupported node-config
+-- keys. Review the migration notes and take any required export or backup first.
 --
 -- Design notes that matter:
 --
@@ -15,10 +18,10 @@
 --     privileged work happens inside SECURITY DEFINER functions with a pinned
 --     search_path, which are the only things the anon role may call.
 --
---   * Tokens (device codes and node tokens) are stored as SHA-256 hashes, never
---     plaintext. A database dump therefore does not let anyone impersonate a
---     node. The plaintext token is returned exactly once, at the moment it is
---     minted, and never again.
+--   * Human pairing codes use slow, independently salted bcrypt verifiers.
+--     High-entropy device codes and node tokens use SHA-256 verifiers. Plaintext
+--     credentials are returned only to the party that needs them and are not
+--     stored afterwards.
 
 create extension if not exists pgcrypto with schema extensions;
 
@@ -99,22 +102,55 @@ create table if not exists public.alert_events (
 
 create index if not exists alert_events_node_ts_idx on public.alert_events (node_id, ts desc);
 
--- Short-lived pairing codes. `user_code` is what a human retypes, so it uses a
--- reduced alphabet; `device_code` is the server's secret and is hashed.
+-- Short-lived pairing codes. The eight-symbol human code uses a slow salted
+-- verifier because it has far less entropy than the 32-byte device secret.
 create table if not exists public.device_codes (
-  id               uuid primary key default gen_random_uuid(),
-  user_code        text not null unique,
-  device_code_hash text not null unique,
-  hostname         text,
-  os               text,
-  agent_version    text,
-  approved_by      uuid references auth.users (id) on delete cascade,
-  node_id          uuid references public.nodes (id) on delete set null,
-  node_token_hash  text,
-  token_claimed    boolean not null default false,
-  created_at       timestamptz not null default now(),
-  expires_at       timestamptz not null
+  id                 uuid primary key default gen_random_uuid(),
+  user_code_verifier text not null,
+  device_code_hash   text not null unique,
+  hostname           text,
+  os                 text,
+  agent_version      text,
+  approved_by        uuid references auth.users (id) on delete cascade,
+  node_id            uuid references public.nodes (id) on delete set null,
+  node_token_hash    text,
+  token_claimed      boolean not null default false,
+  created_at         timestamptz not null default now(),
+  expires_at         timestamptz not null
 );
+
+-- `schema.sql` is also documented as safe to reapply to an older project, so
+-- perform the same in-place upgrade as the timestamped migration. Active
+-- legacy pairings remain usable; only their persisted representation changes.
+alter table public.device_codes
+  add column if not exists user_code_verifier text;
+
+do $$
+begin
+  if exists (
+    select 1
+      from information_schema.columns
+     where table_schema = 'public'
+       and table_name = 'device_codes'
+       and column_name = 'user_code'
+  ) then
+    execute $sql$
+      update public.device_codes
+         set user_code_verifier = extensions.crypt(
+               upper(trim(user_code)), extensions.gen_salt('bf', 10)
+             )
+       where user_code_verifier is null
+    $sql$;
+  end if;
+end;
+$$;
+
+alter table public.device_codes
+  alter column user_code_verifier set not null;
+
+drop index if exists public.device_codes_user_code_hash_idx;
+alter table public.device_codes drop column if exists user_code_hash;
+alter table public.device_codes drop column if exists user_code;
 
 create index if not exists device_codes_expiry_idx on public.device_codes (expires_at);
 
@@ -181,6 +217,74 @@ as $$
   select encode(extensions.digest(p_text, 'sha256'), 'hex');
 $$;
 
+-- Delete one expired pairing and, when approval already created a node but the
+-- agent never claimed its token, delete that unclaimable node in the same
+-- transaction. Claimed nodes remain; only their expired pairing row is burned.
+create or replace function public._hyn_delete_expired_device_code(p_id uuid)
+returns boolean
+language plpgsql
+volatile
+security definer
+set search_path = public
+as $$
+declare
+  v_node_id uuid;
+  v_token_claimed boolean;
+begin
+  delete from public.device_codes
+   where id = p_id and expires_at <= now()
+   returning node_id, token_claimed into v_node_id, v_token_claimed;
+
+  if not found then
+    return false;
+  end if;
+
+  if v_node_id is not null and not v_token_claimed then
+    delete from public.nodes
+     where id = v_node_id
+       and not exists (
+         select 1 from public.device_codes where node_id = v_node_id
+       );
+  end if;
+
+  return true;
+end;
+$$;
+
+-- Cleanup is event-driven: each pairing RPC runs this, so an expired row may
+-- remain until the next pairing request. Ordered SKIP LOCKED acquisition makes
+-- concurrent cleanup non-blocking and avoids cross-row lock cycles.
+create or replace function public._hyn_purge_expired_device_codes()
+returns bigint
+language plpgsql
+volatile
+security definer
+set search_path = public
+as $$
+declare
+  v_deleted bigint;
+  v_id uuid;
+begin
+  v_deleted := 0;
+  for v_id in
+    select id
+      from public.device_codes
+     where expires_at <= now()
+     order by id
+     for update skip locked
+  loop
+    if public._hyn_delete_expired_device_code(v_id) then
+      v_deleted := v_deleted + 1;
+    end if;
+  end loop;
+  return v_deleted;
+end;
+$$;
+
+-- Internal only. The security-definer pairing RPCs call it as their owner.
+revoke all on function public._hyn_delete_expired_device_code(uuid) from public;
+revoke all on function public._hyn_purge_expired_device_codes() from public;
+
 -- Crockford-ish alphabet: no 0/O/1/I/L/U, because these codes get read off one
 -- screen and typed into another, frequently over a phone camera.
 create or replace function public._hyn_user_code()
@@ -243,24 +347,40 @@ declare
   v_expires timestamptz;
   v_try integer := 0;
 begin
-  -- Opportunistic cleanup. ponytail: piggybacking on this call instead of a
-  -- pg_cron job keeps the deploy to one SQL file; if pairing volume ever gets
-  -- high enough that this scan matters, move it to a scheduled job.
-  delete from public.device_codes where expires_at < now() - interval '1 hour';
+  -- Event-driven cleanup: expiry is enforced now, on this pairing RPC.
+  perform public._hyn_purge_expired_device_codes();
 
-  v_device_code := encode(extensions.gen_random_bytes(32), 'hex');
   v_expires := now() + interval '15 minutes';
 
-  -- Retry on the astronomically unlikely user_code collision rather than
-  -- failing the operator's pairing attempt.
+  -- Salted verifiers cannot enforce plaintext uniqueness with an index. Briefly
+  -- serialize code allocation so the verify-before-insert collision check is
+  -- authoritative even when two agents start pairing at the same instant.
+  perform pg_advisory_xact_lock(482791360);
+
   loop
     v_try := v_try + 1;
+    v_device_code := encode(extensions.gen_random_bytes(32), 'hex');
     v_user_code := public._hyn_user_code();
+
+    if exists (
+      select 1
+        from public.device_codes d
+       where d.user_code_verifier = extensions.crypt(
+               v_user_code, d.user_code_verifier
+             )
+    ) then
+      if v_try >= 5 then
+        raise exception 'could not allocate a pairing code, try again';
+      end if;
+      continue;
+    end if;
+
     begin
       insert into public.device_codes (
-        user_code, device_code_hash, hostname, os, agent_version, expires_at
+        user_code_verifier, device_code_hash, hostname, os, agent_version, expires_at
       ) values (
-        v_user_code, public._hyn_sha256(v_device_code),
+        extensions.crypt(v_user_code, extensions.gen_salt('bf', 10)),
+        public._hyn_sha256(v_device_code),
         left(coalesce(p_hostname, ''), 200),
         left(coalesce(p_os, ''), 200),
         left(coalesce(p_agent_version, ''), 50),
@@ -302,13 +422,22 @@ begin
     raise exception 'not authenticated';
   end if;
 
-  select * into v from public.device_codes
-   where user_code = upper(trim(p_user_code));
+  select * into v
+    from public.device_codes d
+   where d.user_code_verifier = extensions.crypt(
+           upper(trim(p_user_code)), d.user_code_verifier
+         )
+   order by d.created_at desc
+   limit 1;
 
-  if not found then
+  -- Capture the submitted row first so `expired` remains distinguishable from
+  -- `not_found`, then purge before any per-code lock is taken.
+  perform public._hyn_purge_expired_device_codes();
+
+  if v.id is null then
     return json_build_object('status', 'not_found');
   end if;
-  if v.expires_at < now() then
+  if v.expires_at <= now() then
     return json_build_object('status', 'expired');
   end if;
   if v.node_id is not null then
@@ -344,14 +473,31 @@ begin
     raise exception 'not authenticated';
   end if;
 
-  select * into v from public.device_codes
-   where user_code = upper(trim(p_user_code))
-   for update;
+  select * into v
+    from public.device_codes d
+   where d.user_code_verifier = extensions.crypt(
+           upper(trim(p_user_code)), d.user_code_verifier
+         )
+   order by d.created_at desc
+   limit 1;
 
-  if not found then
+  -- Global cleanup always precedes the single-row approval lock. Purge workers
+  -- use ordered SKIP LOCKED scans, eliminating cross-row lock cycles.
+  perform public._hyn_purge_expired_device_codes();
+
+  if v.id is null then
     return json_build_object('status', 'not_found');
   end if;
-  if v.expires_at < now() then
+  if v.expires_at <= now() then
+    return json_build_object('status', 'expired');
+  end if;
+
+  select * into v from public.device_codes where id = v.id for update;
+  if v.id is null then
+    return json_build_object('status', 'not_found');
+  end if;
+  if v.expires_at <= now() then
+    perform public._hyn_delete_expired_device_code(v.id);
     return json_build_object('status', 'expired');
   end if;
   if v.node_id is not null then
@@ -403,16 +549,27 @@ declare
   v_token text;
 begin
   select * into v from public.device_codes
-   where device_code_hash = public._hyn_sha256(p_device_code)
-   for update;
+   where device_code_hash = public._hyn_sha256(p_device_code);
 
-  if not found then
+  -- As with approval, cleanup runs before the target row is locked.
+  perform public._hyn_purge_expired_device_codes();
+
+  if v.id is null then
     return json_build_object('status', 'not_found');
   end if;
+  if v.expires_at <= now() then
+    return json_build_object('status', 'expired');
+  end if;
+
+  select * into v from public.device_codes where id = v.id for update;
+  if v.id is null then
+    return json_build_object('status', 'not_found');
+  end if;
+  if v.expires_at <= now() then
+    perform public._hyn_delete_expired_device_code(v.id);
+    return json_build_object('status', 'expired');
+  end if;
   if v.node_id is null then
-    if v.expires_at < now() then
-      return json_build_object('status', 'expired');
-    end if;
     return json_build_object('status', 'pending', 'interval', 5);
   end if;
   if v.token_claimed then
@@ -732,10 +889,9 @@ $$;
 -- Everything above is the single-tenant core: pair a node, push metrics, read
 -- them back. Everything below turns that into a managed fleet:
 --
---   * the dashboard becomes the source of truth for configuration, so the agent
---     on the box holds nothing but bootstrap credentials and pulls the rest;
---   * a client's email, channels and notification history live here rather than
---     in a text file on a server nobody logs into;
+--   * the dashboard can manage ordinary monitoring configuration while provider
+--     targets and credentials remain root-only on each monitored server;
+--   * notification delivery history lives here so clients can review outcomes;
 --   * an administrator can see every client and every PC, and pause or suspend
 --     either, with every privileged action written to an audit trail.
 
@@ -836,6 +992,76 @@ alter table public.nodes add column if not exists status_reason text;
 alter table public.nodes add column if not exists config jsonb not null default '{}'::jsonb;
 alter table public.nodes add column if not exists last_config_pull_at timestamptz;
 
+-- A node owner can update config through the public PostgREST API, so the
+-- database—not the portal form—must define which keys can cross to an agent.
+-- Sanitise older rows before adding the constraint. This deliberately drops
+-- all keys not exposed by components/account/node-settings.tsx.
+create or replace function public._hyn_portal_config_valid(p_config jsonb)
+returns boolean
+language plpgsql
+immutable
+set search_path = public
+as $$
+declare
+  e record;
+  v text;
+begin
+  if p_config is null or jsonb_typeof(p_config) <> 'object' then return false; end if;
+  for e in select key, value from jsonb_each(p_config) loop
+    if jsonb_typeof(e.value) not in ('number', 'string') then return false; end if;
+    v := e.value #>> '{}';
+    case
+      when e.key in ('alert_mem_pct', 'alert_disk_pct') then
+        if v !~ '^(0|[1-9][0-9]{0,2})$' then return false; end if;
+        if v::integer > 100 then return false; end if;
+      when e.key = 'alert_temp_c' then
+        if v !~ '^(0|[1-9][0-9]{0,2})$' then return false; end if;
+        if v::integer > 200 then return false; end if;
+      when e.key = 'alert_load_per_core' then
+        if v !~ '^(0|[1-9][0-9]{0,4})$' then return false; end if;
+        if v::integer > 10000 then return false; end if;
+      when e.key = 'alert_latency_ms' then
+        if v !~ '^(0|[1-9][0-9]{0,5})$' then return false; end if;
+        if v::integer > 600000 then return false; end if;
+      when e.key = 'alert_repeat_hours' then
+        if v !~ '^(0|[1-9][0-9]{0,3})$' then return false; end if;
+        if v::integer > 8760 then return false; end if;
+      when e.key = 'notify_max_per_day' then
+        if v !~ '^(0|[1-9][0-9]{0,4})$' then return false; end if;
+        if v::integer > 10000 then return false; end if;
+      when e.key = 'cloud_push_min' then
+        if v !~ '^[1-9][0-9]{0,3}$' then return false; end if;
+        if v::integer > 1440 then return false; end if;
+      when e.key = 'alert_min_severity' then
+        if v not in ('crit', 'warn', 'info') then return false; end if;
+      when e.key = 'report_at' then
+        if v !~ '^([01][0-9]|2[0-3]):[0-5][0-9]$' then return false; end if;
+      else return false;
+    end case;
+  end loop;
+  return true;
+end;
+$$;
+
+update public.nodes n
+   set config = coalesce((
+     select jsonb_object_agg(e.key, e.value)
+       from jsonb_each(
+         case when jsonb_typeof(n.config) = 'object' then n.config else '{}'::jsonb end
+       ) as e
+      where e.key = any (array[
+        'alert_mem_pct', 'alert_disk_pct', 'alert_temp_c',
+        'alert_load_per_core', 'alert_latency_ms', 'alert_min_severity',
+        'alert_repeat_hours', 'report_at', 'notify_max_per_day', 'cloud_push_min'
+      ]::text[])
+        and public._hyn_portal_config_valid(jsonb_build_object(e.key, e.value))
+   ), '{}'::jsonb);
+
+alter table public.nodes drop constraint if exists nodes_config_portal_keys_check;
+alter table public.nodes add constraint nodes_config_portal_keys_check check (
+  public._hyn_portal_config_valid(config)
+);
+
 do $$ begin
   alter table public.nodes add constraint nodes_status_check
     check (status in ('active', 'paused', 'suspended'));
@@ -853,53 +1079,6 @@ alter table public.metrics add column if not exists tcp_estab    integer;
 alter table public.metrics add column if not exists conntrack_pct numeric;
 alter table public.metrics add column if not exists proc_count   integer;
 alter table public.metrics add column if not exists sensors      jsonb;
-
--- ---------------------------------------------------------------------------
--- notification channels
--- ---------------------------------------------------------------------------
--- Configured in the browser and pulled by the agent, which is the point of the
--- exercise: nobody should have to ssh in to change where alerts go.
---
--- TRADEOFF, stated plainly: provider credentials live in this table so the
--- agent can fetch them. That means a database compromise exposes them, where
--- previously they only sat in a 0600 file on one box. The mitigations are that
--- `secret` is not selectable by any browser session (column grants below, so it
--- is write-only from the dashboard) and is returned only to a caller presenting
--- that node's token. If you would rather keep keys on the box, leave these rows
--- unset and configure notify_* in /etc/hyn-view/secrets as before -- the agent
--- treats a local secret as an override.
-create table if not exists public.notification_channels (
-  id         uuid primary key default gen_random_uuid(),
-  owner      uuid not null references auth.users (id) on delete cascade,
-  -- null means "every node this client owns"
-  node_id    uuid references public.nodes (id) on delete cascade,
-  kind       text not null check (kind in ('resend', 'brevo', 'smtp', 'ntfy', 'telegram', 'webhook')),
-  target     text not null,
-  secret     text,
-  extra      jsonb not null default '{}'::jsonb,
-  enabled    boolean not null default true,
-  created_at timestamptz not null default now()
-);
-
-create index if not exists notification_channels_owner_idx on public.notification_channels (owner);
-
-alter table public.notification_channels enable row level security;
-
-drop policy if exists channels_select_own on public.notification_channels;
-create policy channels_select_own on public.notification_channels
-  for select using (owner = auth.uid() or public.hyn_is_admin());
-
-drop policy if exists channels_insert_own on public.notification_channels;
-create policy channels_insert_own on public.notification_channels
-  for insert with check (owner = auth.uid() and public.hyn_is_active());
-
-drop policy if exists channels_update_own on public.notification_channels;
-create policy channels_update_own on public.notification_channels
-  for update using (owner = auth.uid()) with check (owner = auth.uid());
-
-drop policy if exists channels_delete_own on public.notification_channels;
-create policy channels_delete_own on public.notification_channels
-  for delete using (owner = auth.uid());
 
 -- ---------------------------------------------------------------------------
 -- notification delivery log
@@ -955,6 +1134,32 @@ drop policy if exists admin_audit_select_admin on public.admin_audit;
 create policy admin_audit_select_admin on public.admin_audit
   for select using (public.hyn_is_admin());
 
+-- Non-secret presentation wrappers for the HTML produced by each agent. The
+-- provider credential and delivery destination remain local to the monitored
+-- server; this table contains only the markup an administrator wants around
+-- the generated alert or report. {{content}} is mandatory so a template can
+-- never silently discard the incident details it is supposed to deliver.
+create table if not exists public.notification_templates (
+  template_key  text primary key check (template_key in ('alert', 'report')),
+  name          text not null,
+  description   text not null,
+  html_template text not null check (
+    position('{{content}}' in html_template) > 0
+    and octet_length(html_template) <= 100000
+  ),
+  updated_at    timestamptz not null default now(),
+  updated_by    uuid references public.profiles (id) on delete set null
+);
+
+insert into public.notification_templates (template_key, name, description, html_template)
+values
+  ('alert', 'Incident alert', 'Wraps new, ongoing, and resolved alert digests.', '{{content}}'),
+  ('report', 'Daily report', 'Wraps the scheduled daily system report.', '{{content}}')
+on conflict (template_key) do nothing;
+
+alter table public.notification_templates enable row level security;
+revoke all on public.notification_templates from anon, authenticated;
+
 -- ---------------------------------------------------------------------------
 -- cross-tenant read access for administrators
 -- ---------------------------------------------------------------------------
@@ -1002,8 +1207,8 @@ set search_path = public, extensions
 as $$
 declare
   v_node public.nodes;
-  v_admin_id uuid;
-  v_channels json;
+  v_alert_template text;
+  v_report_template text;
 begin
   select * into v_node from public.nodes
    where token_hash = public._hyn_sha256(p_node_token);
@@ -1025,23 +1230,16 @@ begin
      returning * into v_node;
   end if;
 
-  -- Channels are resolved through the client's CHOSEN ADMIN
-  -- (notify_prefs.admin_id), not the node's own owner -- see "notification
-  -- model v2" below. A client with no admin chosen yet correctly gets an
-  -- empty channel list.
-  select admin_id into v_admin_id from public.notify_prefs where user_id = v_node.owner;
-
-  select coalesce(json_agg(json_build_object(
-           'kind', c.kind, 'target', c.target, 'secret', c.secret, 'extra', c.extra
-         )), '[]'::json)
-    into v_channels
-    from public.notification_channels c
-   where v_admin_id is not null
-     and c.owner = v_admin_id
-     and c.enabled = true
-     and (c.node_id is null or c.node_id = v_node.id);
-
   update public.nodes set last_config_pull_at = now() where id = v_node.id;
+
+  select replace(encode(convert_to(t.html_template, 'UTF8'), 'base64'), E'\n', '')
+    into v_alert_template
+    from public.notification_templates t
+   where t.template_key = 'alert';
+  select replace(encode(convert_to(t.html_template, 'UTF8'), 'base64'), E'\n', '')
+    into v_report_template
+    from public.notification_templates t
+   where t.template_key = 'report';
 
   return json_build_object(
     'status', 'ok',
@@ -1051,7 +1249,8 @@ begin
     'paused_until', v_node.paused_until,
     'status_reason', v_node.status_reason,
     'config', v_node.config,
-    'channels', v_channels
+    'alert_template_b64', coalesce(v_alert_template, ''),
+    'report_template_b64', coalesce(v_report_template, '')
   );
 end;
 $$;
@@ -1464,6 +1663,72 @@ begin
 end;
 $$;
 
+-- List and edit the two globally supported email wrappers. Browser sessions do
+-- not receive table privileges; both operations pass through admin-checked
+-- SECURITY DEFINER functions and every write is audited.
+create or replace function public.hyn_admin_templates()
+returns json
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare v json;
+begin
+  perform public._hyn_require_admin();
+  select coalesce(json_agg(row_to_json(x) order by x.template_key), '[]'::json)
+    into v
+    from (
+      select t.template_key, t.name, t.description, t.html_template, t.updated_at,
+             p.email as updated_by_email
+        from public.notification_templates t
+        left join public.profiles p on p.id = t.updated_by
+       order by t.template_key
+    ) x;
+  return v;
+end;
+$$;
+
+create or replace function public.hyn_admin_save_template(
+  p_template_key text,
+  p_html_template text
+)
+returns json
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare v_actor uuid;
+begin
+  v_actor := public._hyn_require_admin();
+  if p_template_key not in ('alert', 'report') then
+    raise exception 'unknown notification template: %', p_template_key;
+  end if;
+  if position('{{content}}' in coalesce(p_html_template, '')) = 0 then
+    raise exception 'template must include {{content}}';
+  end if;
+  if octet_length(p_html_template) > 100000 then
+    raise exception 'template exceeds 100 KB';
+  end if;
+  if p_html_template ~* '<[[:space:]]*(script|iframe|object|embed|form)([[:space:]>])'
+     or p_html_template ~* '[[:space:]]on[a-z]+[[:space:]]*=' then
+    raise exception 'template contains active HTML that is not allowed in email';
+  end if;
+
+  update public.notification_templates
+     set html_template = p_html_template,
+         updated_at = now(),
+         updated_by = v_actor
+   where template_key = p_template_key;
+  if not found then
+    raise exception 'notification template is not installed: %', p_template_key;
+  end if;
+
+  perform public._hyn_audit('notification_template.update', null, null,
+    jsonb_build_object('template_key', p_template_key, 'bytes', octet_length(p_html_template)));
+  return json_build_object('status', 'ok', 'template_key', p_template_key);
+end;
+$$;
+
 -- ---------------------------------------------------------------------------
 -- grants
 -- ---------------------------------------------------------------------------
@@ -1508,6 +1773,8 @@ revoke all on function public.hyn_admin_nodes() from public;
 revoke all on function public.hyn_admin_clients() from public;
 revoke all on function public.hyn_admin_notifications(integer) from public;
 revoke all on function public.hyn_admin_audit(integer) from public;
+revoke all on function public.hyn_admin_templates() from public;
+revoke all on function public.hyn_admin_save_template(text, text) from public;
 revoke all on function public.hyn_admin_set_node_status(uuid, text, integer, text) from public;
 revoke all on function public.hyn_admin_set_node_revoked(uuid, boolean, text) from public;
 revoke all on function public.hyn_admin_set_user_status(uuid, text, text) from public;
@@ -1518,6 +1785,8 @@ grant execute on function public.hyn_admin_nodes() to authenticated;
 grant execute on function public.hyn_admin_clients() to authenticated;
 grant execute on function public.hyn_admin_notifications(integer) to authenticated;
 grant execute on function public.hyn_admin_audit(integer) to authenticated;
+grant execute on function public.hyn_admin_templates() to authenticated;
+grant execute on function public.hyn_admin_save_template(text, text) to authenticated;
 grant execute on function public.hyn_admin_set_node_status(uuid, text, integer, text) to authenticated;
 grant execute on function public.hyn_admin_set_node_revoked(uuid, boolean, text) to authenticated;
 grant execute on function public.hyn_admin_set_user_status(uuid, text, text) to authenticated;
@@ -1572,18 +1841,6 @@ grant select on public.admin_audit       to authenticated;
 -- trail, and a column grant is a harder guarantee than a policy alone.
 grant update (full_name) on public.profiles to authenticated;
 
--- Channel secrets are WRITE-ONLY from the browser. The dashboard can set an API
--- key and can show that one exists, but cannot read it back; only a caller
--- presenting the node token gets the value, via hyn_fetch_config. Listing the
--- columns individually is what enforces this -- `grant select` on the table
--- would include `secret`.
-grant select (id, owner, node_id, kind, target, extra, enabled, created_at)
-  on public.notification_channels to authenticated;
-grant insert on public.notification_channels to authenticated;
-grant update (node_id, kind, target, secret, extra, enabled)
-  on public.notification_channels to authenticated;
-grant delete on public.notification_channels to authenticated;
-
 -- Sequences behind the bigserial keys, needed for the inserts granted above.
 grant usage, select on all sequences in schema public to authenticated;
 
@@ -1623,65 +1880,20 @@ revoke all on function public.hyn_admin_promote_by_email(text) from public;
 grant execute on function public.hyn_admin_promote_by_email(text) to authenticated;
 
 revoke all on public.profiles              from anon;
-revoke all on public.notification_channels from anon;
 revoke all on public.notification_log      from anon;
 revoke all on public.admin_audit           from anon;
 
 -- ===========================================================================
--- notification model v2
+-- local-only notification configuration
 -- ===========================================================================
--- Users no longer configure delivery channels (Resend/SMTP/Telegram/etc); that
--- plumbing moves to administrators only. A user instead picks three things: a
--- notification email, an optional phone number, and which administrator should
--- manage their alerts. hyn_fetch_config (above) now resolves a node's channels
--- through the owner's CHOSEN ADMIN (notify_prefs.admin_id) rather than the
--- node owner's own channels -- an admin configures channels once, for every
--- client who has chosen them.
-
-create table if not exists public.notify_prefs (
-  user_id      uuid primary key references auth.users (id) on delete cascade,
-  notify_email text,
-  notify_phone text,
-  admin_id     uuid references auth.users (id) on delete set null,
-  updated_at   timestamptz not null default now()
-);
-
-alter table public.notify_prefs enable row level security;
-
-drop policy if exists notify_prefs_select_own on public.notify_prefs;
-create policy notify_prefs_select_own on public.notify_prefs
-  for select using (user_id = auth.uid() or public.hyn_is_admin());
-
-drop policy if exists notify_prefs_upsert_own on public.notify_prefs;
-create policy notify_prefs_upsert_own on public.notify_prefs
-  for insert with check (user_id = auth.uid());
-
-drop policy if exists notify_prefs_update_own on public.notify_prefs;
-create policy notify_prefs_update_own on public.notify_prefs
-  for update using (user_id = auth.uid()) with check (user_id = auth.uid());
-
-grant select, insert on public.notify_prefs to authenticated;
-grant update (notify_email, notify_phone, admin_id) on public.notify_prefs to authenticated;
-revoke all on public.notify_prefs from anon;
-
--- A client picks from active admins only, so the dashboard needs to list them.
--- Nothing secret here -- email and name are already visible fleet-wide to any
--- admin, and this just lets a non-admin see who they may choose.
-create or replace function public.hyn_list_admins()
-returns json
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  select coalesce(json_agg(json_build_object('id', id, 'email', email, 'full_name', full_name)
-                    order by created_at), '[]'::json)
-    from public.profiles
-   where role = 'admin' and status = 'active';
-$$;
-
-revoke all on function public.hyn_list_admins() from public;
-grant execute on function public.hyn_list_admins() to authenticated;
+-- Notification destinations and provider credentials are configured only in
+-- /etc/hyn-view/config and /etc/hyn-view/secrets on each monitored server. A
+-- schema reapplication also removes storage and the routing-directory RPC from
+-- older deployments. notification_log intentionally remains: it records the
+-- delivery result reported by a node, not a credential used to send it.
+drop function if exists public.hyn_list_admins();
+drop table if exists public.notify_prefs;
+drop table if exists public.notification_channels;
 
 -- ---------------------------------------------------------------------------
 -- administrator allow list

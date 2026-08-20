@@ -895,7 +895,7 @@ cmd_help() {
     '  unlink                forget the portal credential (root)' \
     '  push                  send one reading to the portal now' \
     '  cloud status          portal URL, node id, and when the last push was' \
-    '  config pull           fetch settings and channels from the portal' \
+    '  config pull           fetch monitoring settings from the portal' \
     '' \
     '  update [--check] [--yes]  check npm for a newer release, or install it' \
     '  about                 author, licence and version detail' \

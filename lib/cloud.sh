@@ -304,8 +304,7 @@ cloud_payload_v() {
     p+=", \"name\": \"$(_jstr "${P_NAME[pi]}")\""
     p+=", \"cpu_tenths\": $(_jnum "${P_CPU[pi]:-0}" 0)"
     p+=", \"rss\": $(_jnum "${P_RSS[pi]:-0}" 0)"
-    p+=", \"threads\": $(_jnum "${P_THR[pi]:-0}" 0)"
-    p+=", \"user\": \"$(_jstr "${P_USER[pi]:-}")\"}"
+    p+=", \"threads\": $(_jnum "${P_THR[pi]:-0}" 0)}"
   done
   p+=']}'
   p+=", \"latency_ms\": $lat_ms"
@@ -394,18 +393,11 @@ cloud_payload_v() {
     p+='}'
   done
   p+=']'
-  # The three newest journal lines at warning or worse. This is attacker-
-  # influenced text (a peer can put bytes in a node's log), so it is escaped
-  # like everything else and truncated by the database on the way in.
-  p+=', "journal_tail": ['
-  first=1
-  local jl
-  for jl in "${HW_JOURNAL_TAIL[@]}"; do
-    ((first)) || p+=', '
-    first=0
-    p+="\"$(_jstr "${jl:0:300}")\""
-  done
-  p+=']}'
+  # Raw journal MESSAGE text is intentionally local-only. A service log can
+  # contain peer-provided strings, tokens or customer identifiers; the portal
+  # receives the warning/error counts above, which are sufficient for health
+  # monitoring without copying arbitrary log content off the server.
+  p+='}'
 
   # Currently firing alerts, so the portal's event log is the same truth the
   # email alerts are built from rather than a second, drifting judgement.
@@ -444,6 +436,14 @@ cloud_push() {
     ((quiet)) || warn 'this node is not linked yet; run: sudo hyn link'
     return 1
   }
+
+  # A check-in is also the node's opportunity to receive dashboard-managed
+  # settings and email presentation. Reload CFG after a successful pull so the
+  # new values affect this same cycle; a local config file still wins because
+  # cfg_load deliberately reads it after the portal cache.
+  if cloud_config_pull 1; then
+    cfg_load
+  fi
 
   # One call samples everything the alert engine needs, which is a superset of
   # what the payload needs -- including the second sample a rate requires.
@@ -647,9 +647,35 @@ cloud_config_cache() {
   printf '%s/cloud-config' "$STATE_DIR"
 }
 
+# Legacy path used only to remove credential copies written by versions that
+# accepted portal-managed notification channels. Provider credentials now live
+# exclusively in /etc/hyn-view/secrets.
 cloud_channels_cache() {
   state_dir_v
   printf '%s/cloud-channels' "$STATE_DIR"
+}
+
+cloud_template_write() {
+  local category=$1 encoded=$2 path tmp
+  path=$(notification_template_path "$category")
+  tmp="$path.tmp.$$"
+  state_dir_v
+  [[ -d $STATE_DIR ]] || mkdir -p "$STATE_DIR" 2>/dev/null || return 1
+
+  if [[ -z $encoded ]]; then
+    rm -f -- "$path"
+    return 0
+  fi
+  if printf '%s' "$encoded" | base64 -d >"$tmp" 2>/dev/null ||
+     printf '%s' "$encoded" | base64 -D >"$tmp" 2>/dev/null; then
+    if [[ $(wc -c <"$tmp" 2>/dev/null) -le 100000 ]] && grep -Fq '{{content}}' "$tmp"; then
+      chmod 600 "$tmp" 2>/dev/null
+      mv -f "$tmp" "$path"
+      return 0
+    fi
+  fi
+  rm -f -- "$tmp"
+  return 1
 }
 
 CLOUD_NODE_STATUS=''
@@ -657,6 +683,13 @@ cloud_config_pull() {
   local quiet=${1:-0}
   cloud_configured || { ((quiet)) || warn 'not configured; run: sudo hyn link'; return 1; }
   cloud_linked || { ((quiet)) || warn 'not linked; run: sudo hyn link'; return 1; }
+
+  local legacy_channels
+  legacy_channels=$(cloud_channels_cache)
+  if [[ -e $legacy_channels ]] && ! rm -f -- "$legacy_channels"; then
+    ((quiet)) || warn "cannot remove legacy channel credential cache: $legacy_channels"
+    return 1
+  fi
 
   local token body
   token=$(secret cloud_node_token)
@@ -670,6 +703,20 @@ cloud_config_pull() {
   json_field_v "$CLOUD_LAST_BODY" node_status && status=$JSON_FIELD
   json_field_v "$CLOUD_LAST_BODY" status_reason && reason=$JSON_FIELD
   CLOUD_NODE_STATUS=$status
+
+  local encoded
+  if json_field_v "$CLOUD_LAST_BODY" alert_template_b64; then
+    encoded=$JSON_FIELD
+    cloud_template_write alert "$encoded" || {
+      ((quiet)) || warn 'portal returned an invalid alert email template; keeping the generated email'
+    }
+  fi
+  if json_field_v "$CLOUD_LAST_BODY" report_template_b64; then
+    encoded=$JSON_FIELD
+    cloud_template_write report "$encoded" || {
+      ((quiet)) || warn 'portal returned an invalid report email template; keeping the generated email'
+    }
+  fi
 
   # The config object is nested, and json_field_v is deliberately flat-only, so
   # slice the object out by brace matching rather than pretending to parse it.
@@ -707,12 +754,14 @@ cloud_config_pull() {
       v=${v%"${v##*[![:space:]]}"}
       v=${v//\"/}
       [[ -n $k ]] || continue
-      # Unknown keys are reported by cfg_load, but writing them into the cache
-      # would make every load noisy, so filter here.
-      if _cfg_allowed "$k"; then
+      # Only settings exposed by the portal's NodeSettings form cross this
+      # boundary. `_cfg_allowed` is deliberately not enough: it includes local
+      # destinations, endpoints and credentials that a direct API caller must
+      # never be able to deliver to a node.
+      if _cfg_cloud_allowed "$k" && _cfg_cloud_value_allowed "$k" "$v"; then
         lines+=("$k=$v")
       else
-        ((quiet)) || warn "portal sent an unknown setting, ignoring: $k"
+        ((quiet)) || warn "portal sent a local-only, unknown or unsafe setting, ignoring: $k"
       fi
     done
     unset IFS
@@ -726,32 +775,6 @@ cloud_config_pull() {
     printf '# Edit these settings in the web portal instead.\n'
     ((${#lines[@]})) && printf '%s\n' "${lines[@]}"
   } >"$tmp" && mv -f "$tmp" "$f" || { warn "cannot write $f"; return 1; }
-
-  # Channel definitions carry provider credentials, so they never go in the
-  # 0644 state dir alongside the config cache.
-  local chans=''
-  if [[ $CLOUD_LAST_BODY == *'"channels"'* ]]; then
-    local crest=${CLOUD_LAST_BODY#*\"channels\"}
-    crest=${crest#*:}
-    while [[ $crest == [[:space:]]* ]]; do crest=${crest#?}; done
-    if [[ $crest == \[* ]]; then
-      local d2=0 j c2
-      for ((j = 0; j < ${#crest}; j++)); do
-        c2=${crest:j:1}
-        [[ $c2 == '[' ]] && d2=$((d2 + 1))
-        [[ $c2 == ']' ]] && d2=$((d2 - 1))
-        chans+=$c2
-        ((d2 == 0)) && break
-      done
-    fi
-  fi
-  if [[ -n $chans && $chans != '[]' ]]; then
-    local cf
-    cf=$(cloud_channels_cache)
-    : >"$cf.tmp" && chmod 600 "$cf.tmp" || { warn "cannot create $cf"; return 1; }
-    printf '%s\n' "$chans" >"$cf.tmp" && mv -f "$cf.tmp" "$cf"
-    chmod 600 "$cf" 2>/dev/null
-  fi
 
   if ((quiet == 0)); then
     printf 'hyn: pulled %d setting(s) from the portal\n' "${#lines[@]}"

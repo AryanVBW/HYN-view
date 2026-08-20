@@ -11,9 +11,9 @@
 # fixture tree and assert on known numbers. Never hardcode /proc below.
 
 HYN_VERSION="1.5.0"
-HYN_AUTHOR='Vivek W (AryanVBW)'
-HYN_AUTHOR_URL='https://github.com/AryanVBW'
-HYN_COPYRIGHT="(c) 2026 Vivek W (AryanVBW)"
+HYN_AUTHOR='NEXUSV'
+HYN_AUTHOR_URL='https://www.hyn-view.in'
+HYN_COPYRIGHT='(c) 2026 NEXUSV TECHNOLOGIES PRIVATE LIMITED'
 HYN_PKG='hyn-view'
 
 # Globbing is left at its default. An earlier version enabled extglob for vlen's
@@ -95,6 +95,11 @@ declare -A CFG=(
   [notify_to]=''
   [notify_from]='onboarding@resend.dev'
   [notify_from_name]='hyn-view'
+  # Account names, active-session origins and rejected-login source addresses
+  # can be useful for incident response, but are identity-bearing data. Keep
+  # notifications aggregate-only unless the operator explicitly opts in from
+  # a local config file; cloud-pulled configuration cannot enable this key.
+  [notify_access_details]=off
   [notify_max_per_day]=50
   [notify_timeout]=15
   [smtp_host]=''
@@ -182,6 +187,47 @@ declare -A CFG=(
 # so a typo shows up instead of silently doing nothing.
 _cfg_allowed() { [[ -v CFG[$1] ]]; }
 
+# The portal is a much narrower trust boundary than a root-owned local config.
+# Keep this list in step with the fields in the portal's NodeSettings form and
+# the database constraint. In particular, no destination, credential, network
+# endpoint, local privacy option or portal connection setting belongs here.
+_cfg_cloud_allowed() {
+  case ${1:-} in
+    alert_mem_pct | alert_disk_pct | alert_temp_c | alert_load_per_core | \
+      alert_latency_ms | alert_min_severity | alert_repeat_hours | report_at | \
+      notify_max_per_day | cloud_push_min) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Validate values before a portal-owned cache is allowed to feed root-run Bash
+# arithmetic or systemd timer generation. Local, root-owned config remains a
+# separate trust boundary and is intentionally not restricted by this helper.
+_cfg_cloud_value_allowed() {
+  local k=${1:-} v=${2:-}
+  case $k in
+    alert_mem_pct | alert_disk_pct)
+      [[ $v =~ ^(0|[1-9][0-9]{0,2})$ ]] && ((10#$v <= 100)) ;;
+    alert_temp_c)
+      [[ $v =~ ^(0|[1-9][0-9]{0,2})$ ]] && ((10#$v <= 200)) ;;
+    alert_load_per_core)
+      [[ $v =~ ^(0|[1-9][0-9]{0,4})$ ]] && ((10#$v <= 10000)) ;;
+    alert_latency_ms)
+      [[ $v =~ ^(0|[1-9][0-9]{0,5})$ ]] && ((10#$v <= 600000)) ;;
+    alert_repeat_hours)
+      [[ $v =~ ^(0|[1-9][0-9]{0,3})$ ]] && ((10#$v <= 8760)) ;;
+    notify_max_per_day)
+      [[ $v =~ ^(0|[1-9][0-9]{0,4})$ ]] && ((10#$v <= 10000)) ;;
+    cloud_push_min)
+      [[ $v =~ ^[1-9][0-9]{0,3}$ ]] && ((10#$v <= 1440)) ;;
+    alert_min_severity)
+      [[ $v == crit || $v == warn || $v == info ]] ;;
+    report_at)
+      [[ $v =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] ;;
+    *) return 1 ;;
+  esac
+}
+
 # Parse `key=value` lines. Shared by config and theme loading. Tolerates
 # comments, blank lines, surrounding whitespace and quoted values.
 # usage: _read_kv <file> <assoc-array-name>
@@ -206,7 +252,7 @@ _read_kv() {
 }
 
 cfg_load() {
-  local f tmp
+  local f tmp k
   declare -A tmp=()
   # Order matters: later files win. The portal's pulled settings come FIRST so a
   # deliberate local line still overrides central management -- an operator who
@@ -217,11 +263,22 @@ cfg_load() {
     state_dir_v
     cloud_cache="$STATE_DIR/cloud-config"
   fi
-  for f in "$cloud_cache" "$HYN_ETC/config" "${XDG_CONFIG_HOME:-$HOME/.config}/hyn-view/config" "${HYN_CONFIG:-}"; do
+  # Filter a stale cache written by any older agent before reading
+  # operator-controlled files. Local config is intentionally unrestricted by
+  # this portal allowlist and is read afterwards, so an operator can still set
+  # delivery destinations and every other supported local key.
+  if [[ -n $cloud_cache && -r $cloud_cache ]]; then
+    _read_kv "$cloud_cache" tmp
+    for k in "${!tmp[@]}"; do
+      if ! _cfg_cloud_allowed "$k" || ! _cfg_cloud_value_allowed "$k" "${tmp[$k]}"; then
+        unset 'tmp[$k]'
+      fi
+    done
+  fi
+  for f in "$HYN_ETC/config" "${XDG_CONFIG_HOME:-$HOME/.config}/hyn-view/config" "${HYN_CONFIG:-}"; do
     [[ -n $f && -r $f ]] || continue
     _read_kv "$f" tmp
   done
-  local k
   for k in "${!tmp[@]}"; do
     if _cfg_allowed "$k"; then
       CFG[$k]=${tmp[$k]}
