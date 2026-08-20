@@ -54,14 +54,17 @@ const KINDS: Record<
   },
 };
 
+// Administrator-only: these are the real delivery credentials (Resend/SMTP/
+// Telegram/etc). Every client who has chosen the signed-in admin in their own
+// notification preferences is routed through whatever is configured here --
+// see hyn_fetch_config in supabase/schema.sql, which resolves a node's
+// channels through notify_prefs.admin_id rather than the node owner directly.
 export function ChannelManager({
   channels,
   nodes,
-  ownerId,
 }: {
   channels: NotificationChannel[];
   nodes: Node[];
-  ownerId: string;
 }) {
   const router = useRouter();
   const [adding, setAdding] = useState(false);
@@ -80,8 +83,14 @@ export function ChannelManager({
     setBusy(true);
     setError(null);
     const supabase = createClient();
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) {
+      setBusy(false);
+      setError("Your session expired. Refresh and sign in again.");
+      return;
+    }
     const { error } = await supabase.from("notification_channels").insert({
-      owner: ownerId,
+      owner: auth.user.id,
       node_id: nodeId || null,
       kind,
       target: target.trim(),
@@ -124,8 +133,9 @@ export function ChannelManager({
             Notification channels
           </p>
           <p className="mt-2 max-w-xl font-mono text-xs leading-6 text-muted-foreground">
-            Configured here, pulled by each server on its next check-in. Nothing
-            needs editing on the machine itself.
+            Your own channels. Any client who chooses you as their administrator
+            is routed through whichever of these are enabled — they never see or
+            configure a provider themselves.
           </p>
         </div>
         <Button type="button" size="sm" onClick={() => setAdding(!adding)} className="gap-2">
@@ -195,7 +205,7 @@ export function ChannelManager({
               onChange={(event) => setNodeId(event.target.value)}
               className="w-full border border-input bg-background px-3 py-2.5 font-mono text-sm text-foreground outline-none focus:border-ring"
             >
-              <option value="">every server</option>
+              <option value="">every client who has chosen you</option>
               {nodes.map((n) => (
                 <option key={n.id} value={n.id}>
                   {n.name}
@@ -220,8 +230,9 @@ export function ChannelManager({
       {channels.length === 0 ? (
         <div className="mt-6 flex items-center justify-center rounded-sm border border-dashed border-border/60 px-6 py-10">
           <p className="max-w-md text-center font-mono text-xs leading-6 text-muted-foreground">
-            No channels configured, so nothing is sent. Alerts are still evaluated
-            on each server and shown here — they just do not reach you.
+            No channels configured, so nothing is sent. Clients who have chosen
+            you as their administrator will not receive alerts until at least
+            one channel is enabled here.
           </p>
         </div>
       ) : (
@@ -236,7 +247,7 @@ export function ChannelManager({
                   {c.target} ·{" "}
                   {c.node_id
                     ? nodes.find((n) => n.id === c.node_id)?.name ?? "one server"
-                    : "every server"}
+                    : "every client who has chosen you"}
                 </p>
               </div>
               <button

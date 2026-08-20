@@ -94,6 +94,23 @@ export type NotificationChannel = {
   created_at: string;
 };
 
+// What a user picks: an address, an optional phone number, and which admin
+// should manage their delivery. The actual channel plumbing lives on that
+// admin's own NotificationChannel rows, configured from the admin panel.
+export type NotifyPrefs = {
+  user_id: string;
+  notify_email: string | null;
+  notify_phone: string | null;
+  admin_id: string | null;
+  updated_at: string;
+};
+
+export type AdminOption = {
+  id: string;
+  email: string | null;
+  full_name: string | null;
+};
+
 export type NotificationLogRow = {
   id: number;
   node_id: string;

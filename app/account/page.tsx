@@ -2,14 +2,16 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { AlertTriangle, CheckCircle2, Mail, ShieldCheck, XCircle } from "lucide-react";
-import { ChannelManager } from "@/components/account/channel-manager";
+import { NotifyPreferences } from "@/components/account/notify-preferences";
 import { NodeSettings } from "@/components/account/node-settings";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
+import { claimEnvAdminIfListed } from "@/lib/admin-emails";
 import { formatRelative } from "@/lib/dashboard-data";
 import type {
+  AdminOption,
   Node,
-  NotificationChannel,
+  NotifyPrefs,
   NotificationLogRow,
   Profile,
 } from "@/lib/types";
@@ -39,10 +41,13 @@ export default async function AccountPage() {
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) redirect("/signin?next=%2Faccount");
 
-  const [profileRes, nodesRes, channelsRes, logRes] = await Promise.all([
+  await claimEnvAdminIfListed(supabase, auth.user.email);
+
+  const [profileRes, nodesRes, prefsRes, adminsRes, logRes] = await Promise.all([
     supabase.from("profiles").select("*").eq("id", auth.user.id).maybeSingle(),
     supabase.from("nodes").select("*").eq("revoked", false).order("created_at"),
-    supabase.from("notification_channels").select("*").order("created_at"),
+    supabase.from("notify_prefs").select("*").eq("user_id", auth.user.id).maybeSingle(),
+    supabase.rpc("hyn_list_admins"),
     supabase
       .from("notification_log")
       .select("*")
@@ -52,7 +57,8 @@ export default async function AccountPage() {
 
   const profile = profileRes.data as Profile | null;
   const nodes = (nodesRes.data ?? []) as Node[];
-  const channels = (channelsRes.data ?? []) as NotificationChannel[];
+  const prefs = prefsRes.data as NotifyPrefs | null;
+  const admins = (adminsRes.data ?? []) as AdminOption[];
   const log = (logRes.data ?? []) as NotificationLogRow[];
 
   // Counted over a 30-day window rather than all time: "how many emails have
@@ -74,7 +80,7 @@ export default async function AccountPage() {
     { label: "Sent, 30 days", value: sent30.count ?? 0, tone: "primary" as const },
     { label: "Failed, 30 days", value: failed30.count ?? 0, tone: (failed30.count ? "bad" : "muted") as "bad" | "muted" },
     { label: "Total attempts", value: total30.count ?? 0, tone: "muted" as const },
-    { label: "Channels active", value: channels.filter((c) => c.enabled).length, tone: "muted" as const },
+    { label: "Admin assigned", value: prefs?.admin_id ? 1 : 0, tone: "muted" as const },
   ];
 
   return (
@@ -133,7 +139,7 @@ export default async function AccountPage() {
           ))}
         </div>
 
-        <ChannelManager channels={channels} nodes={nodes} ownerId={auth.user.id} />
+        <NotifyPreferences prefs={prefs} admins={admins} userEmail={auth.user.email} />
 
         <NodeSettings nodes={nodes} />
 
