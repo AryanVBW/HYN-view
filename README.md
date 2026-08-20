@@ -96,6 +96,210 @@ only ever be blank go back to the layout instead of being drawn empty.
 A profile only fills in keys you have not set yourself, so an explicit `graph=`
 or `interval=` line always wins.
 
+## Web portal
+
+The dashboard in `web-portal/` shows the same telemetry in a browser. The server
+pushes; the portal reads. Nothing is scraped and no port is opened on the
+monitored box.
+
+Pairing works like `gh auth login`, because an Ubuntu server has no browser:
+
+```
+                                        ┌─ 1. sudo hyn link
+  Ubuntu server (no browser) ───────────┤   prints  QKB8-D6VQ  and polls
+                                        └─ 4. receives its node token
+
+  Your phone or laptop ─────────────────── 2. open /link, sign in, type the code
+                                           3. approve "web-01"
+
+  Then, every 5 minutes ────────────────── hyn push → Supabase → dashboard
+```
+
+```
+sudo hyn link          pair this machine (asks for the project URL and anon key)
+sudo hyn setup         install the 5-minute push timer
+hyn cloud status       node id, and when the last push happened or why it failed
+hyn push               send one reading now
+sudo hyn unlink        forget the credential locally
+```
+
+### Setting it up
+
+1. Create a Supabase project and apply `supabase/schema.sql` in the SQL editor.
+   It creates the tables, the row level security policies and the pairing RPCs.
+2. In the portal, copy `web-portal/.env.local.example` to `.env.local` and fill
+   in the project URL and anon key. For Google sign-in, enable the Google
+   provider in Supabase and add `<your-site>/auth/callback` as a redirect URL.
+3. On the server, `sudo hyn link`, then follow the code.
+
+### What the dashboard shows
+
+**The Highway node comes first.** The section above the processor charts lists
+every tracked unit with its state, restart count, cgroup memory and time active,
+then the node process, the mesh tunnel, the WAN qdisc and congestion control, the
+journal's last hour with its newest lines, and the installed version against the
+published one — the terminal's node view (`4`), for someone who is not at the
+terminal. It is placed first deliberately: on a relay box a failed unit matters
+more than a busy CPU, since a node that is not running earns nothing however cool
+it is. An agent older than the section says so and prints the upgrade command,
+rather than reporting a machine with no services.
+
+**Real data only.** With no node linked it says so and tells you how to link
+one; with a node linked but no metrics yet it says that instead, because the fix
+is different. A missing sensor renders as `—` or as an explicit "no thermal
+sensor" panel rather than as a zero, since a plotted 0°C is a lie about a healthy
+machine.
+
+**Demo data is opt-in.** The empty state has a *Load demo data* button that
+seeds one synthetic node so the dashboard can be evaluated without a server to
+pair. It is flagged `is_demo` in the database, badged `demo data · not a real
+server` wherever it appears, and removable in one click. Nothing seeds it
+automatically.
+
+## Central management
+
+Once a node is paired the **dashboard is the source of truth for its settings**.
+The box keeps only what it needs to reach the API — project URL, public anon key,
+node token — and asks for the rest.
+
+```
+hyn config pull        fetch settings and channels from the portal
+hyn cloud status       what was pulled, when, and the node's administrative state
+```
+
+`/account` in the portal holds the client's email, their notification channels,
+and every delivery attempt with the reason any of them failed. Thresholds,
+report time and push interval are edited there per server instead of over ssh.
+
+A pulled setting is written to a cache that `cfg_load` reads **before**
+`/etc/hyn-view/config`, so a line set locally on the box still wins. That
+ordering is deliberate: central management that silently reverts an operator who
+edited a machine at 3am for a reason is worse than no central management, and a
+cache that outranked explicit local config would be impossible to debug.
+
+### What the agent sends
+
+One push carries, per node: CPU percent split by user/sys/iowait/**steal**, load,
+**per-core clock speeds** with the governor and the hardware's floor and ceiling,
+**every temperature sensor the platform exposes** (not just the CPU package — an
+NVMe at 70°C is what explains a fan that will not stop), memory and swap, every
+real filesystem with its size and projected pressure, WAN throughput with errors,
+drops, retransmits, **negotiated link speed and duplex**, TCP state distribution,
+conntrack headroom, PSI for cpu/memory/io, first-hop and internet latency, the
+last speed test, process count and the **top processes by cpu and rss**, and
+every alert currently firing.
+
+Highway goes over the wire in full, not as a verdict: **every tracked unit with
+its state, sub-state, restart count, cgroup memory and how long it has been
+active**, the node process (pid, cpu, rss, threads, open files, uptime), the
+Nebula mesh interface with its rates, totals and drops, the WAN qdisc and
+congestion control, error and warning counts from the last hour of journal with
+the three newest lines, and the installed version — with where that version was
+read from — against the currently published one. That is what the portal's
+Highway section is drawn from, so it says the same thing the terminal does.
+
+Sensors that do not exist serialise as `null`, never `0`. A VM with no thermal
+passthrough is a normal outcome, and a graphed 0°C would be an invented reading.
+An unset systemd `MemoryCurrent` (reported as the 64-bit sentinel) is `null` too,
+rather than a unit apparently using 16 EiB.
+
+### Administration
+
+An administrator sees every client and every machine at `/admin`: which boxes
+have gone quiet, open alerts, notification volume and failures per client, the
+fleet-wide delivery log, and an audit trail.
+
+| Control | Effect |
+| --- | --- |
+| **Pause** | Stops accepting readings. Optionally for N minutes, after which it resumes by itself. |
+| **Suspend** | Stops accepting readings until an administrator lifts it. |
+| **Revoke** | Invalidates the node token. Not reversible from the portal — the machine must be paired again. |
+| **Suspend client** | Suspends the account and, with it, every machine the client owns. |
+
+A timed pause is preferred over an open-ended one because monitoring you forgot
+to switch back on is worse than none: you believe you still have it. The agent
+treats a pause as an administrative decision rather than a fault and exits zero,
+so a maintenance window does not fill the journal with what looks like a broken
+agent.
+
+Two guard rails are enforced in the database: an admin cannot suspend their own
+account, and the last remaining administrator cannot be demoted.
+
+The first administrator is made by hand, once:
+
+```sql
+update public.profiles set role = 'admin' where email = 'you@example.com';
+```
+
+After that, an admin can promote others from `/admin`. The third route is an
+allow list — addresses that are promoted automatically the next time they sign
+in:
+
+```sql
+insert into public.admin_allowlist (email) values ('you@example.com');
+```
+
+`admin_allowlist` has row level security on and **no policies**, and is revoked
+from both session roles, so no browser session — not even an administrator's —
+can read or change who is eligible. It is edited in the SQL editor on purpose:
+deciding who may become an admin should need the same access as the schema.
+
+That table replaced an `ADMIN_EMAILS` environment variable checked in the portal's
+server code, which was not a boundary at all: the promotion RPC is granted to
+`authenticated`, so any signed-in user could skip the app, call it directly with
+the public anon key and their own address, and be promoted. The check now happens
+inside the function, against the table.
+
+**Authorisation lives in the database, not the UI.** Every admin RPC re-checks the
+caller's role, because anyone can call these endpoints directly with the public
+anon key — the dashboard hiding a button is a courtesy, not a boundary.
+
+### Credentials
+
+| Value | Where it lives | Why |
+| --- | --- | --- |
+| Supabase anon key | `/etc/hyn-view/config` (0644) | Public by design — it ships in every browser bundle. RLS is what protects data. |
+| Node token | `/etc/hyn-view/secrets` (0600) | The actual credential. Sent in a request body, never in `argv`, so no local user can read it out of `ps`. |
+| Service-role key | nowhere | The agent never has one. A monitoring agent on a rented VPS is the wrong place for a key that bypasses RLS. |
+| Provider API keys | Supabase, or `/etc/hyn-view/secrets` | Set them in `/account` and the agent pulls them; a local secret still overrides. See the tradeoff below. |
+
+**The tradeoff of central channel config, stated plainly.** Configuring channels
+in the browser means provider credentials live in the database so the agent can
+fetch them, where before they only sat in a `0600` file on one box. A database
+compromise therefore exposes them. Two things narrow it: the `secret` column is
+**write-only from any browser session** (enforced by a column grant, so the
+dashboard can replace a key but never read one back), and the value is returned
+only to a caller presenting that node's token. If you would rather keep keys on
+the machine, leave the channel secret empty and set it in
+`/etc/hyn-view/secrets` — a local secret takes precedence.
+
+A node token authorises writes for that one node and nothing else. Revoking a
+node from the portal stops it, and `hyn unlink` deliberately does *not* revoke
+server-side — a compromised agent revoking its own node would be a denial of
+service. The agent refuses to send it to a non-`https` endpoint at all, loopback
+excepted, so a mistyped `cloud_url` cannot put a long-lived credential on the
+wire in clear text.
+
+The browser is not given even the token's *verifier*: `nodes.token_hash` is left
+out of the column grant, so `select *` on `nodes` is refused for a session and the
+portal names the columns it wants. The hash cannot be used to write telemetry —
+ingest needs the preimage — but there is no page that needs it either, and a value
+the browser never receives cannot leak from the browser.
+
+The database tests cover the parts worth being sure about: a token is released
+exactly once, a replayed poll is refused, an unknown token cannot write, a paused
+node is refused and resumes by itself, a suspended one stays refused, one account
+cannot read another's telemetry or channels, a browser session cannot forge a
+metric row, read a channel secret or read a node's token hash, a signed-in user
+cannot promote themselves by calling the admin-claim RPC directly, the admin allow
+list is unreachable from any session, and a non-admin is refused every privileged
+endpoint.
+
+```
+bash supabase/run-tests.sh     # applies the schema to a throwaway cluster
+bash test/cloud-integration.sh # agent against a mock endpoint
+```
+
 ## Alerts
 
 Rules cover memory, swap, per-mount disk (with a fill-date projection),
@@ -272,6 +476,12 @@ hyn report [--send]       daily report: print it, or email it
 hyn notify status | test  delivery configuration, or send a test message
 hyn record                sample metrics once
 
+sudo hyn link             pair with the web portal (device-code flow)
+sudo hyn unlink           forget the portal credential
+hyn push                  send one reading to the portal
+hyn config pull           fetch settings and channels from the portal
+hyn cloud status          node id, last push, and any error
+
 hyn update [--check] [--yes]
 hyn about                 author, licence, version
 hyn theme list | set <name> | preview <name>
@@ -283,9 +493,10 @@ sudo hyn uninstall        remove units (add --purge to drop config and history)
 ```
 
 Four systemd timers are installed: alert evaluation (every 5 min), metric
-sampling (every 5 min), throughput tests (4×/day), and the daily report. All run
-as one-shots with `ProtectSystem=strict`, an empty capability set and a single
-writable path.
+sampling (every 5 min), throughput tests (4×/day), and the daily report. A fifth,
+the portal push (every 5 min), is installed too but only enabled once the node is
+paired. All run as one-shots with `ProtectSystem=strict`, an empty capability set
+and a single writable path.
 
 `hyn snapshot --json` is the integration point. It emits one object with the
 network counters, latency map, speed test result, and node health, so it can be
@@ -342,6 +553,11 @@ Keys worth knowing:
 | `report_at` | `08:00` | server local time |
 | `auto_update` | `check` | `off`, `check` or `install` |
 | `onboarding` | `on` | offer guided setup on first interactive launch |
+| `cloud_enabled` | `off` | set by `hyn link`; gates the portal push timer |
+| `cloud_url` | *(empty)* | Supabase project URL |
+| `cloud_anon_key` | *(empty)* | public anon key — see the credentials table above |
+| `cloud_portal_url` | *(empty)* | only used to print a complete `/link` URL |
+| `cloud_push_min` | `5` | minutes between portal pushes |
 | `hide_mount` | `/snap,/var/lib/docker,…` | mount points kept out of the disk panel and alerts |
 
 Themes: `hiway` (default), `nord`, `gruvbox`, `dracula`, `solar`, `mono`. Drop a
@@ -366,7 +582,9 @@ Without a UTF-8 locale it falls back to ASCII glyphs automatically.
 ## Development
 
 ```
-bash test/selfcheck.sh
+bash test/selfcheck.sh          # collectors, rendering, alerts, reports
+bash test/cloud-integration.sh  # pairing and push against a mock endpoint
+bash supabase/run-tests.sh      # schema and RPCs on a throwaway postgres
 ```
 
 The self-check builds a synthetic `/proc` and `/sys` with hand-computed counters
@@ -376,6 +594,48 @@ that a comm containing `)` doesn't shift every field after it, that a counter
 going backwards reports zero instead of a fabricated spike, and that no rendered
 row exceeds the terminal width at 140, 80, or 40 columns. It needs no framework
 and no network.
+
+The cloud checks need `python3` (mock HTTP endpoint) and `postgresql` (a
+temporary cluster, created and destroyed by the script). Neither touches a real
+Supabase project or the network.
+
+## Legal and scope
+
+**Independent tool, no affiliation.** hyn-view is an independent system monitor.
+It is **not affiliated with, endorsed by, sponsored by or partnered with**
+Highway P2P (`highwayp2p.com`), Hiway Network, or any other node, relay,
+bandwidth-sharing or infrastructure platform. Where such software is named, it is
+named only to describe what this tool can *observe* — trademarks belong to their
+owners and no endorsement is implied.
+
+**It observes; it does not participate.** Its purpose is measuring computer
+resource usage — processor, memory, storage, temperature, throughput, latency.
+It contains **no** wallet, keys, addresses or transactions; does **no** mining,
+staking or validating; issues no token; relays no traffic; and makes no
+representation that any activity earns anything. It is not a cryptocurrency,
+investment or financial product, and nothing here is financial advice.
+
+**Not independently verified.** Written to one client's requirements, not audited
+or certified by anyone. No warranty — see `LICENSE`. Readings come from sensors
+and counters that are themselves often wrong, and a value that cannot be read is
+reported as unavailable rather than as zero. Don't make it the only safeguard for
+anything expensive.
+
+**It cannot tell you a machine is down.** If the box stops, so does the agent, so
+it reports nothing. Silence never means healthy — see "Detecting a dead server".
+
+**Your responsibility.** Only monitor machines you own or are authorised to
+monitor. Telemetry can identify people (account names of process owners, source
+addresses of logged-in sessions), so if you send it anywhere, make sure you have a
+basis to and that those people are told.
+
+Full documents: [`DISCLAIMER.md`](DISCLAIMER.md) ·
+[`PRIVACY.md`](PRIVACY.md) · [`TERMS.md`](TERMS.md) · [`LICENSE`](LICENSE).
+The portal serves the same at `/legal`, `/privacy` and `/terms`.
+
+> The legal documents contain `[BRACKETED]` placeholders and were drafted to
+> describe this software accurately, not as legal advice. Fill them in and have a
+> lawyer review them before relying on them.
 
 ## Author
 

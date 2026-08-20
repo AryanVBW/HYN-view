@@ -21,6 +21,10 @@
 # one of them would corrupt the request at best.
 
 NOTIFY_LAST_ERR=''
+# The HTTP status and response body of the last API call, kept so a failure can
+# report what the provider actually said rather than just that it said no.
+NOTIFY_LAST_CODE=0
+NOTIFY_LAST_BODY=''
 
 # ---------------------------------------------------------------------------
 # secrets
@@ -170,6 +174,51 @@ budget_consume() {
 # Each returns 0 on success and sets NOTIFY_LAST_ERR on failure. Arguments are
 # always: <subject> <text-body> <html-body> <severity>
 
+# Split curl's combined output into body + status. Globals, so no subshell.
+_http_split() {
+  local out=$1 code
+  # -w appends the status on its own final line, so the last line is the code and
+  # everything before it is the body.
+  code=${out##*$'\n'}
+  if [[ $code =~ ^[0-9]{3}$ ]]; then
+    NOTIFY_LAST_CODE=$code
+    NOTIFY_LAST_BODY=${out%$'\n'*}
+  else
+    # No status line at all: curl failed before it got a response (DNS, TLS,
+    # timeout), so the whole thing is an error message.
+    NOTIFY_LAST_CODE=0
+    NOTIFY_LAST_BODY=$out
+  fi
+  return 0
+}
+
+# Pull the human sentence out of a JSON error body without jq. Deliberately
+# crude -- we want the message, not a parse tree.
+API_MSG=''
+_api_message_v() {
+  local b=$1 k m=''
+  for k in message error_description error detail Message; do
+    [[ $b == *"\"$k\""* ]] || continue
+    m=${b#*\"$k\"}
+    m=${m#*:}
+    while [[ $m == [[:space:]]* ]]; do m=${m#?}; done
+    if [[ $m == \"* ]]; then
+      m=${m#\"}
+      m=${m%%\"*}
+    else
+      m=${m%%,*}
+      m=${m%%\}*}
+    fi
+    [[ -n $m ]] && break
+  done
+  [[ -z $m ]] && m=${b:0:240}
+  # Unescape the few sequences that actually show up in these messages.
+  m=${m//\\n/ }
+  m=${m//\\\"/\"}
+  API_MSG=$m
+  return 0
+}
+
 _curl_json() {
   # _curl_json <url> <auth-config-line> <json-body> [extra-header...]
   local url=$1 authline=$2 body=$3
@@ -178,17 +227,30 @@ _curl_json() {
   tmp=$(mktemp "${TMPDIR:-/tmp}/hyn-notify.XXXXXX") || { NOTIFY_LAST_ERR='mktemp failed'; return 1; }
   chmod 600 "$tmp" 2>/dev/null
   printf '%s' "$body" >"$tmp"
-  # Auth goes via --config on stdin so the key never appears in argv.
+  # Deliberately NOT -f/--fail. --fail makes curl throw the response body away on
+  # any 4xx, and the body is the only place these APIs explain themselves. With
+  # -f a Resend rejection reads as a bare "403", which sends you off auditing a
+  # perfectly good API key while the server is already telling you the real
+  # reason ("the domain is not verified"). -w gives us the status instead.
+  #
+  # Auth still goes via --config on stdin so the key never appears in argv.
   out=$(printf '%s\n' "$authline" |
-    curl -fsS --max-time "${CFG[notify_timeout]:-15}" --config - \
+    curl -sS --max-time "${CFG[notify_timeout]:-15}" --config - \
       -X POST "$url" \
       -H 'Content-Type: application/json' \
       "$@" \
+      -w $'\n%{http_code}' \
       --data-binary "@$tmp" 2>&1)
   rc=$?
   rm -f "$tmp"
+  _http_split "$out"
   if ((rc != 0)); then
-    NOTIFY_LAST_ERR=$(redact "curl exit $rc: ${out:0:300}")
+    NOTIFY_LAST_ERR=$(redact "curl exit $rc: ${NOTIFY_LAST_BODY:0:300}")
+    return 1
+  fi
+  if ((NOTIFY_LAST_CODE < 200 || NOTIFY_LAST_CODE >= 300)); then
+    _api_message_v "$NOTIFY_LAST_BODY"
+    NOTIFY_LAST_ERR=$(redact "HTTP $NOTIFY_LAST_CODE: $API_MSG")
     return 1
   fi
   return 0
@@ -217,7 +279,57 @@ ch_resend() {
   local body
   printf -v body '{"from":"%s","to":[%s],"subject":"%s","text":"%s","html":"%s"}' \
     "$f" "$rcpt" "$s" "$t" "$h"
-  _curl_json 'https://api.resend.com/emails' "header = \"Authorization: Bearer $key\"" "$body"
+  _curl_json 'https://api.resend.com/emails' "header = \"Authorization: Bearer $key\"" "$body" && return 0
+  _resend_explain "$from"
+  return 1
+}
+
+# Resend's 403 is the single most confusing failure in this whole tool: the key is
+# valid, the request is well formed, and it still refuses -- because a free
+# account with no verified domain may only send FROM onboarding@resend.dev and
+# only TO the address the account was registered with. Restate that as an
+# instruction, since "403" on its own tells the operator nothing.
+_resend_explain() {
+  local from=$1 dom=${1#*@} b=${NOTIFY_LAST_BODY,,}
+  case $NOTIFY_LAST_CODE in
+    403)
+      if [[ $b == *domain*not*verified* || $b == *"not verified"* ]]; then
+        NOTIFY_LAST_ERR+="
+  Resend will not send from @$dom until that domain is verified.
+  Quickest fix -- use Resend's shared sender:
+      sudo hyn config set notify_from onboarding@resend.dev
+  Or verify the domain (needed to mail anyone else): https://resend.com/domains"
+      elif [[ $b == *"own email"* || $b == *testing* ]]; then
+        NOTIFY_LAST_ERR+="
+  An unverified Resend account may only send to the address you signed up with.
+  Either set notify_to to that exact address:
+      sudo hyn config set notify_to <your-resend-account-email>
+  or verify a domain to mail anyone: https://resend.com/domains"
+      else
+        NOTIFY_LAST_ERR+="
+  A Resend 403 with a valid key is almost always the sender or recipient, not the
+  key. Current sender: $from. Free accounts must use onboarding@resend.dev and
+  may only mail their own account address until a domain is verified."
+      fi
+      ;;
+    401)
+      NOTIFY_LAST_ERR+="
+  Resend rejected the key itself. Check it starts with 're_', was copied whole,
+  and has Sending permission -- Resend keys can be scoped to one domain.
+  Re-enter it with: sudo hyn wizard"
+      ;;
+    422)
+      NOTIFY_LAST_ERR+="
+  Resend could not parse the request. Check notify_from is a plain address:
+      sudo hyn config get notify_from"
+      ;;
+    429)
+      NOTIFY_LAST_ERR+="
+  Resend rate limit: 2 requests/second, 100 emails/day, 3000/month on free.
+  hyn's own cap: sudo hyn config set notify_max_per_day <n>"
+      ;;
+  esac
+  return 0
 }
 
 ch_brevo() {
@@ -311,13 +423,22 @@ ch_telegram() {
   valid_token "$token" || { NOTIFY_LAST_ERR='telegram_token contains unexpected characters'; return 1; }
   # Telegram's URL carries the token, so the URL itself is a secret: it goes
   # through --config, not argv.
+  # Same reason as _curl_json: no -f, or Telegram's "chat not found" / "bot was
+  # blocked by the user" explanation is discarded and all you see is 400.
   out=$(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$token" |
-    curl -fsS --max-time "${CFG[notify_timeout]:-15}" --config - \
+    curl -sS --max-time "${CFG[notify_timeout]:-15}" --config - \
       -d "chat_id=$chat" \
       -d disable_web_page_preview=true \
+      -w $'\n%{http_code}' \
       --data-urlencode "text=$subject"$'\n\n'"$text" 2>&1)
   rc=$?
-  ((rc == 0)) || { NOTIFY_LAST_ERR=$(redact "telegram curl exit $rc: ${out:0:200}"); return 1; }
+  _http_split "$out"
+  ((rc == 0)) || { NOTIFY_LAST_ERR=$(redact "telegram curl exit $rc: ${NOTIFY_LAST_BODY:0:200}"); return 1; }
+  if ((NOTIFY_LAST_CODE < 200 || NOTIFY_LAST_CODE >= 300)); then
+    _api_message_v "$NOTIFY_LAST_BODY"
+    NOTIFY_LAST_ERR=$(redact "telegram HTTP $NOTIFY_LAST_CODE: $API_MSG")
+    return 1
+  fi
   return 0
 }
 
@@ -337,11 +458,18 @@ ch_ntfy() {
     ok) prio=default; tags='white_check_mark' ;;
     *) prio=low; tags='bar_chart' ;;
   esac
-  out=$(curl -fsS --max-time "${CFG[notify_timeout]:-15}" \
+  out=$(curl -sS --max-time "${CFG[notify_timeout]:-15}" \
     -H "Title: $subject" -H "Priority: $prio" -H "Tags: $tags" \
+    -w $'\n%{http_code}' \
     --data-binary "$text" "$server/$topic" 2>&1)
   rc=$?
-  ((rc == 0)) || { NOTIFY_LAST_ERR="ntfy curl exit $rc: ${out:0:200}"; return 1; }
+  _http_split "$out"
+  ((rc == 0)) || { NOTIFY_LAST_ERR="ntfy curl exit $rc: ${NOTIFY_LAST_BODY:0:200}"; return 1; }
+  if ((NOTIFY_LAST_CODE < 200 || NOTIFY_LAST_CODE >= 300)); then
+    _api_message_v "$NOTIFY_LAST_BODY"
+    NOTIFY_LAST_ERR="ntfy HTTP $NOTIFY_LAST_CODE: $API_MSG"
+    return 1
+  fi
   return 0
 }
 
@@ -373,6 +501,28 @@ ch_stdout() {
 # notify_send <severity: crit|warn|info|ok> <subject> <text> [html]
 # Fans out to every configured channel. One channel failing must not stop the
 # others -- if email is down, the push notification is exactly what you want.
+
+# What kind of message this is, for the portal's delivery log. Callers override
+# it around a send; 'alert' is the common case so it is the default.
+NOTIFY_CATEGORY=alert
+
+# Where a channel delivers to, for the log. Never the credential -- only the
+# destination, and the webhook URL is reduced to its host because the path of a
+# Slack or Discord webhook IS the secret.
+_notify_target() {
+  local ch=$1 u
+  case $ch in
+    resend | brevo | smtp) printf '%s' "${CFG[notify_to]:-}" ;;
+    ntfy) printf '%s/%s' "${CFG[ntfy_server]:-}" "${CFG[ntfy_topic]:-}" ;;
+    telegram) printf 'chat %s' "${CFG[telegram_chat_id]:-}" ;;
+    webhook)
+      u=${CFG[webhook_url]:-}
+      u=${u#*://}
+      printf '%s' "${u%%/*}" ;;
+    *) printf '%s' "$ch" ;;
+  esac
+}
+
 notify_send() {
   local sev=$1 subject=$2 text=$3 html=${4:-}
   local chans ch ok=0 tried=0
@@ -394,17 +544,28 @@ notify_send() {
     IFS=$oIFS
     ((tried++))
     NOTIFY_LAST_ERR=''
+    local chok=0
     case $ch in
-      resend) ch_resend "$subject" "$text" "$html" "$sev" && ok=1 ;;
-      brevo) ch_brevo "$subject" "$text" "$html" "$sev" && ok=1 ;;
-      smtp) ch_smtp "$subject" "$text" "$html" "$sev" && ok=1 ;;
-      telegram) ch_telegram "$subject" "$text" "$html" "$sev" && ok=1 ;;
-      ntfy) ch_ntfy "$subject" "$text" "$html" "$sev" && ok=1 ;;
-      webhook) ch_webhook "$subject" "$text" "$html" "$sev" && ok=1 ;;
-      stdout) ch_stdout "$subject" "$text" "$html" "$sev" && ok=1 ;;
+      resend) ch_resend "$subject" "$text" "$html" "$sev" && chok=1 ;;
+      brevo) ch_brevo "$subject" "$text" "$html" "$sev" && chok=1 ;;
+      smtp) ch_smtp "$subject" "$text" "$html" "$sev" && chok=1 ;;
+      telegram) ch_telegram "$subject" "$text" "$html" "$sev" && chok=1 ;;
+      ntfy) ch_ntfy "$subject" "$text" "$html" "$sev" && chok=1 ;;
+      webhook) ch_webhook "$subject" "$text" "$html" "$sev" && chok=1 ;;
+      stdout) ch_stdout "$subject" "$text" "$html" "$sev" && chok=1 ;;
       *) NOTIFY_LAST_ERR="unknown channel: $ch" ;;
     esac
+    ((chok)) && ok=1
     [[ -n $NOTIFY_LAST_ERR ]] && warn "notify[$ch]: $NOTIFY_LAST_ERR"
+    # Queue the outcome for the portal, so the dashboard can report how many
+    # notifications went out and why any failed. Guarded because notify.sh is
+    # usable without the cloud layer loaded, and a reporting problem must never
+    # stop an alert from being sent.
+    if declare -F cloud_notify_record >/dev/null 2>&1; then
+      cloud_notify_record "$ch" "$(_notify_target "$ch")" "$sev" "$subject" \
+        "$( ((chok)) && printf 'sent' || printf 'failed')" \
+        "$NOTIFY_LAST_ERR" "${NOTIFY_CATEGORY:-alert}" || true
+    fi
     IFS=,
   done
   IFS=$oIFS

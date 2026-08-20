@@ -56,6 +56,7 @@ collect_init() {
   CPU_MODEL=${CPU_MODEL# }
   CPU_MODEL=${CPU_MODEL% }
   thermal_discover
+  cpufreq_discover
   return 0
 }
 
@@ -192,6 +193,147 @@ thermal_read() {
   readval v "$THERMAL_PATH" || return 1
   [[ $v =~ ^-?[0-9]+$ ]] || return 1
   CPU_TEMP=$((v / 1000))
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# clock speed
+# ---------------------------------------------------------------------------
+# Current core frequency in MHz, or empty when the platform will not say.
+#
+# cpufreq is preferred over /proc/cpuinfo: on many server parts cpuinfo's
+# "cpu MHz" reports the nominal base clock and never moves, which would draw a
+# perfectly flat line and imply the governor is doing nothing. scaling_cur_freq
+# is the actual current frequency, in kHz.
+#
+# A VM usually exposes neither, so an empty result is a normal outcome and must
+# serialise as null rather than 0 -- graphing 0 MHz would be inventing a reading.
+CPU_MHZ=''
+CPUFREQ_PATH=''
+cpufreq_discover() {
+  local c
+  for c in "$HYN_SYS/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq" \
+           "$HYN_SYS/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq"; do
+    [[ -r $c ]] && { CPUFREQ_PATH=$c; return 0; }
+  done
+  return 1
+}
+
+cpu_freq_read() {
+  CPU_MHZ=''
+  local v
+  if [[ -n $CPUFREQ_PATH ]] && readval v "$CPUFREQ_PATH"; then
+    [[ $v =~ ^[0-9]+$ ]] || return 1
+    CPU_MHZ=$((v / 1000))
+    return 0
+  fi
+  # Fall back to the first "cpu MHz" line. Decimal, so parse then drop the
+  # fraction -- a tenth of a MHz is not a number anyone acts on.
+  [[ -r $HYN_PROC/cpuinfo ]] || return 1
+  local line
+  while IFS= read -r line; do
+    case $line in
+      'cpu MHz'*)
+        v=${line#*: }
+        parse_fixed3_v "$v"
+        CPU_MHZ=$((FIX3 / 1000))
+        return 0 ;;
+    esac
+  done <"$HYN_PROC/cpuinfo"
+  return 1
+}
+
+# Per-core frequency, the governor, and the range the hardware admits. Useful
+# beyond curiosity: a box pinned at its minimum multiplier under load is being
+# thermally or administratively throttled, which looks like "the server is slow"
+# and is invisible if you only sample one core.
+declare -a CPU_CORE_MHZ=()
+CPU_MHZ_MIN='' CPU_MHZ_MAX='' CPU_GOVERNOR='' CPU_MHZ_AVG=''
+cpu_freq_all() {
+  CPU_CORE_MHZ=() CPU_MHZ_MIN='' CPU_MHZ_MAX='' CPU_GOVERNOR='' CPU_MHZ_AVG=''
+  local d v sum=0 n=0
+  for d in "$HYN_SYS/devices/system/cpu"/cpu[0-9]*; do
+    [[ -r $d/cpufreq/scaling_cur_freq ]] || continue
+    readval v "$d/cpufreq/scaling_cur_freq" || continue
+    [[ $v =~ ^[0-9]+$ ]] || continue
+    v=$((v / 1000))
+    CPU_CORE_MHZ+=("$v")
+    sum=$((sum + v))
+    n=$((n + 1))
+  done
+  ((n > 0)) && CPU_MHZ_AVG=$((sum / n))
+  local base="$HYN_SYS/devices/system/cpu/cpu0/cpufreq"
+  if readval v "$base/cpuinfo_min_freq"; then
+    [[ $v =~ ^[0-9]+$ ]] && CPU_MHZ_MIN=$((v / 1000))
+  fi
+  if readval v "$base/cpuinfo_max_freq"; then
+    [[ $v =~ ^[0-9]+$ ]] && CPU_MHZ_MAX=$((v / 1000))
+  fi
+  readval CPU_GOVERNOR "$base/scaling_governor" || CPU_GOVERNOR=''
+  ((n > 0))
+}
+
+# ---------------------------------------------------------------------------
+# every temperature sensor
+# ---------------------------------------------------------------------------
+# thermal_read picks the one sensor worth putting in the CPU panel. This reads
+# them all, because on real hardware the interesting reading is often not the
+# package: an NVMe at 70C or an ambient sensor climbing is what explains a fan
+# that will not stop, and neither shows up as "CPU temperature".
+#
+# Labelled by whatever the platform calls them, deduplicated, and skipped
+# entirely when a value is outside plausible physical range -- a sensor reading
+# -274C or 3000C is a driver bug, not a measurement.
+declare -A SENSORS=()
+sensors_read() {
+  SENSORS=()
+  local d f label chip v key
+  for d in "$HYN_SYS/class/hwmon"/hwmon*; do
+    [[ -d $d ]] || continue
+    readval chip "$d/name" || chip=${d##*/}
+    for f in "$d"/temp*_input; do
+      [[ -r $f ]] || continue
+      readval v "$f" || continue
+      [[ $v =~ ^-?[0-9]+$ ]] || continue
+      v=$((v / 1000))
+      ((v < -50 || v > 200)) && continue
+      label=''
+      readval label "${f%_input}_label" 2>/dev/null || label=''
+      if [[ -z $label ]]; then
+        key=${f##*/}
+        label="$chip ${key%_input}"
+      else
+        label="$chip $label"
+      fi
+      SENSORS[$label]=$v
+    done
+  done
+  # thermal_zone covers SoCs and VMs that expose no hwmon at all.
+  for d in "$HYN_SYS/class/thermal"/thermal_zone*; do
+    [[ -r $d/temp ]] || continue
+    readval v "$d/temp" || continue
+    [[ $v =~ ^-?[0-9]+$ ]] || continue
+    v=$((v / 1000))
+    ((v < -50 || v > 200)) && continue
+    readval label "$d/type" || label=${d##*/}
+    [[ -v SENSORS[$label] ]] || SENSORS[$label]=$v
+  done
+  ((${#SENSORS[@]} > 0))
+}
+
+# Total process count. /proc/loadavg's fourth field is running/total, which is
+# one small read -- counting /proc/<pid> directories would be hundreds of stats.
+PROC_TOTAL=''
+proc_count_read() {
+  PROC_TOTAL=''
+  [[ -r $HYN_PROC/loadavg ]] || return 1
+  local -a f=()
+  # shellcheck disable=SC2207
+  f=($(<"$HYN_PROC/loadavg")) 2>/dev/null || return 1
+  local pair=${f[3]:-}
+  [[ $pair == */* ]] || return 1
+  PROC_TOTAL=${pair#*/}
+  [[ $PROC_TOTAL =~ ^[0-9]+$ ]] || { PROC_TOTAL=''; return 1; }
   return 0
 }
 

@@ -10,7 +10,7 @@
 # HYN_PROC / HYN_SYS exist so test/selfcheck.sh can point the readers at a
 # fixture tree and assert on known numbers. Never hardcode /proc below.
 
-HYN_VERSION="1.4.0"
+HYN_VERSION="1.5.0"
 HYN_AUTHOR='Vivek W (AryanVBW)'
 HYN_AUTHOR_URL='https://github.com/AryanVBW'
 HYN_COPYRIGHT="(c) 2026 Vivek W (AryanVBW)"
@@ -69,7 +69,11 @@ declare -A CFG=(
   [latency_interval]=10
   [latency_gateway]=on
   [dns_probe]=on
-  [dns_probe_host]=install.hiwaynetwork.io
+  # A neutral, reliably-resolving domain, deliberately not a hostname belonging
+  # to any node platform: this probe measures DNS resolution latency and the name
+  # queried is irrelevant to the measurement. Making a third party's host the
+  # default would send a lookup to them from every install for no benefit.
+  [dns_probe_host]=cloudflare.com
   [public_ip]=on
   [tcp_states]=on
   [tcp_states_interval]=5
@@ -140,6 +144,22 @@ declare -A CFG=(
   [record_interval_min]=5
   [metrics_keep_days]=8
 
+  # --- web portal / cloud sync ----------------------------------------------
+  # Set by `sudo hyn link`. cloud_url and cloud_anon_key are the Supabase
+  # project URL and its PUBLIC anon key -- the same key that ships in every
+  # browser bundle talking to that project, which is why it lives here in the
+  # world-readable config rather than in secrets. The node token, which is the
+  # actual credential, goes to /etc/hyn-view/secrets at 0600.
+  [cloud_enabled]=off
+  [cloud_url]=''
+  [cloud_anon_key]=''
+  # Where the human opens the pairing page. Only used to print a complete URL
+  # during `hyn link`; the agent never contacts it.
+  [cloud_portal_url]=''
+  [cloud_node_id]=''
+  [cloud_push_min]=5
+  [cloud_timeout]=20
+
   # --- self update -----------------------------------------------------------
   # off     never look
   # check   (default) look on launch, tell you, change nothing
@@ -188,7 +208,16 @@ _read_kv() {
 cfg_load() {
   local f tmp
   declare -A tmp=()
-  for f in "$HYN_ETC/config" "${XDG_CONFIG_HOME:-$HOME/.config}/hyn-view/config" "${HYN_CONFIG:-}"; do
+  # Order matters: later files win. The portal's pulled settings come FIRST so a
+  # deliberate local line still overrides central management -- an operator who
+  # edited a box at 3am with no network must not be silently reverted, and a
+  # cache that outranked explicit config would be undebuggable.
+  local cloud_cache=''
+  if [[ -n ${HYN_VAR:-} ]]; then
+    state_dir_v
+    cloud_cache="$STATE_DIR/cloud-config"
+  fi
+  for f in "$cloud_cache" "$HYN_ETC/config" "${XDG_CONFIG_HOME:-$HOME/.config}/hyn-view/config" "${HYN_CONFIG:-}"; do
     [[ -n $f && -r $f ]] || continue
     _read_kv "$f" tmp
   done

@@ -912,7 +912,7 @@ report_run() {
   local v
   v=$(_verdict)
   subject="[hyn] $HOSTNAME_S daily report — ${v%% —*}"
-  if notify_send info "$subject" "$(report_text "$hours")" "$(report_html "$hours")"; then
+  if NOTIFY_CATEGORY=report notify_send info "$subject" "$(report_text "$hours")" "$(report_html "$hours")"; then
     printf 'hyn: daily report sent to %s\n' "${CFG[notify_to]}"
     return 0
   fi

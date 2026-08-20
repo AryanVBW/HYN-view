@@ -206,7 +206,7 @@ HYN_ROOT="$ROOT"
 export HYN_LIB HYN_ROOT
 export TERM=xterm-256color COLORTERM=truecolor
 
-for m in core ui net collect highway speedtest notify alerts report update panels; do
+for m in core ui net collect highway speedtest notify alerts report update panels cloud; do
   # shellcheck source=/dev/null
   source "$HYN_LIB/$m.sh" || { printf 'cannot source %s\n' "$m" >&2; exit 1; }
 done
@@ -1448,6 +1448,195 @@ truthy 'accepts an https url'    '_v_url https://example.com/ping'
 falsy  'rejects a non-url'       '_v_url notaurl'
 truthy 'accepts a hostname'      '_v_host smtp.gmail.com'
 falsy  'rejects a host with a space' '_v_host "bad host"'
+
+# ---------------------------------------------------------------------------
+# cloud: JSON field reader
+# ---------------------------------------------------------------------------
+# The pairing flow reads the backend's reply with a hand-rolled extractor
+# (no jq in a zero-dependency tool), so the parsing rules are worth pinning:
+# a token must survive intact, and a key appearing as a substring of another
+# key must not be confused for it.
+section 'cloud: json field reader'
+
+CJ='{"status":"approved","node_id":"3f7a-11","node_token":"abc123def456","interval":5,"node_name":"web-01"}'
+json_field_v "$CJ" status;     eq 'reads a string field'    'approved'     "$JSON_FIELD"
+json_field_v "$CJ" node_token; eq 'reads a token verbatim'  'abc123def456' "$JSON_FIELD"
+json_field_v "$CJ" interval;   eq 'reads a bare number'     '5'            "$JSON_FIELD"
+json_field_v "$CJ" node_name;  eq 'reads the last field'    'web-01'       "$JSON_FIELD"
+falsy 'reports a missing key' 'json_field_v "$CJ" nope'
+
+# An escaped quote inside a value must not terminate it early.
+json_field_v '{"message":"say \"hi\" now","status":"ok"}' message
+eq 'survives an escaped quote' 'say "hi" now' "$JSON_FIELD"
+json_field_v '{"message":"say \"hi\" now","status":"ok"}' status
+eq 'finds the field after an escaped quote' 'ok' "$JSON_FIELD"
+
+# ---------------------------------------------------------------------------
+# cloud: ingest payload
+# ---------------------------------------------------------------------------
+# The payload is what the database parses, so malformed JSON here means silent
+# data loss. Two properties matter beyond "it looks right": an unreadable sensor
+# must serialise as null rather than a fabricated 0, and a hostname containing a
+# quote must not be able to break out of its string.
+section 'cloud: ingest payload'
+
+cloud_payload_v
+contains 'payload carries a timestamp'   '"ts":'          "$CLOUD_PAYLOAD"
+contains 'payload carries the agent version' "\"agent_version\": \"$HYN_VERSION\"" "$CLOUD_PAYLOAD"
+contains 'payload carries cpu percent'   '"cpu": {"pct":' "$CLOUD_PAYLOAD"
+contains 'payload carries an alerts array' '"alerts": ['   "$CLOUD_PAYLOAD"
+
+# A missing thermal sensor is null, never 0: plotting 0C as a real reading would
+# be inventing data.
+CPU_TEMP=''
+cloud_payload_v
+contains 'absent temperature is null' '"temp_c": null' "$CLOUD_PAYLOAD"
+CPU_TEMP=54
+cloud_payload_v
+contains 'present temperature is a number' '"temp_c": 54' "$CLOUD_PAYLOAD"
+
+# A non-numeric value where the schema wants a number must not be passed through.
+CPU_TEMP='n/a'
+cloud_payload_v
+contains 'junk temperature is null' '"temp_c": null' "$CLOUD_PAYLOAD"
+CPU_TEMP=54
+
+# CPU clock speed comes from cpufreq in kHz. A VM often exposes no cpufreq at
+# all, and that must read as null rather than 0 MHz.
+section 'cloud: cpu clock speed'
+mkdir -p "$FS/devices/system/cpu/cpu0/cpufreq"
+printf '3400000\n' >"$FS/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"
+CPUFREQ_PATH=''
+truthy 'discovers cpufreq'        'cpufreq_discover'
+truthy 'reads the current clock'  'cpu_freq_read'
+eq     'converts kHz to MHz'      '3400' "$CPU_MHZ"
+cloud_payload_v
+contains 'payload carries clock speed' '"mhz": 3400' "$CLOUD_PAYLOAD"
+
+# No cpufreq and no cpuinfo line: null, not a fabricated zero.
+CPUFREQ_PATH="$FS/devices/system/cpu/cpu0/cpufreq/does-not-exist"
+_saved_proc=$HYN_PROC
+HYN_PROC="$TMP/empty-proc"
+mkdir -p "$HYN_PROC"
+falsy 'reports an unreadable clock' 'cpu_freq_read'
+eq    'absent clock is empty'       '' "$CPU_MHZ"
+cloud_payload_v
+contains 'absent clock is null in the payload' '"mhz": null' "$CLOUD_PAYLOAD"
+HYN_PROC=$_saved_proc
+
+# cpuinfo fallback, for platforms with no cpufreq sysfs.
+printf 'processor\t: 0\ncpu MHz\t\t: 2799.998\nmodel name\t: Fake CPU\n' >"$FP/cpuinfo"
+truthy 'falls back to cpuinfo' 'cpu_freq_read'
+eq     'truncates the fraction' '2799' "$CPU_MHZ"
+CPUFREQ_PATH="$FS/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"
+cpu_freq_read
+
+# ---------------------------------------------------------------------------
+# maximum-detail collectors
+# ---------------------------------------------------------------------------
+# Per-core clocks, the governor and the range the hardware admits. A box pinned
+# at its minimum multiplier under load is throttled, which reads as "the server
+# is slow" and is invisible if you only ever sample cpu0.
+section 'detail: per-core clock and governor'
+
+mkdir -p "$FS/devices/system/cpu/cpu1/cpufreq"
+printf '3400000\n' >"$FS/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"
+printf '2800000\n' >"$FS/devices/system/cpu/cpu1/cpufreq/scaling_cur_freq"
+printf '800000\n'  >"$FS/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq"
+printf '3900000\n' >"$FS/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq"
+printf 'performance\n' >"$FS/devices/system/cpu/cpu0/cpufreq/scaling_governor"
+
+truthy 'reads every core'         'cpu_freq_all'
+eq     'finds both cores'         '2'    "${#CPU_CORE_MHZ[@]}"
+eq     'core 0 clock'             '3400' "${CPU_CORE_MHZ[0]}"
+eq     'core 1 clock'             '2800' "${CPU_CORE_MHZ[1]}"
+eq     'averages the cores'       '3100' "$CPU_MHZ_AVG"
+eq     'reads the hardware floor' '800'  "$CPU_MHZ_MIN"
+eq     'reads the hardware ceil'  '3900' "$CPU_MHZ_MAX"
+eq     'reads the governor'       'performance' "$CPU_GOVERNOR"
+
+# Every temperature the platform exposes, not just the CPU package: an NVMe at
+# 70C is what explains a fan that will not stop, and it is not "CPU temp".
+section 'detail: all temperature sensors'
+
+mkdir -p "$FS/class/hwmon/hwmon9" "$FS/class/thermal/thermal_zone3"
+printf 'nvme\n'   >"$FS/class/hwmon/hwmon9/name"
+printf '48000\n'  >"$FS/class/hwmon/hwmon9/temp1_input"
+printf 'Composite\n' >"$FS/class/hwmon/hwmon9/temp1_label"
+printf '71000\n'  >"$FS/class/hwmon/hwmon9/temp2_input"
+printf 'acpitz\n' >"$FS/class/thermal/thermal_zone3/type"
+printf '39000\n'  >"$FS/class/thermal/thermal_zone3/temp"
+
+truthy 'finds sensors'                 'sensors_read'
+eq     'labelled sensor in celsius'    '48' "${SENSORS[nvme Composite]:-}"
+eq     'unlabelled sensor gets a name' '71' "${SENSORS[nvme temp2]:-}"
+eq     'thermal zone by type'          '39' "${SENSORS[acpitz]:-}"
+
+# A driver reporting -274C or 3000C is a bug, not a measurement, and plotting it
+# would wreck the axis on every other sensor.
+printf '3000000\n' >"$FS/class/hwmon/hwmon9/temp3_input"
+# Written via %s: printf would read a leading dash as an option flag.
+printf '%s\n' '-274000' >"$FS/class/hwmon/hwmon9/temp4_input"
+sensors_read
+falsy 'rejects an impossibly hot reading'  '[[ -v SENSORS["nvme temp3"] ]]'
+falsy 'rejects a below-absolute-zero reading' '[[ -v SENSORS["nvme temp4"] ]]'
+rm -f "$FS/class/hwmon/hwmon9/temp3_input" "$FS/class/hwmon/hwmon9/temp4_input"
+sensors_read
+
+# Process total comes from /proc/loadavg's fourth field, which is one small read
+# rather than a stat per process.
+section 'detail: process count'
+truthy 'reads the process total' 'proc_count_read'
+truthy 'process total is a number' '[[ $PROC_TOTAL =~ ^[0-9]+$ ]]'
+
+# The enriched payload must carry all of it, and still be valid JSON.
+section 'detail: payload carries the extra detail'
+cloud_payload_v
+contains 'payload has per-core clocks'  '"cores_mhz": [3400, 2800]' "$CLOUD_PAYLOAD"
+contains 'payload has the governor'     '"governor": "performance"' "$CLOUD_PAYLOAD"
+contains 'payload has the clock range'  '"mhz_max": 3900' "$CLOUD_PAYLOAD"
+contains 'payload has a sensors object' '"sensors": {' "$CLOUD_PAYLOAD"
+contains 'payload names a sensor'       'nvme Composite' "$CLOUD_PAYLOAD"
+contains 'payload has a psi block'      '"psi": {' "$CLOUD_PAYLOAD"
+contains 'payload has a processes block' '"processes": {' "$CLOUD_PAYLOAD"
+contains 'payload has link detail'      '"link_mbps"' "$CLOUD_PAYLOAD"
+if have python3; then
+  truthy 'enriched payload is valid JSON' 'printf "%s" "$CLOUD_PAYLOAD" | python3 -c "
+import json,sys
+p = json.load(sys.stdin)
+assert p[\"cpu\"][\"cores_mhz\"] == [3400, 2800], p[\"cpu\"][\"cores_mhz\"]
+assert p[\"cpu\"][\"mhz_avg\"] == 3100
+assert p[\"sensors\"][\"nvme Composite\"] == 48
+assert \"count\" in p[\"processes\"]
+assert \"top\" in p[\"processes\"]
+"'
+fi
+
+_saved_host=$HOSTNAME_S
+HOSTNAME_S='ev"il'$'\n'
+cloud_payload_v
+contains 'hostname quote is escaped' 'ev\"il' "$CLOUD_PAYLOAD"
+falsy 'no raw newline survives in the payload' '[[ $CLOUD_PAYLOAD == *$'"'"'\n'"'"'* ]]'
+HOSTNAME_S=$_saved_host
+
+# Structural validity, checked with a real parser when one is present. Balanced
+# braces are necessary but not sufficient, so prefer python and fall back to the
+# brace count only where it is unavailable.
+cloud_payload_v
+if have python3; then
+  truthy 'payload is valid JSON' 'printf "%s" "$CLOUD_PAYLOAD" | python3 -c "import json,sys; json.load(sys.stdin)"'
+else
+  _ob=${CLOUD_PAYLOAD//[^\{]/}
+  _cb=${CLOUD_PAYLOAD//[^\}]/}
+  eq 'payload braces balance' "${#_ob}" "${#_cb}"
+fi
+
+# The node token must travel in the request body, never in argv, because any
+# local user can read another process's command line out of /proc.
+_cloudsrc=$(<"$ROOT/lib/cloud.sh")
+contains 'token is sent via --data-binary' '--data-binary "@$tmp"' "$_cloudsrc"
+falsy 'token never reaches a curl -d argument' '[[ $_cloudsrc == *"-d \"p_node_token"* ]]'
+contains 'anon key goes through curl --config' '--config -' "$_cloudsrc"
 
 # ---------------------------------------------------------------------------
 printf '\n'

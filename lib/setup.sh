@@ -338,6 +338,15 @@ setup_timers() {
     "$(_generic_timer 'hyn-view daily report' \
       "OnCalendar=*-*-* ${CFG[report_at]}:00" 'hyn-report.service' 300)"
 
+  # Web portal push. Same cadence as recording by default: the dashboard is only
+  # as fresh as this timer, and a 5 minute lag is what the report timer already
+  # accepts as the resolution worth keeping.
+  _write_unit /etc/systemd/system/hyn-push.service \
+    "$(_generic_service 'hyn-view web portal push' "$exe push")"
+  _write_unit /etc/systemd/system/hyn-push.timer \
+    "$(_generic_timer 'hyn-view web portal push' \
+      "OnBootSec=4min"$'\n'"OnUnitActiveSec=${CFG[cloud_push_min]}min" 'hyn-push.service' 30)"
+
   systemctl daemon-reload
   setup_apply_schedule "$exe"
   return 0
@@ -360,6 +369,10 @@ setup_apply_schedule() {
   _toggle_timer hyn-record.timer 1
   _toggle_timer hyn-alerts.timer "$(cfg_on alert_enabled && [[ -n ${CFG[notify_channels]} ]] && printf 1 || printf 0)"
   _toggle_timer hyn-report.timer "$(cfg_on report_enabled && [[ -n ${CFG[notify_channels]} ]] && printf 1 || printf 0)"
+  # Only if the node is actually paired. An enabled push timer on an unlinked
+  # node would fail every few minutes and fill the journal with noise that looks
+  # like a bug rather than an unfinished setup step.
+  _toggle_timer hyn-push.timer "$(cfg_on cloud_enabled && cloud_linked && printf 1 || printf 0)"
   return 0
 }
 
@@ -391,13 +404,14 @@ setup_uninstall() {
   printf 'hyn: removing system integration\n'
   if have systemctl; then
     local u
-    for u in "$SVC_NAME.timer" hyn-alerts.timer hyn-record.timer hyn-report.timer; do
+    for u in "$SVC_NAME.timer" hyn-alerts.timer hyn-record.timer hyn-report.timer hyn-push.timer; do
       systemctl disable --now "$u" >/dev/null 2>&1 && printf '  %-24s disabled\n' "$u"
     done
     rm -f "$SVC_PATH" "$TMR_PATH" \
       /etc/systemd/system/hyn-alerts.service /etc/systemd/system/hyn-alerts.timer \
       /etc/systemd/system/hyn-record.service /etc/systemd/system/hyn-record.timer \
-      /etc/systemd/system/hyn-report.service /etc/systemd/system/hyn-report.timer
+      /etc/systemd/system/hyn-report.service /etc/systemd/system/hyn-report.timer \
+      /etc/systemd/system/hyn-push.service /etc/systemd/system/hyn-push.timer
     systemctl daemon-reload
     printf '  units removed\n'
   fi

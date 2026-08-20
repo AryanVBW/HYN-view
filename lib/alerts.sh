@@ -150,6 +150,10 @@ alerts_collect() {
   disk_sample 1000
   psi_sample
   thermal_read
+  cpu_freq_read
+  cpu_freq_all
+  sensors_read
+  proc_count_read
   disk_usage 1
   net_conntrack
   net_latency_read

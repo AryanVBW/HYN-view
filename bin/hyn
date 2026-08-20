@@ -32,7 +32,7 @@ HYN_ROOT=$(cd -P "${_self%/*}/.." 2>/dev/null && pwd) || {
 HYN_LIB="$HYN_ROOT/lib"
 export HYN_LIB HYN_ROOT
 
-for _m in core ui net collect highway speedtest notify alerts report update panels; do
+for _m in core ui net collect highway speedtest notify alerts report update panels cloud; do
   # shellcheck source=/dev/null
   source "$HYN_LIB/$_m.sh" || {
     printf 'hyn: failed to load %s\n' "$HYN_LIB/$_m.sh" >&2
@@ -637,7 +637,7 @@ cmd_notify() {
   to        ${CFG[notify_to]:-n/a}
 
 Nothing is wrong; you asked for a test."
-      if notify_send info "[hyn] Test from $HOSTNAME_S" "$body"; then
+      if NOTIFY_CATEGORY=test notify_send info "[hyn] Test from $HOSTNAME_S" "$body"; then
         printf 'hyn: sent via %s\n' "${CFG[notify_channels]}"
       else
         printf 'hyn: failed: %s\n' "${NOTIFY_LAST_ERR:-unknown error}" >&2
@@ -649,6 +649,20 @@ Nothing is wrong; you asked for a test."
       printf 'channels        %s\n' "${CFG[notify_channels]:-(none configured)}"
       printf 'recipients      %s\n' "${CFG[notify_to]:-(none)}"
       printf 'from            %s\n' "${CFG[notify_from]:-(none)}"
+      # The most common cause of a support question about this tool. Say it here,
+      # before the operator spends an evening on a 403 that is not about the key.
+      if [[ ${CFG[notify_channels]} == *resend* ]]; then
+        local _rf=${CFG[notify_from]:-} _rd=${CFG[notify_from]#*@}
+        if [[ -n $_rf && $_rd != 'resend.dev' ]]; then
+          printf '                %sResend will reject this sender with 403 unless @%s is verified%s\n' \
+            "${C[warn]}" "$_rd" "${C[reset]}"
+          printf '                %sverify at https://resend.com/domains, or: hyn config set notify_from onboarding@resend.dev%s\n' \
+            "${C[dim]}" "${C[reset]}"
+        elif [[ $_rf == *resend.dev* ]]; then
+          printf '                %susing Resend'"'"'s shared sender: delivery is limited to your own account address%s\n' \
+            "${C[dim]}" "${C[reset]}"
+        fi
+      fi
       printf 'min severity    %s\n' "${CFG[alert_min_severity]}"
       printf 'check interval  every %s min\n' "${CFG[alert_interval_min]}"
       printf 'repeat          every %s h while still firing\n' "${CFG[alert_repeat_hours]}"
@@ -681,6 +695,7 @@ cmd_config() {
       done
       ;;
     get) [[ -n ${2:-} ]] || die 'usage: hyn config get <key>'; printf '%s\n' "${CFG[$2]:-}" ;;
+    pull) cloud_config_pull 0 ;;
     set)
       [[ -n ${2:-} && $# -ge 3 ]] || die 'usage: hyn config set <key> <value>'
       config_set "$2" "$3"
@@ -693,7 +708,7 @@ cmd_config() {
       [[ -f $f ]] || printf '# hyn-view config -- see `hyn config show` for keys\n' >"$f"
       "${EDITOR:-vi}" "$f"
       ;;
-    *) die 'usage: hyn config [show|get <k>|set <k> <v>|path|edit]' ;;
+    *) die 'usage: hyn config [show|get <k>|set <k> <v>|pull|path|edit]' ;;
   esac
   return 0
 }
@@ -876,6 +891,12 @@ cmd_help() {
     '  notify status | test  delivery configuration, or send a test message' \
     '  record                sample metrics once (what the record timer runs)' \
     '' \
+    '  link                  pair this server with the web portal (root)' \
+    '  unlink                forget the portal credential (root)' \
+    '  push                  send one reading to the portal now' \
+    '  cloud status          portal URL, node id, and when the last push was' \
+    '  config pull           fetch settings and channels from the portal' \
+    '' \
     '  update [--check] [--yes]  check npm for a newer release, or install it' \
     '  about                 author, licence and version detail' \
     '' \
@@ -931,6 +952,19 @@ main() {
       source "$HYN_LIB/wizard.sh" || die 'cannot load the setup wizard'
       onboard_run "$@" ;;
     alerts | alert) cmd_alerts "$@" ;;
+    link | pair) cloud_link "$@" ;;
+    unlink) cloud_unlink "$@" ;;
+    push) cloud_push 0 ;;
+    cloud)
+      case ${1:-status} in
+        status | '') cloud_status ;;
+        push) cloud_push 0 ;;
+        pull | config) cloud_config_pull 0 ;;
+        report | flush) cloud_notify_flush 0 ;;
+        link) shift; cloud_link "$@" ;;
+        unlink) shift; cloud_unlink "$@" ;;
+        *) die "unknown cloud subcommand: $1 (try 'hyn cloud status')" ;;
+      esac ;;
     report) cmd_report "$@" ;;
     record) record_sample ;;
     notify) cmd_notify "$@" ;;
