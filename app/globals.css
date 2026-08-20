@@ -1,0 +1,236 @@
+@import "tailwindcss";
+
+@font-face {
+  font-family: 'Sentient';
+  src: url('/Sentient-Extralight.woff') format('woff');
+  font-weight: 200;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Sentient';
+  src: url('/Sentient-LightItalic.woff') format('woff');
+  font-weight: 300;
+  font-style: italic;
+  font-display: swap;
+}
+
+:root {
+  --background: #000000;
+  --foreground: #ffffff;
+  --primary: #FFC700;
+  /* Foreground for content sitting ON primary. Near-black, because primary is a
+     bright yellow: white on #FFC700 is about 1.6:1 contrast, which fails WCAG AA
+     and made badges, the active profile toggle and selected text unreadable.
+     Black on #FFC700 is roughly 13:1. */
+  --primary-foreground: #0a0a0a;
+  --border: #424242;
+  --card: #0a0a0a;
+  --card-foreground: #ffffff;
+  --popover: #0a0a0a;
+  --popover-foreground: #ffffff;
+  --secondary: #161616;
+  --secondary-foreground: #ffffff;
+  --muted: #161616;
+  --muted-foreground: #8a8a8a;
+  --accent: #1c1c1c;
+  --accent-foreground: #ffffff;
+  --destructive: #ff5c5c;
+  --input: #2a2a2a;
+  --ring: #FFC700;
+  --chart-1: #FFC700;
+  --chart-2: #e8a400;
+  --chart-3: #ffffff;
+  --chart-4: #8a8a8a;
+  --chart-5: #ff5c5c;
+  --radius: 0.5rem;
+}
+
+@utility container {
+  margin-inline: auto;
+  padding-inline: 1rem;
+
+  @media (width >= 768px) {
+    padding-inline: 2rem;
+  }
+
+  @media (width >= 1280px) {
+    padding-inline: 3rem;
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-border: var(--border);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-mono: var(--font-geist-mono);
+  --font-sentient: 'Sentient', sans-serif;
+
+  --shadow-glow: 0 0 8px 2px var(--tw-shadow-color);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+#webgl {
+  top: 0;
+  left: 0;
+  position: fixed;
+  height: 100svh;
+  width: 100%;
+}
+
+#webgl canvas {
+  width: 100%;
+  height: 100%;
+}
+
+.section-pad {
+  padding-block: clamp(4.5rem, 10vw, 9rem);
+}
+
+.section-kicker {
+  font-family: var(--font-mono);
+  color: var(--foreground);
+  opacity: 0.5;
+  font-size: 0.75rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.section-title {
+  margin-top: 1rem;
+  max-width: 38rem;
+  font-family: var(--font-sentient);
+  font-size: clamp(1.8rem, 4vw, 3.4rem);
+  line-height: 1.1;
+}
+
+.terminal-panel {
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.6);
+}
+
+/* Typography for the legal pages. Set once, in one place, because three
+   documents styled independently drift apart. */
+.legal-prose {
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  line-height: 1.85;
+  color: color-mix(in oklab, var(--foreground) 72%, transparent);
+}
+
+.legal-prose h2 {
+  margin-top: 2.75rem;
+  margin-bottom: 0.75rem;
+  font-family: var(--font-sentient), sans-serif;
+  font-size: 1.5rem;
+  line-height: 1.25;
+  color: var(--foreground);
+}
+
+.legal-prose h3 {
+  margin-top: 2rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.8125rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--primary);
+}
+
+.legal-prose p,
+.legal-prose ul,
+.legal-prose ol {
+  margin-bottom: 1rem;
+}
+
+.legal-prose ul,
+.legal-prose ol {
+  padding-left: 1.25rem;
+}
+
+.legal-prose ul { list-style: disc; }
+.legal-prose ol { list-style: decimal; }
+.legal-prose li { margin-bottom: 0.4rem; }
+
+.legal-prose strong {
+  color: var(--foreground);
+  font-weight: 500;
+}
+
+.legal-prose a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.legal-prose code {
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 0.05rem 0.3rem;
+  font-size: 0.85em;
+  color: var(--foreground);
+}
+
+.legal-prose table {
+  width: 100%;
+  margin-bottom: 1.5rem;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+
+.legal-prose th,
+.legal-prose td {
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+  padding: 0.5rem 0.75rem 0.5rem 0;
+  text-align: left;
+  vertical-align: top;
+}
+
+.legal-prose th {
+  color: var(--muted-foreground);
+  font-weight: 400;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+}
+
+::selection {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}

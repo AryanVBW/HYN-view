@@ -1,0 +1,1 @@
+export const Logo = (props: React.SVGProps<SVGSVGElement>) => <svg viewBox="0 0 150 32" fill="none" xmlns="http://www.w3.org/2000/svg" {...props}><path d="M2 5h6v6H2V5Zm8 8h6v6h-6v-6Zm8 8h6v6h-6v-6Z" fill="currentColor"/><text x="31" y="22" fill="currentColor" fontFamily="monospace" fontSize="16" fontWeight="600">HYN-view</text></svg>;
