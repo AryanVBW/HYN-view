@@ -6,7 +6,7 @@ import { NotifyPreferences } from "@/components/account/notify-preferences";
 import { NodeSettings } from "@/components/account/node-settings";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
-import { claimEnvAdminIfListed } from "@/lib/admin-emails";
+import { claimAdminIfAllowed } from "@/lib/admin-claim";
 import { formatRelative } from "@/lib/dashboard-data";
 import type {
   AdminOption,
@@ -15,6 +15,7 @@ import type {
   NotificationLogRow,
   Profile,
 } from "@/lib/types";
+import { NODE_COLUMNS } from "@/lib/types";
 
 export const metadata: Metadata = {
   title: "Account / HYN-view",
@@ -41,11 +42,11 @@ export default async function AccountPage() {
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) redirect("/signin?next=%2Faccount");
 
-  await claimEnvAdminIfListed(supabase, auth.user.email);
+  await claimAdminIfAllowed(supabase, auth.user.email);
 
   const [profileRes, nodesRes, prefsRes, adminsRes, logRes] = await Promise.all([
     supabase.from("profiles").select("*").eq("id", auth.user.id).maybeSingle(),
-    supabase.from("nodes").select("*").eq("revoked", false).order("created_at"),
+    supabase.from("nodes").select(NODE_COLUMNS).eq("revoked", false).order("created_at"),
     supabase.from("notify_prefs").select("*").eq("user_id", auth.user.id).maybeSingle(),
     supabase.rpc("hyn_list_admins"),
     supabase

@@ -19,7 +19,7 @@ export function LegalPage({
       <main className="container pt-32 pb-16 md:pt-44">
         <div className="mx-auto max-w-3xl">
           <Link href="/" className="inline-block">
-            <Logo className="w-[110px] text-foreground" />
+            <Logo className="w-[110px]" />
           </Link>
 
           <div className="mt-10 border-b border-border pb-8">

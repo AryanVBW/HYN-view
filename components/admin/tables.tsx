@@ -5,12 +5,20 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Loader2, Pause, Play, ShieldOff, Unplug } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
-import { formatRelative } from "@/lib/dashboard-data";
+import { compareVersions, formatRelative, newestVersion } from "@/lib/dashboard-data";
 import type { AdminClient, AdminNode } from "@/lib/types";
 
 function pct(v: number | null, suffix = "%") {
   if (v === null || v === undefined) return "—";
   return `${Math.round(Number(v))}${suffix}`;
+}
+
+// "Behind" means behind the newest agent reporting into this fleet. A demo node
+// carries a fake version, so it is excluded from the yardstick by the caller.
+function isBehind(node: AdminNode, newest: string | null): boolean {
+  if (node.is_demo || newest === null) return false;
+  if (!node.agent_version) return false;
+  return compareVersions(node.agent_version, newest) < 0;
 }
 
 // A node is "stale" when it stopped checking in. The server cannot know the
@@ -32,6 +40,9 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
   const [pending, startTransition] = useTransition();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const newestAgent = newestVersion(
+    nodes.filter((n) => !n.is_demo).map((n) => n.agent_version)
+  );
 
   async function act(
     nodeId: string,
@@ -161,6 +172,11 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                     <span className="block text-muted-foreground">
                       {node.agent_version ? `hyn ${node.agent_version}` : "version unknown"}
                     </span>
+                    {isBehind(node, newestAgent) ? (
+                      <span className="block text-[#e8a400]">
+                        behind {newestAgent}
+                      </span>
+                    ) : null}
                   </td>
                   <td className="py-3 pr-4">
                     <span className="text-card-foreground/80">{node.owner_email ?? "—"}</span>

@@ -44,7 +44,7 @@ export default async function LinkPage() {
   return (
     <div className="flex min-h-svh flex-col items-center justify-center px-4 py-16">
       <Link href="/" className="mb-10">
-        <Logo className="w-[120px] text-foreground" />
+        <Logo className="w-[120px]" />
       </Link>
 
       <div className="terminal-panel w-full max-w-md p-8">

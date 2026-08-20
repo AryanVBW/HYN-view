@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { StatCards, ThroughputCard } from "@/components/dashboard/stat-cards";
+import { HighwayPanel } from "@/components/dashboard/highway-panel";
 import { CpuUsageChart } from "@/components/dashboard/cpu-usage-chart";
 import { TemperatureChart } from "@/components/dashboard/temperature-chart";
 import { NetworkChart } from "@/components/dashboard/network-chart";
@@ -14,6 +15,7 @@ import { AwaitingFirstPushState, NoNodesState } from "@/components/dashboard/emp
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
 import type { AlertEvent, Metric, Node, Speedtest } from "@/lib/types";
+import { NODE_COLUMNS } from "@/lib/types";
 import {
   formatRelative,
   toCpuSeries,
@@ -65,7 +67,7 @@ export default async function DashboardPage({
   // Real nodes first, demo last, so a paired machine is what you land on.
   const { data: nodeRows, error: nodesError } = await supabase
     .from("nodes")
-    .select("*")
+    .select(NODE_COLUMNS)
     .eq("revoked", false)
     .order("is_demo", { ascending: true })
     .order("created_at", { ascending: true });
@@ -149,8 +151,11 @@ export default async function DashboardPage({
               {node.name}
             </h1>
             <p className="mt-3 max-w-2xl font-mono text-sm leading-7 text-muted-foreground">
-              {node.hostname ?? "unknown host"} · {node.os ?? "unknown OS"} · last
-              push {formatRelative(node.last_seen_at)} · {metrics.length} samples in
+              {node.hostname ?? "unknown host"} · {node.os ?? "unknown OS"} ·{" "}
+              <span className="text-card-foreground">
+                hyn {node.agent_version ?? "version unknown"}
+              </span>{" "}
+              · last push {formatRelative(node.last_seen_at)} · {metrics.length} samples in
               the last 24h
             </p>
           </div>
@@ -199,6 +204,14 @@ export default async function DashboardPage({
         ) : null}
 
         <StatCards latest={latest} />
+
+        {/* Highway first, above the processor. On a relay node the question that
+            matters is whether its services are up: a box with a failed unit is
+            earning nothing however cool the CPU is running. */}
+        <section className="space-y-6">
+          <p className="section-kicker border-b border-border pb-3">// highway services</p>
+          <HighwayPanel latest={latest} />
+        </section>
 
         <section className="space-y-6">
           <p className="section-kicker border-b border-border pb-3">// processor</p>

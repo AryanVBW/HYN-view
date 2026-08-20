@@ -112,3 +112,35 @@ export function severityCount(events: AlertEvent[]) {
     { info: 0, warn: 0, crit: 0 }
   );
 }
+
+// Agent version comparison. Compared numerically per component so 1.10.0 is
+// correctly newer than 1.9.0 — a string compare would call it older, and the
+// whole point of showing versions is knowing which boxes need upgrading.
+// Anything unparseable sorts oldest rather than throwing: a node reporting a
+// version we do not understand is a node to look at, not a crash.
+export function compareVersions(a: string | null, b: string | null): number {
+  const parts = (v: string | null) =>
+    (v ?? "")
+      .replace(/^v/, "")
+      .split(/[.\-+]/)
+      .map((p) => (/^\d+$/.test(p) ? Number(p) : -1));
+  const pa = parts(a);
+  const pb = parts(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? 0;
+    const y = pb[i] ?? 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+// The newest version any machine reports. Used as the yardstick for "behind"
+// instead of asking npm: the portal has no business making an outbound request
+// per page load, and "newer than one of your own boxes" is a claim we can
+// actually stand behind.
+export function newestVersion(versions: (string | null)[]): string | null {
+  return versions.reduce<string | null>(
+    (best, v) => (v && (best === null || compareVersions(v, best) > 0) ? v : best),
+    null
+  );
+}

@@ -3,12 +3,13 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { AlertTriangle, ShieldAlert } from "lucide-react";
 import { AdminTabs } from "@/components/admin/admin-tabs";
+import { AgentVersions } from "@/components/admin/agent-versions";
 import { ChannelManager } from "@/components/admin/channel-manager";
 import { PromoteAdminForm } from "@/components/admin/promote-admin-form";
 import { ClientTable, NodeTable } from "@/components/admin/tables";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
-import { claimEnvAdminIfListed } from "@/lib/admin-emails";
+import { claimAdminIfAllowed } from "@/lib/admin-claim";
 import { formatRelative } from "@/lib/dashboard-data";
 import type {
   AdminClient,
@@ -20,6 +21,7 @@ import type {
   NotificationChannel,
   Profile,
 } from "@/lib/types";
+import { CHANNEL_COLUMNS } from "@/lib/types";
 
 export const metadata: Metadata = {
   title: "Admin / HYN-view",
@@ -46,7 +48,7 @@ export default async function AdminPage() {
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) redirect("/signin?next=%2Fadmin");
 
-  await claimEnvAdminIfListed(supabase, auth.user.email);
+  await claimAdminIfAllowed(supabase, auth.user.email);
 
   const { data: profileRow } = await supabase
     .from("profiles")
@@ -76,9 +78,11 @@ export default async function AdminPage() {
               .
             </p>
             <p className="mt-6 font-mono text-xs leading-6 text-muted-foreground">
-              An existing administrator can promote you from the admin panel, or
-              list your email in the <code>ADMIN_EMAILS</code> environment
-              variable and sign in again.
+              An existing administrator can promote you from the admin panel. The
+              only other way in is the SQL editor, on purpose: add your address to{" "}
+              <code>public.admin_allowlist</code> and sign in again. That table is
+              unreadable and unwritable from any browser session, so who may
+              become an administrator cannot be changed from the app.
             </p>
           </div>
         </div>
@@ -92,7 +96,7 @@ export default async function AdminPage() {
     supabase.rpc("hyn_admin_clients"),
     supabase.rpc("hyn_admin_notifications", { p_limit: 100 }),
     supabase.rpc("hyn_admin_audit", { p_limit: 50 }),
-    supabase.from("notification_channels").select("*").eq("owner", auth.user.id).order("created_at"),
+    supabase.from("notification_channels").select(CHANNEL_COLUMNS).eq("owner", auth.user.id).order("created_at"),
   ]);
 
   const rpcError =
@@ -187,6 +191,8 @@ export default async function AdminPage() {
         the last 24 hours. A machine that has gone quiet has stopped checking
         in — this cannot tell you the box is down, only that it stopped talking.
       </p>
+
+      <AgentVersions nodes={nodes} />
 
       <PromoteAdminForm />
     </div>

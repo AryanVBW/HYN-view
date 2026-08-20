@@ -140,6 +140,46 @@ body {
   background: rgba(0, 0, 0, 0.6);
 }
 
+/* Logo animation. Two loops, both opacity-only so they can never reflow or
+   repaint the header: the three cells light in sequence (a signal arriving) and
+   the caret blinks on a step curve like a real terminal one. Delays are set per
+   cell in components/logo.tsx rather than with :nth-of-type, because the caret is
+   a <rect> too and position-based selectors would catch it.
+
+   Timings are deliberately slow: a logo that moves faster than the eye's resting
+   saccade reads as an advert. 2.6s per sweep with a rest at the end of it. */
+@keyframes logo-sweep {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  14% {
+    opacity: 1;
+  }
+  38% {
+    opacity: 0.3;
+  }
+}
+
+@keyframes logo-caret {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.logo-cell {
+  animation: logo-sweep 2.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.logo-caret {
+  animation: logo-caret 1.1s steps(1, end) infinite;
+}
+
 /* Typography for the legal pages. Set once, in one place, because three
    documents styled independently drift apart. */
 .legal-prose {
@@ -232,5 +272,13 @@ body {
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
+  }
+
+  /* A logo that pulses forever is exactly what this setting is asking us not to
+     do. Stopped, and left at full strength rather than mid-fade. */
+  .logo-cell,
+  .logo-caret {
+    animation: none;
+    opacity: 1;
   }
 }

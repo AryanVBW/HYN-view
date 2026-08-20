@@ -20,6 +20,15 @@ export type Node = {
   last_config_pull_at: string | null;
 };
 
+// Every column of `nodes` a browser session is allowed to read. `token_hash` is
+// deliberately not granted to `authenticated` (see supabase/schema.sql), so
+// `select("*")` fails with a permission error — select this instead. Keep it in
+// step with the type above. One literal with `as const`, not a concatenation:
+// supabase-js parses the select string at the type level and infers an error
+// type for a plain `string`.
+export const NODE_COLUMNS =
+  "id, owner, name, hostname, os, agent_version, is_demo, revoked, created_at, last_seen_at, status, paused_until, status_reason, config, last_config_pull_at" as const;
+
 export type Metric = {
   id: number;
   node_id: string;
@@ -43,6 +52,17 @@ export type Metric = {
   net_tx_bps: number | null;
   net_retrans_pm: number | null;
   latency_ms: number | null;
+  // Added to public.metrics after the first cut of this type (see the
+  // `alter table ... add column if not exists` block in supabase/schema.sql).
+  net_link_mbps: number | null;
+  psi_cpu: number | null;
+  psi_mem: number | null;
+  psi_io: number | null;
+  tcp_estab: number | null;
+  conntrack_pct: number | null;
+  proc_count: number | null;
+  // Every temperature the platform exposes, keyed by sensor label.
+  sensors: Record<string, number | null> | null;
   payload: Record<string, unknown> | null;
 };
 
@@ -93,6 +113,13 @@ export type NotificationChannel = {
   enabled: boolean;
   created_at: string;
 };
+
+// And therefore `select("*")` on notification_channels is denied outright —
+// Postgres refuses the whole statement when `*` expands onto a column the role
+// cannot read, so this is not "the secret comes back empty", it is "the query
+// fails". Select these columns instead.
+export const CHANNEL_COLUMNS =
+  "id, owner, node_id, kind, target, extra, enabled, created_at" as const;
 
 // What a user picks: an address, an optional phone number, and which admin
 // should manage their delivery. The actual channel plumbing lives on that
