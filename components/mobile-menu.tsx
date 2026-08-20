@@ -8,16 +8,19 @@ import { useState } from "react";
 
 interface MobileMenuProps {
   className?: string;
+  signedIn?: boolean;
+  email?: string | null;
 }
 
-export const MobileMenu = ({ className }: MobileMenuProps) => {
+export const MobileMenu = ({ className, signedIn = false, email = null }: MobileMenuProps) => {
   const [isOpen, setIsOpen] = useState(false);
 
   const menuItems = [
     { name: "Dashboard", href: "/dashboard" },
-    { name: "Account", href: "/account" },
     { name: "Link server", href: "/link" },
-    { name: "Sign in", href: "/signin" },
+    signedIn
+      ? { name: email ? `Account (${email})` : "Account", href: "/account" }
+      : { name: "Sign in", href: "/signin" },
   ];
 
   const handleLinkClick = () => {
