@@ -1,5 +1,7 @@
 import { Effects } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
+import { useTheme } from "next-themes";
+import { useEffect, useState } from "react";
 import { Particles } from "./particles";
 import { VignetteShader } from "./shaders/vignetteShader";
 
@@ -23,6 +25,16 @@ const useManualTime = false;
 const manualTime = 0;
 
 export const GL = ({ hovering }: { hovering: boolean }) => {
+  // Three.js needs a real hex, not a CSS var -- <color args> is read once by
+  // the renderer, not recomputed on every paint the way a CSS custom property
+  // is. resolvedTheme is undefined until mount, so this defaults to the dark
+  // canvas (matching the SSR/first-paint background) rather than flashing.
+  const { resolvedTheme } = useTheme();
+  const [background, setBackground] = useState("#000000");
+  useEffect(() => {
+    setBackground(resolvedTheme === "light" ? "#fafaf9" : "#000000");
+  }, [resolvedTheme]);
+
   return (
     <div id="webgl">
       <Canvas
@@ -35,7 +47,7 @@ export const GL = ({ hovering }: { hovering: boolean }) => {
           far: 300,
         }}
       >
-        <color attach="background" args={["#000"]} />
+        <color attach="background" args={[background]} />
         <Particles
           speed={speed}
           aperture={aperture}

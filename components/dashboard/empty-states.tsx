@@ -4,7 +4,7 @@ import { DemoDataButton } from "./demo-data-button";
 
 function CommandBlock({ lines }: { lines: string[] }) {
   return (
-    <div className="mt-6 overflow-x-auto border border-border bg-black/60 p-4">
+    <div className="mt-6 overflow-x-auto border border-border bg-foreground/[0.04] p-4">
       <pre className="font-mono text-xs leading-6 text-card-foreground">
         {lines.map((line) => (
           <span key={line} className="block">

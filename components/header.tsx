@@ -7,6 +7,7 @@ import { createClient } from "@/lib/supabase/client";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { Logo } from "./logo";
 import { MobileMenu } from "./mobile-menu";
+import { ThemeToggle } from "./theme-toggle";
 
 export const Header = () => {
   // null = still checking, so neither state flashes before the real answer
@@ -54,8 +55,12 @@ export const Header = () => {
               Sign in
             </Link>
           ) : null}
+          <ThemeToggle />
         </div>
-        <MobileMenu signedIn={signedIn} email={email ?? null} />
+        <div className="flex items-center gap-x-2 lg:hidden">
+          <ThemeToggle />
+          <MobileMenu signedIn={signedIn} email={email ?? null} />
+        </div>
       </header>
     </div>
   );

@@ -17,6 +17,38 @@
 }
 
 :root {
+  /* Light theme (default). Not an inverted dark palette -- warm-neutral
+     off-whites and a darkened primary, chosen for print-contrast text on
+     paper-like surfaces rather than glare. */
+  --background: #fafaf9;
+  --foreground: #1c1c1a;
+  --primary: #a66f00;
+  /* Foreground for content sitting ON primary. White, because this primary is
+     a darkened amber (contrast ~4.6:1 for white text, vs ~1.7:1 for black). */
+  --primary-foreground: #fffaf0;
+  --border: #dcdad4;
+  --card: #ffffff;
+  --card-foreground: #1c1c1a;
+  --popover: #ffffff;
+  --popover-foreground: #1c1c1a;
+  --secondary: #f0efe9;
+  --secondary-foreground: #1c1c1a;
+  --muted: #f0efe9;
+  --muted-foreground: #6b6a63;
+  --accent: #e8e6de;
+  --accent-foreground: #1c1c1a;
+  --destructive: #c22b2b;
+  --input: #dcdad4;
+  --ring: #a66f00;
+  --chart-1: #a66f00;
+  --chart-2: #7a5200;
+  --chart-3: #1c1c1a;
+  --chart-4: #6b6a63;
+  --chart-5: #c22b2b;
+  --radius: 0.5rem;
+}
+
+.dark {
   --background: #000000;
   --foreground: #ffffff;
   --primary: #FFC700;
@@ -99,6 +131,36 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+  color-scheme: light dark;
+}
+
+/* The one thing that animates across a theme switch: background, border and
+   text color fade together instead of hard-cutting. Scoped to color
+   properties on elements that actually paint a surface -- not a blanket `*`
+   rule, which would also catch the logo's opacity keyframes, chart redraws
+   and Radix's own transitions and make all of them fight this one. */
+body,
+.terminal-panel,
+.legal-prose code,
+[data-slot="card"],
+[data-slot="badge"],
+[data-slot="button"],
+header,
+nav {
+  transition: background-color 0.35s ease, border-color 0.35s ease, color 0.35s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body,
+  .terminal-panel,
+  .legal-prose code,
+  [data-slot="card"],
+  [data-slot="badge"],
+  [data-slot="button"],
+  header,
+  nav {
+    transition: none;
+  }
 }
 
 #webgl {
@@ -137,7 +199,7 @@ body {
 
 .terminal-panel {
   border: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.6);
+  background: color-mix(in oklab, var(--background) 60%, transparent);
 }
 
 /* Logo animation. Two loops, both opacity-only so they can never reflow or
@@ -148,6 +210,14 @@ body {
 
    Timings are deliberately slow: a logo that moves faster than the eye's resting
    saccade reads as an advert. 2.6s per sweep with a rest at the end of it. */
+
+/* The logo's one colour knob (see components/logo.tsx). Tied to --foreground
+   rather than left to its #fff fallback, so it reads on both themes instead of
+   only working on dark by the accident of white-on-black. */
+:root {
+  --logo-ink: var(--foreground);
+}
+
 @keyframes logo-sweep {
   0%,
   100% {
@@ -235,7 +305,7 @@ body {
 
 .legal-prose code {
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.04);
+  background: color-mix(in oklab, var(--foreground) 4%, transparent);
   padding: 0.05rem 0.3rem;
   font-size: 0.85em;
   color: var(--foreground);

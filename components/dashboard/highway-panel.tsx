@@ -96,7 +96,7 @@ export function HighwayPanel({ latest }: { latest: Metric }) {
           This node&apos;s agent did not send a Highway section. Upgrade it on the server and the
           services below fill in on the next push:
         </p>
-        <pre className="mt-4 overflow-x-auto border border-border bg-black/40 p-3 font-mono text-xs text-primary">
+        <pre className="mt-4 overflow-x-auto border border-border bg-foreground/[0.04] p-3 font-mono text-xs text-primary">
           sudo npm i -g hyn-view{"\n"}hyn push
         </pre>
       </Frame>
