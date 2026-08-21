@@ -6,3 +6,4 @@ node_modules/
 .DS_Store
 supabase/.temp/
 /web-portal/
+.worktrees/
