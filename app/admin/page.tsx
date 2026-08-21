@@ -117,7 +117,8 @@ export default async function AdminPage({
     supabase.rpc("hyn_admin_templates"),
     supabase
       .from("metrics")
-      .select("node_id,ts,cpu_pct,net_rx_bps,net_tx_bps")
+      .select("node_id,ts,cpu_pct,net_rx_bps,net_tx_bps,nodes!inner(is_demo)")
+      .eq("nodes.is_demo", false)
       .gte("ts", since)
       .order("ts", { ascending: true })
       .limit(5000),
@@ -156,7 +157,7 @@ export default async function AdminPage({
   const templates = (templatesRes.data ?? []) as NotificationTemplate[];
   const fleetMetrics = (fleetMetricsRes.data ?? []) as Pick<
     Metric,
-    "ts" | "cpu_pct" | "net_rx_bps" | "net_tx_bps"
+    "node_id" | "ts" | "cpu_pct" | "net_rx_bps" | "net_tx_bps"
   >[];
   const fleetTrend = toFleetTrend(fleetMetrics);
 
@@ -176,7 +177,7 @@ export default async function AdminPage({
     },
   ];
 
-  const statusCounts = nodes.reduce(
+  const statusCounts = nodes.filter((node) => !node.is_demo).reduce(
     (counts, node) => {
       if (node.revoked) counts.revoked += 1;
       else if (node.status === "suspended") counts.suspended += 1;
