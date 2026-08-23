@@ -82,6 +82,20 @@ is_root() { return 0; }
 # flow invokes it after the credential has been verified.
 cloud_install_schedule() { printf 'test-schedule-installed\n'; }
 update_startup() { : >"$TMP/update-policy-reconciled"; }
+update_read() {
+  UPD_LATEST=1.8.0
+  UPD_CHECKED=${EPOCHSECONDS:-0}
+  if [[ $HYN_VERSION == "$UPD_LATEST" ]]; then UPD_AVAILABLE=0; else UPD_AVAILABLE=1; fi
+}
+update_check_now() { update_read; return 0; }
+update_apply() {
+  update_emit_progress installing "Installing hyn-view $UPD_LATEST"
+  update_emit_progress restarting 'Restarting managed timers'
+  update_emit_progress verifying 'Verifying the installed CLI'
+  HYN_VERSION=$UPD_LATEST
+  UPD_AVAILABLE=0
+  return 0
+}
 
 HOSTNAME_S=web-01 DISTRO='Ubuntu 24.04 LTS' KERNEL='6.8.0-31-generic'
 UPTIME_S=123456 LOAD1=0.42 LOAD5=0.31 LOAD15=0.28
@@ -154,6 +168,14 @@ eq 'cloud is enabled'      'on' "${CFG[cloud_enabled]}"
 eq 'dashboard controls the update policy' 'install' "${CFG[auto_update]}"
 truthy 'secrets file is 0600' '[[ $(stat -f "%Lp" "$HYN_ETC/secrets" 2>/dev/null || stat -c "%a" "$HYN_ETC/secrets") == 600 ]]'
 
+# The next one-minute check-in receives a portal update command. It must report
+# each stage and continue into a fresh full telemetry push with the new version.
+curl -sS "http://127.0.0.1:$PORT/command/queue" >/dev/null
+cloud_push 0 0
+command_rc=$?
+eq 'portal update command completes during a push' 0 "$command_rc"
+eq 'portal update changes the running agent version' '1.8.0' "$HYN_VERSION"
+
 # The anon key is public and belongs in the config; the token never does.
 cfgtext=$(<"$HYN_ETC/config")
 contains 'anon key is in the config'      'test.anon.key' "$cfgtext"
@@ -166,6 +188,13 @@ reqs=$(<"$REQLOG")
 contains 'device_start was called' '/rest/v1/rpc/hyn_device_start' "$reqs"
 contains 'device_poll was called'  '/rest/v1/rpc/hyn_device_poll'  "$reqs"
 contains 'ingest was called'       '/rest/v1/rpc/hyn_ingest'       "$reqs"
+contains 'command claim was called' '/rest/v1/rpc/hyn_claim_node_command' "$reqs"
+contains 'command progress was reported' '/rest/v1/rpc/hyn_report_node_command' "$reqs"
+contains 'command reports registry check' '\"p_stage\": \"checking\"' "$reqs"
+contains 'command reports installation' '\"p_stage\": \"installing\"' "$reqs"
+contains 'command reports timer restart' '\"p_stage\": \"restarting\"' "$reqs"
+contains 'command reports verification' '\"p_stage\": \"verifying\"' "$reqs"
+contains 'command reports completion' '\"p_stage\": \"completed\"' "$reqs"
 contains 'apikey header is sent'   '"apikey": "test.anon.key"'     "$reqs"
 contains 'bearer auth is sent'     'Bearer test.anon.key'          "$reqs"
 contains 'content type is json'    'application/json'              "$reqs"
@@ -189,6 +218,9 @@ assert body[\"p_payload\"][\"cpu\"][\"temp_c\"] == 52
 assert body[\"p_payload\"][\"disk\"][\"pct\"] == 58.4
 assert body[\"p_payload\"][\"alerts\"][0][\"severity\"] == \"warn\"
 assert body[\"p_payload\"][\"latency_ms\"] == 1.20, body[\"p_payload\"][\"latency_ms\"]
+assert body[\"p_payload\"][\"agent_version\"] == \"1.8.0\", body[\"p_payload\"][\"agent_version\"]
+assert body[\"p_payload\"][\"agent_update\"][\"latest\"] == \"1.8.0\", body[\"p_payload\"][\"agent_update\"]
+assert body[\"p_payload\"][\"agent_update\"][\"available\"] is False, body[\"p_payload\"][\"agent_update\"]
 top = body[\"p_payload\"][\"processes\"][\"top\"][0]
 assert top[\"name\"] == \"queue-worker\", top
 assert \"user\" not in top, top

@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
 LOG = sys.argv[2]
-state = {"polls": 0, "node_status": "active"}
+state = {"polls": 0, "node_status": "active", "command_queued": False, "command_claimed": False}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -18,6 +18,13 @@ class Handler(BaseHTTPRequestHandler):
         # Test-only lever to flip the node's administrative status.
         if self.path.startswith("/status/"):
             state["node_status"] = self.path.rsplit("/", 1)[-1]
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
+        if self.path == "/command/queue":
+            state["command_queued"] = True
             self.send_response(200)
             self.send_header("Content-Length", "2")
             self.end_headers()
@@ -109,6 +116,30 @@ class Handler(BaseHTTPRequestHandler):
                 self._error(401, "invalid node token")
                 return
             output = {"status": "ok", "written": len(body.get("p_events") or [])}
+        elif function == "hyn_claim_node_command":
+            body = json.loads(raw)
+            if body.get("p_node_token") != "b" * 64:
+                self._error(401, "invalid node token")
+                return
+            if not state["command_queued"] or state["command_claimed"]:
+                output = {"status": "idle"}
+            else:
+                state["command_claimed"] = True
+                output = {
+                    "status": "command",
+                    "id": "4f8b0000-0000-4000-8000-000000000002",
+                    "action": "update",
+                    "stage": "accepted",
+                }
+        elif function == "hyn_report_node_command":
+            body = json.loads(raw)
+            if body.get("p_node_token") != "b" * 64:
+                self._error(401, "invalid node token")
+                return
+            if body.get("p_command_id") != "4f8b0000-0000-4000-8000-000000000002":
+                self._error(400, "unknown command")
+                return
+            output = {"status": body.get("p_status"), "stage": body.get("p_stage")}
         elif function == "hyn_ingest":
             body = json.loads(raw)
             if body.get("p_node_token") != "b" * 64:

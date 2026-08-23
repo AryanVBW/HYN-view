@@ -210,6 +210,7 @@ CLOUD_PAYLOAD=''
 cloud_payload_v() {
   local iface=${NET_WAN:-none} ts
   printf -v ts '%(%Y-%m-%dT%H:%M:%S%z)T' -1
+  update_read >/dev/null 2>&1 || true
 
   # Root filesystem is the one mount worth promoting to a top-level number; the
   # rest ride along in the payload for the portal to grow into.
@@ -236,6 +237,9 @@ cloud_payload_v() {
   p+="\"ts\": \"$ts\""
   p+=", \"host\": \"$(_jstr "$HOSTNAME_S")\""
   p+=", \"agent_version\": \"$(_jstr "$HYN_VERSION")\""
+  p+=", \"agent_update\": {\"latest\": \"$(_jstr "$UPD_LATEST")\""
+  p+=", \"available\": $([[ $UPD_AVAILABLE == 1 ]] && printf true || printf false)"
+  p+=", \"checked_at\": $(_jnum "$UPD_CHECKED")}"
   p+=", \"os\": \"$(_jstr "$DISTRO")\""
   p+=", \"kernel\": \"$(_jstr "$KERNEL")\""
   p+=", \"uptime_s\": $(_jnum "$UPTIME_S" 0)"
@@ -453,6 +457,91 @@ _cloud_push_stamp() {
   printf '%s/cloud-last-push' "$STATE_DIR"
 }
 
+# ---------------------------------------------------------------------------
+# portal-requested maintenance
+# ---------------------------------------------------------------------------
+CLOUD_COMMAND_CLAIMED=0
+CLOUD_COMMAND_UPDATED=0
+CLOUD_COMMAND_ID=''
+CLOUD_COMMAND_TARGET=''
+
+cloud_command_report() {
+  local status=$1 stage=$2 message=$3 target=${4:-} result=${5:-}
+  local token body
+  [[ -n $CLOUD_COMMAND_ID ]] || return 1
+  token=$(secret cloud_node_token)
+  body="{\"p_node_token\": \"$(_jstr "$token")\""
+  body+=", \"p_command_id\": \"$(_jstr "$CLOUD_COMMAND_ID")\""
+  body+=", \"p_status\": \"$(_jstr "$status")\""
+  body+=", \"p_stage\": \"$(_jstr "$stage")\""
+  body+=", \"p_message\": \"$(_jstr "$message")\""
+  if [[ -n $target ]]; then body+=", \"p_target_version\": \"$(_jstr "$target")\""; else body+=', "p_target_version": null'; fi
+  if [[ -n $result ]]; then body+=", \"p_result_version\": \"$(_jstr "$result")\""; else body+=', "p_result_version": null'; fi
+  body+='}'
+  _cloud_rpc hyn_report_node_command "$body"
+}
+
+cloud_update_progress() {
+  local stage=$1 message=$2
+  cloud_command_report running "$stage" "$message" "$CLOUD_COMMAND_TARGET" ''
+}
+
+# Claim at most one command per check-in. Update commands are idempotent: a
+# lease-expired command may be reclaimed after a crash, and installing the same
+# npm release twice still converges on the same package and systemd units.
+cloud_command_poll() {
+  local quiet=${1:-0} token body status action id
+  CLOUD_COMMAND_CLAIMED=0
+  CLOUD_COMMAND_UPDATED=0
+  CLOUD_COMMAND_ID=''
+  CLOUD_COMMAND_TARGET=''
+
+  token=$(secret cloud_node_token)
+  body="{\"p_node_token\": \"$(_jstr "$token")\"}"
+  if ! _cloud_rpc hyn_claim_node_command "$body"; then
+    ((quiet)) || warn "command check failed: $CLOUD_LAST_ERR"
+    return 1
+  fi
+  json_field_v "$CLOUD_LAST_BODY" status && status=$JSON_FIELD
+  [[ $status == command ]] || return 0
+  json_field_v "$CLOUD_LAST_BODY" id && id=$JSON_FIELD
+  json_field_v "$CLOUD_LAST_BODY" action && action=$JSON_FIELD
+  if [[ ! $id =~ ^[0-9A-Fa-f-]{36}$ || $action != update ]]; then
+    ((quiet)) || warn "portal returned an invalid maintenance command (id=${id:-missing}, action=${action:-missing})"
+    return 1
+  fi
+
+  CLOUD_COMMAND_CLAIMED=1
+  CLOUD_COMMAND_ID=$id
+  if ! cloud_command_report running checking 'Checking the npm registry for the newest hyn-view release' '' ''; then
+    ((quiet)) || warn "could not report command progress: $CLOUD_LAST_ERR"
+  fi
+  if ! update_check_now; then
+    local check_error=${UPD_LAST_ERR:-could not reach the npm registry}
+    cloud_command_report failed failed "$check_error" '' "$HYN_VERSION" || true
+    return 1
+  fi
+
+  CLOUD_COMMAND_TARGET=$UPD_LATEST
+  # Force the install even when the package is already current. This makes the
+  # portal button a repair path too: setup is reapplied and every enabled HYN
+  # timer is restarted and verified after an interrupted earlier update.
+  UPD_PROGRESS_HOOK=cloud_update_progress
+  if update_apply 1; then
+    UPD_PROGRESS_HOOK=''
+    CLOUD_COMMAND_UPDATED=1
+    cloud_command_report succeeded completed \
+      "Updated to hyn-view $HYN_VERSION; managed services restarted and verified" \
+      "$CLOUD_COMMAND_TARGET" "$HYN_VERSION" || true
+    return 0
+  fi
+  UPD_PROGRESS_HOOK=''
+  cloud_command_report failed failed \
+    "${UPD_LAST_ERR:-the package update failed; run sudo hyn doctor on the machine}" \
+    "$CLOUD_COMMAND_TARGET" "$HYN_VERSION" || true
+  return 1
+}
+
 cloud_push() {
   local quiet=${1:-0} respect_interval=${2:-0}
   cloud_configured || {
@@ -471,15 +560,16 @@ cloud_push() {
   # controlled by the root-owned files.
   if cloud_config_pull 1; then
     cfg_load
-    # A portal change to auto_update should take effect on this check-in, not
-    # one timer cycle later. The updater remains detached and never delays the
-    # telemetry push.
-    update_startup
+    # A portal command is explicit and therefore takes priority over the
+    # detached automatic updater. With no command, a policy change to
+    # auto_update still takes effect in this same check-in.
+    cloud_command_poll 1 || true
+    ((CLOUD_COMMAND_CLAIMED)) || update_startup
   fi
 
   # The timer wakes every minute so a dashboard change is picked up quickly.
   # Expensive collection and ingestion still happen only at cloud_push_min.
-  if ((respect_interval)); then
+  if ((respect_interval && CLOUD_COMMAND_UPDATED == 0)); then
     local prior_ts='' prior_status='' prior_error='' interval=${CFG[cloud_push_min]:-10}
     [[ $interval =~ ^[1-9][0-9]*$ ]] || interval=10
     local prior_stamp

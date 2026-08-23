@@ -390,6 +390,91 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------------
+-- 4b. an owner queues one observable update; only that node may execute it
+-- ---------------------------------------------------------------------------
+set local role authenticated;
+set local "test.uid" = '11111111-1111-1111-1111-111111111111';
+
+do $$
+declare first_request json; repeated_request json;
+begin
+  first_request := public.hyn_request_node_update((select v from t where k = 'node_id')::uuid);
+  if first_request->>'status' <> 'queued' or first_request->>'created' <> 'true' then
+    raise exception 'owner update request was not queued: %', first_request;
+  end if;
+  insert into t values ('command_id', first_request->>'id');
+  repeated_request := public.hyn_request_node_update((select v from t where k = 'node_id')::uuid);
+  if repeated_request->>'id' <> first_request->>'id'
+     or repeated_request->>'created' <> 'false' then
+    raise exception 'active update request was duplicated: % / %', first_request, repeated_request;
+  end if;
+  raise notice 'PASS  owner update requests are queued idempotently';
+end $$;
+
+set local "test.uid" = '22222222-2222-2222-2222-222222222222';
+do $$
+declare refused boolean := false;
+begin
+  begin
+    perform public.hyn_request_node_update((select v from t where k = 'node_id')::uuid);
+  exception when others then refused := true;
+  end;
+  if not refused then raise exception 'another owner queued an update for alice''s node'; end if;
+  if exists (select 1 from public.node_commands) then
+    raise exception 'another owner could read alice''s update progress';
+  end if;
+  raise notice 'PASS  update requests and progress are owner-scoped';
+end $$;
+
+set local role anon;
+set local "test.uid" = '';
+do $$
+declare r json; refused boolean := false;
+begin
+  begin
+    perform public.hyn_claim_node_command('wrong-node-token');
+  exception when others then refused := true;
+  end;
+  if not refused then raise exception 'an invalid node token claimed a command'; end if;
+
+  r := public.hyn_claim_node_command((select v from t where k = 'node_token'));
+  if r->>'status' <> 'command' or r->>'action' <> 'update'
+     or r->>'id' <> (select v from t where k = 'command_id') then
+    raise exception 'the linked node did not claim its update: %', r;
+  end if;
+  perform public.hyn_report_node_command(
+    (select v from t where k = 'node_token'),
+    (select v from t where k = 'command_id')::uuid,
+    'running', 'installing', 'Installing hyn-view 1.7.0', '1.7.0', null
+  );
+  r := public.hyn_report_node_command(
+    (select v from t where k = 'node_token'),
+    (select v from t where k = 'command_id')::uuid,
+    'succeeded', 'completed', 'Updated and verified hyn-view 1.7.0', '1.7.0', '1.7.0'
+  );
+  if r->>'status' <> 'succeeded' or r->>'stage' <> 'completed' then
+    raise exception 'node completion was not recorded: %', r;
+  end if;
+  raise notice 'PASS  a node claims and reports every update lifecycle state';
+end $$;
+
+set local role authenticated;
+set local "test.uid" = '11111111-1111-1111-1111-111111111111';
+do $$
+declare n integer; v_status text; v_version text;
+begin
+  select count(*), max(status), max(result_version)
+    into n, v_status, v_version from public.node_commands;
+  if n <> 1 or v_status <> 'succeeded' or v_version <> '1.7.0' then
+    raise exception 'owner cannot observe completed update: %, %, %', n, v_status, v_version;
+  end if;
+  raise notice 'PASS  the owner can observe completed update progress';
+end $$;
+
+set local role anon;
+set local "test.uid" = '';
+
+-- ---------------------------------------------------------------------------
 -- 5. ingest
 -- ---------------------------------------------------------------------------
 do $$
