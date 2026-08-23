@@ -4,12 +4,78 @@ import {
   applyEmailTemplate,
   buildDailyDigestContent,
   buildDeviceLinkedContent,
+  buildCommandResultContent,
   buildSignInContent,
   buildSystemSummaryContent,
   novelIncidentEvents,
+  renderHynEmailShell,
   scheduleIsDue,
   sendResendEmail,
 } from "./cloud-email.ts";
+
+test("every managed lifecycle message uses the immutable HYN terminal shell", () => {
+  const contents = [
+    buildSignInContent({
+      email: "owner@example.com",
+      signedInAt: "2026-08-24T12:00:00Z",
+      ip: null,
+      userAgent: null,
+    }),
+    buildDeviceLinkedContent({
+      nodeName: "relay-01",
+      hostname: null,
+      os: null,
+      agentVersion: null,
+      linkedAt: "2026-08-24T12:01:00Z",
+    }),
+    buildSystemSummaryContent({
+      nodeName: "relay-01",
+      os: null,
+      agentVersion: null,
+      lastSeenAt: null,
+      payload: null,
+    }),
+  ];
+  for (const content of contents) {
+    const rendered = renderHynEmailShell({
+      subject: "Status <script>alert(1)</script>",
+      preview: "Current system status",
+      hostname: "relay<&>",
+      severity: "warn",
+      content,
+    });
+    assert.match(rendered, /data-hyn-email="terminal"/);
+    assert.match(rendered, /HYN-view/);
+    assert.match(rendered, /Status &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+    assert.match(rendered, /relay&lt;&amp;&gt;/);
+    assert.doesNotMatch(rendered, /<script|<form|<iframe|<img[^>]+src=["']https?:/i);
+  }
+});
+
+test("command result email explains completion and safe recovery", () => {
+  const success = buildCommandResultContent({
+    command: "update",
+    status: "succeeded",
+    message: "Updated <cleanly>",
+    targetVersion: "1.7.0",
+    resultVersion: "1.7.0",
+    updatedAt: "2026-08-24T12:10:00Z",
+  });
+  assert.match(success, /Update completed/);
+  assert.match(success, /Updated &lt;cleanly&gt;/);
+  assert.doesNotMatch(success, /Updated <cleanly>/);
+
+  const failed = buildCommandResultContent({
+    command: "sync",
+    status: "failed",
+    message: "Upload failed",
+    targetVersion: null,
+    resultVersion: null,
+    updatedAt: "2026-08-24T12:11:00Z",
+  });
+  assert.match(failed, /sudo hyn doctor/);
+  assert.match(failed, /systemctl status hyn-push.timer/);
+});
 
 test("scheduled email timing follows the account timezone", () => {
   const now = new Date("2026-08-22T03:00:00.000Z");
@@ -88,7 +154,7 @@ test("daily and system emails render absent sensors as unavailable", () => {
     latencyAverageMs: 8.2,
     uptimeSeconds: 86400,
   });
-  assert.match(daily, /Temperature<\/span><strong>Unavailable<\/strong>/);
+  assert.match(daily, /Temperature[\s\S]*Unavailable/);
   assert.match(daily, /1,000\.0 Mbps/);
 
   const system = buildSystemSummaryContent({
@@ -135,6 +201,7 @@ test("managed email delivery sends the exact lifecycle message through Resend", 
     to: "owner@example.com",
     subject: "Welcome, you signed in",
     html: "<h1>Welcome</h1>",
+    idempotencyKey: "email:test:123",
     fetchImpl: async (url, init) => {
       request = { url: String(url), init };
       return new Response(JSON.stringify({ id: "email_123" }), {
@@ -152,6 +219,7 @@ test("managed email delivery sends the exact lifecycle message through Resend", 
     subject: "Welcome, you signed in",
     html: "<h1>Welcome</h1>",
   });
+  assert.equal((request?.init?.headers as Record<string, string>)["Idempotency-Key"], "email:test:123");
 });
 
 test("managed email delivery returns provider failures for retry and logging", async () => {

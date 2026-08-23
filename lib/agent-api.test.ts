@@ -14,6 +14,7 @@ test("the hosted API exposes only the agent RPC allowlist", () => {
   assert.equal(agentRpcForAction("hyn_report_notification"), "hyn_report_notification");
   assert.equal(agentRpcForAction("hyn_claim_node_command"), "hyn_claim_node_command");
   assert.equal(agentRpcForAction("hyn_report_node_command"), "hyn_report_node_command");
+  assert.equal(agentRpcForAction("hyn_queue_web_notification"), "hyn_queue_web_notification");
   assert.equal(agentRpcForAction("hyn_admin_overview"), null);
   assert.equal(agentRpcForAction("../hyn_ingest"), null);
 });

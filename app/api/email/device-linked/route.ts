@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { buildDeviceLinkedContent, sendResendEmail } from "@/lib/cloud-email";
+import { buildDeviceLinkedContent, renderHynEmailShell, sendResendEmail } from "@/lib/cloud-email";
 import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -44,13 +44,20 @@ export async function POST(request: Request) {
     from,
     to: claim.recipient,
     subject,
-    html: buildDeviceLinkedContent({
-      nodeName: claim.node_name ?? "new machine",
-      hostname: claim.hostname ?? null,
-      os: claim.os ?? null,
-      agentVersion: claim.agent_version ?? null,
-      linkedAt: claim.linked_at ?? new Date().toISOString(),
+    html: renderHynEmailShell({
+      subject,
+      preview: "Your machine is linked and its first complete report is being collected.",
+      hostname: claim.hostname ?? claim.node_name ?? "new machine",
+      severity: "info",
+      content: buildDeviceLinkedContent({
+        nodeName: claim.node_name ?? "new machine",
+        hostname: claim.hostname ?? null,
+        os: claim.os ?? null,
+        agentVersion: claim.agent_version ?? null,
+        linkedAt: claim.linked_at ?? new Date().toISOString(),
+      }),
     }),
+    idempotencyKey: `device-linked:${body.nodeId}`,
   });
   if (!delivery.ok) {
     await supabase.rpc("hyn_release_device_linked_email", { p_node_id: body.nodeId });

@@ -8,6 +8,7 @@ const AGENT_RPCS = new Set([
   "hyn_report_notification",
   "hyn_claim_node_command",
   "hyn_report_node_command",
+  "hyn_queue_web_notification",
 ]);
 
 export function agentRpcForAction(action: string): string | null {

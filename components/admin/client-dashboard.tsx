@@ -3,6 +3,7 @@ import { ArrowLeft, Bell, Server } from "lucide-react";
 import { CpuUsageChart } from "@/components/dashboard/cpu-usage-chart";
 import { NetworkChart } from "@/components/dashboard/network-chart";
 import { StatCards } from "@/components/dashboard/stat-cards";
+import { AdminClientActions } from "@/components/admin/client-actions";
 import { formatRelative, toCpuSeries, toNetSeries } from "@/lib/dashboard-data";
 import type { AdminClient, AdminNode, Metric } from "@/lib/types";
 
@@ -71,6 +72,8 @@ export function AdminClientDashboard({
           )}
         </div>
       </section>
+
+      <AdminClientActions client={client} nodes={nodes} current={current} />
 
       {current ? (
         <>

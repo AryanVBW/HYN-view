@@ -412,6 +412,15 @@ nav {
   color: var(--primary-foreground);
 }
 
+@keyframes hyn-heartbeat-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.72); }
+}
+
+.hyn-heartbeat-pulse {
+  animation: hyn-heartbeat-pulse 1.8s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
@@ -420,7 +429,8 @@ nav {
   /* A logo that pulses forever is exactly what this setting is asking us not to
      do. Stopped, and left at full strength rather than mid-fade. */
   .logo-cell,
-  .logo-caret {
+  .logo-caret,
+  .hyn-heartbeat-pulse {
     animation: none;
     opacity: 1;
   }

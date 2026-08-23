@@ -1,13 +1,14 @@
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 import {
-  applyEmailTemplate,
   buildDailyDigestContent,
   buildIncidentContent,
   buildSystemSummaryContent,
   localDateAndTime,
   novelIncidentEvents,
   scheduleIsDue,
+  renderManagedHynEmail,
+  sendResendEmail,
 } from "@/lib/cloud-email";
 import { SUPABASE_URL } from "@/lib/supabase/config";
 
@@ -58,13 +59,16 @@ export async function GET(request: Request) {
     const claim = await supabase.from("cloud_email_dispatches").insert({ idempotency_key: args.idempotencyKey, node_id: args.preference.node_id, kind: args.kind });
     if (claim.error) { if (claim.error.code === "23505") skipped += 1; else failed += 1; return false; }
     const node = args.preference.nodes;
-    const html = applyEmailTemplate(templates.get(args.kind) ?? "{{content}}", { subject: args.subject, hostname: node.hostname ?? node.name, version: node.agent_version ?? "unknown", severity: args.severity, content: args.content });
-    const response = await fetch("https://api.resend.com/emails", { method: "POST", headers: { Authorization: `Bearer ${resendKey}`, "Content-Type": "application/json" }, body: JSON.stringify({ from, to: [args.preference.recipient], subject: args.subject, html }) });
-    const provider = (await response.json().catch(() => ({}))) as { id?: string; message?: string };
-    const ok = response.ok;
-    await supabase.from("notification_log").insert({ node_id: node.id, owner: node.owner, kind: "resend-cloud", target: args.preference.recipient, severity: args.severity, subject: args.subject, status: ok ? "sent" : "failed", error: ok ? null : provider.message ?? `Resend HTTP ${response.status}`, category: args.kind === "alert" ? "alert" : "report" });
+    const html = renderManagedHynEmail({
+      template: templates.get(args.kind) ?? "{{content}}",
+      values: { subject: args.subject, hostname: node.hostname ?? node.name, version: node.agent_version ?? "unknown", severity: args.severity, content: args.content },
+      preview: args.subject,
+    });
+    const delivery = await sendResendEmail({ apiKey: resendKey, from, to: args.preference.recipient, subject: args.subject, html, idempotencyKey: args.idempotencyKey });
+    const ok = delivery.ok;
+    await supabase.from("notification_log").insert({ node_id: node.id, owner: node.owner, kind: "resend-cloud", target: args.preference.recipient, severity: args.severity, subject: args.subject, status: ok ? "sent" : "failed", error: ok ? null : delivery.error, category: args.kind === "alert" ? "alert" : "report" });
     if (!ok) { await supabase.from("cloud_email_dispatches").delete().eq("idempotency_key", args.idempotencyKey); failed += 1; return false; }
-    await supabase.from("cloud_email_dispatches").update({ provider_id: provider.id ?? null }).eq("idempotency_key", args.idempotencyKey);
+    await supabase.from("cloud_email_dispatches").update({ provider_id: delivery.providerId }).eq("idempotency_key", args.idempotencyKey);
     sent += 1; return true;
   }
 

@@ -18,6 +18,7 @@ export type Node = {
   status_reason: string | null;
   config: Record<string, unknown>;
   last_config_pull_at: string | null;
+  last_heartbeat_at: string | null;
 };
 
 // Every column of `nodes` a browser session is allowed to read. `token_hash` is
@@ -27,7 +28,7 @@ export type Node = {
 // supabase-js parses the select string at the type level and infers an error
 // type for a plain `string`.
 export const NODE_COLUMNS =
-  "id, owner, name, hostname, os, agent_version, is_demo, revoked, created_at, last_seen_at, status, paused_until, status_reason, config, last_config_pull_at" as const;
+  "id, owner, name, hostname, os, agent_version, is_demo, revoked, created_at, last_seen_at, status, paused_until, status_reason, config, last_config_pull_at, last_heartbeat_at" as const;
 
 export type Metric = {
   id: number;
@@ -176,6 +177,7 @@ export type AdminNode = {
   created_at: string;
   last_seen_at: string | null;
   last_config_pull_at: string | null;
+  last_heartbeat_at: string | null;
   config: Record<string, unknown>;
   owner_id: string | null;
   owner_email: string | null;
@@ -188,6 +190,8 @@ export type AdminNode = {
   last_temp_c: number | null;
   last_mem_pct: number | null;
   last_disk_pct: number | null;
+  latest_agent_version: string | null;
+  update_available: boolean;
 };
 
 export type AdminClient = {
