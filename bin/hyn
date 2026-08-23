@@ -760,6 +760,7 @@ cmd_doctor() {
     IFS=,
     for ch in ${CFG[notify_channels]}; do
       case $ch in
+        web) IFS=$oIFS; if cloud_configured && cloud_linked; then _chk ok 'web channel' 'portal-managed email'; else _chk fail 'web channel' 'link this machine to the portal'; fi; IFS=, ;;
         resend) IFS=$oIFS; need_to=1; if has_secret resend_api_key; then _chk ok 'resend key' 'set'; else _chk fail 'resend key' 'missing from secrets'; fi; IFS=, ;;
         brevo) IFS=$oIFS; need_to=1; if has_secret brevo_api_key; then _chk ok 'brevo key' 'set'; else _chk fail 'brevo key' 'missing from secrets'; fi; IFS=, ;;
         smtp) IFS=$oIFS; need_to=1; if [[ -n ${CFG[smtp_host]} ]]; then _chk ok 'smtp host' "${CFG[smtp_host]}:${CFG[smtp_port]}"; else _chk fail 'smtp host' 'not set'; fi; IFS=, ;;

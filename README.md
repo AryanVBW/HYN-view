@@ -571,7 +571,7 @@ Keys worth knowing:
 | `speedtest_provider` | `auto` | prefers Ookla `speedtest`, then `speedtest-cli`, then `curl` |
 | `highway_track` | `on` | node panel |
 | `profile` | `best` | `best` or `performance` |
-| `notify_channels` | *(empty)* | comma separated; nothing is sent until set |
+| `notify_channels` | *(empty before linking)* | a new portal link defaults this to `web`; explicit local channels are preserved |
 | `notify_access_details` | `off` | set `on` only to include run-as/session usernames, session source IPs and the worst rejected-login IP in notifications |
 | `alert_min_severity` | `warn` | `crit`, `warn` or `info` |
 | `alert_repeat_hours` | `6` | reminder interval while still firing |
@@ -583,7 +583,7 @@ Keys worth knowing:
 | `cloud_url` | *(empty)* | optional direct-Supabase URL for self-hosters |
 | `cloud_anon_key` | *(empty)* | optional public anon key for direct-Supabase mode |
 | `cloud_portal_url` | `https://www.hyn-view.in` | prints the complete pairing URL |
-| `cloud_push_min` | `5` | minutes between portal pushes |
+| `cloud_push_min` | `10` | minutes between full portal readings; heartbeat/config checks remain one minute |
 | `hide_mount` | `/snap,/var/lib/docker,…` | mount points kept out of the disk panel and alerts |
 
 Themes: `hiway` (default), `nord`, `gruvbox`, `dracula`, `solar`, `mono`. Drop a

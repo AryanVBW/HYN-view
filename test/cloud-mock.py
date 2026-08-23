@@ -7,7 +7,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
 LOG = sys.argv[2]
-state = {"polls": 0, "node_status": "active", "command_queued": False, "command_claimed": False}
+state = {
+    "polls": 0,
+    "node_status": "active",
+    "command_kind": None,
+    "command_claimed": False,
+}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -23,8 +28,9 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"ok")
             return
-        if self.path == "/command/queue":
-            state["command_queued"] = True
+        if self.path in ("/command/queue", "/command/sync"):
+            state["command_kind"] = "sync" if self.path.endswith("/sync") else "update"
+            state["command_claimed"] = False
             self.send_response(200)
             self.send_header("Content-Length", "2")
             self.end_headers()
@@ -121,14 +127,14 @@ class Handler(BaseHTTPRequestHandler):
             if body.get("p_node_token") != "b" * 64:
                 self._error(401, "invalid node token")
                 return
-            if not state["command_queued"] or state["command_claimed"]:
+            if not state["command_kind"] or state["command_claimed"]:
                 output = {"status": "idle"}
             else:
                 state["command_claimed"] = True
                 output = {
                     "status": "command",
                     "id": "4f8b0000-0000-4000-8000-000000000002",
-                    "action": "update",
+                    "action": state["command_kind"],
                     "stage": "accepted",
                 }
         elif function == "hyn_report_node_command":
@@ -140,6 +146,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._error(400, "unknown command")
                 return
             output = {"status": body.get("p_status"), "stage": body.get("p_stage")}
+        elif function == "hyn_queue_web_notification":
+            body = json.loads(raw)
+            if body.get("p_node_token") != "b" * 64:
+                self._error(401, "invalid node token")
+                return
+            event = body.get("p_event") or {}
+            if any(key in event for key in ("recipient", "to", "from", "sender", "email")):
+                self._error(400, "web event cannot select a recipient or sender")
+                return
+            output = {
+                "status": "queued",
+                "id": "5f8c0000-0000-4000-8000-000000000003",
+                "created": True,
+                "fingerprint": event.get("fingerprint"),
+            }
         elif function == "hyn_ingest":
             body = json.loads(raw)
             if body.get("p_node_token") != "b" * 64:
