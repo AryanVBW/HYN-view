@@ -338,6 +338,20 @@ begin
   raise notice 'PASS  approve creates the node';
 end $$;
 
+do $$
+declare first_claim json; second_claim json;
+begin
+  first_claim := public.hyn_claim_device_linked_email((select v from t where k = 'node_id')::uuid);
+  if first_claim->>'status' <> 'send' or first_claim->>'recipient' <> 'alice@example.com' then
+    raise exception 'device-link email was not claimable by its owner: %', first_claim;
+  end if;
+  second_claim := public.hyn_claim_device_linked_email((select v from t where k = 'node_id')::uuid);
+  if second_claim->>'status' <> 'skip' then
+    raise exception 'device-link email could be claimed twice: %', second_claim;
+  end if;
+  raise notice 'PASS  device-link email is owner-scoped and idempotent';
+end $$;
+
 -- The browser must not receive the node token; only the polling server does.
 do $$
 declare r json;
@@ -680,6 +694,21 @@ update public.profiles set role = 'admin' where id = '33333333-3333-3333-3333-33
 -- 9. server-side configuration, pulled by the agent
 -- ---------------------------------------------------------------------------
 set local role postgres;
+
+do $$
+declare v_config jsonb;
+begin
+  select config into v_config from public.nodes
+   where id = (select v from t where k = 'node_id')::uuid;
+  if v_config->>'auto_update' is distinct from 'install' then
+    raise exception 'new nodes do not default to automatic updates: %', v_config;
+  end if;
+  if v_config->>'cloud_push_min' is distinct from '10' then
+    raise exception 'new nodes do not default to ten-minute telemetry: %', v_config;
+  end if;
+  raise notice 'PASS  every newly linked node receives managed sync defaults';
+end $$;
+
 update public.nodes
    set config = '{"alert_mem_pct": 80, "report_at": "07:30"}'::jsonb
  where id = (select v from t where k = 'node_id')::uuid;
@@ -704,6 +733,36 @@ begin
     raise exception 'direct API update stored a local-only notification destination';
   end if;
   raise notice 'PASS  direct API updates reject config keys outside the portal allowlist';
+end $$;
+
+-- The first successful reading queues exactly one detailed system email. The
+-- route claims it using the same node credential that just passed ingest; no
+-- service-role key or cross-tenant browser read is needed.
+do $$
+declare first_claim json; second_claim json;
+begin
+  set local role anon;
+  first_claim := public.hyn_claim_first_telemetry_email(
+    (select v from t where k = 'node_token'), '203.0.113.10'
+  );
+  if first_claim->>'status' <> 'send' then
+    raise exception 'first telemetry email was not claimable: %', first_claim;
+  end if;
+  if first_claim->>'recipient' <> 'alice@example.com' then
+    raise exception 'first telemetry email has the wrong recipient: %', first_claim;
+  end if;
+  if first_claim#>>'{payload,network,public_ip}' <> '203.0.113.10' then
+    raise exception 'first telemetry email omitted the observed public IP: %', first_claim;
+  end if;
+  second_claim := public.hyn_claim_first_telemetry_email(
+    (select v from t where k = 'node_token'), '203.0.113.10'
+  );
+  if second_claim->>'status' <> 'skip' then
+    raise exception 'first telemetry email could be claimed twice: %', second_claim;
+  end if;
+  set local role authenticated;
+  set local "test.uid" = '11111111-1111-1111-1111-111111111111';
+  raise notice 'PASS  first telemetry email is complete and idempotent';
 end $$;
 
 -- Allowed key names are not enough: alert values are later consumed by Bash
@@ -1051,6 +1110,36 @@ begin
     raise exception 'overview should count 1 failure, got %', r->>'notifications_failed_24h';
   end if;
   raise notice 'PASS  admin overview counts clients, nodes and notifications';
+end $$;
+
+do $$
+declare r json;
+begin
+  set local role postgres;
+  update public.nodes
+     set last_seen_at = now() - interval '25 minutes',
+         config = config || '{"cloud_push_min":"10"}'::jsonb
+   where id = (select v from t where k = 'node_id')::uuid;
+  set local role authenticated;
+  set local "test.uid" = '33333333-3333-3333-3333-333333333333';
+  r := public.hyn_admin_overview();
+  if (r->>'nodes_stale')::int <> 0 then
+    raise exception 'ten-minute node was marked quiet before three missed reports: %', r;
+  end if;
+  set local role postgres;
+  update public.nodes set last_seen_at = now() - interval '31 minutes'
+   where id = (select v from t where k = 'node_id')::uuid;
+  set local role authenticated;
+  set local "test.uid" = '33333333-3333-3333-3333-333333333333';
+  r := public.hyn_admin_overview();
+  if (r->>'nodes_stale')::int <> 1 then
+    raise exception 'ten-minute node stayed reporting after three missed reports: %', r;
+  end if;
+  set local role postgres;
+  update public.nodes set last_seen_at = now() where id = (select v from t where k = 'node_id')::uuid;
+  set local role authenticated;
+  set local "test.uid" = '33333333-3333-3333-3333-333333333333';
+  raise notice 'PASS  fleet quiet status follows each node reporting interval';
 end $$;
 
 do $$

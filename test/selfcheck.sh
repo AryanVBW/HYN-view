@@ -217,6 +217,8 @@ done
 
 cfg_load
 eq 'notification access details default off' 'off' "${CFG[notify_access_details]:-missing}"
+eq 'cloud telemetry defaults to ten minutes' '10' "${CFG[cloud_push_min]:-missing}"
+eq 'automatic CLI updates are the default' 'install' "${CFG[auto_update]:-missing}"
 color_detect
 theme_load hiway || { printf 'theme load failed\n' >&2; exit 1; }
 ui_init
@@ -415,6 +417,21 @@ stale_access=$(
   printf '%s' "${CFG[alert_mem_pct]}|${CFG[alert_disk_pct]}|$marker|${CFG[notify_access_details]}|${CFG[webhook_url]}|${CFG[heartbeat_url]}|${CFG[notify_to]}|${CFG[telegram_chat_id]}|${CFG[ntfy_topic]}|${CFG[cloud_url]}|${CFG[interval]}"
 )
 eq 'stale cloud cache applies only validated portal values' '80|85|safe|off|||||||1.0' "$stale_access"
+
+managed_precedence=$(
+  STATE_DIR=''
+  HYN_VAR="$TMP/managed-var" HYN_ETC="$TMP/managed-etc"
+  HOME="$TMP/managed-home" XDG_CONFIG_HOME="$TMP/managed-xdg" HYN_CONFIG=''
+  mkdir -p "$HYN_VAR" "$HYN_ETC" "$XDG_CONFIG_HOME"
+  printf '%s\n' 'cloud_push_min=5' 'auto_update=check' 'interval=3.0' >"$HYN_ETC/config"
+  printf '%s\n' 'cloud_push_min=10' 'auto_update=install' 'interval=0.1' >"$(cloud_config_cache)"
+  CFG[cloud_push_min]=5 CFG[auto_update]=check CFG[interval]=1.0
+  CFG_EXPLICIT=()
+  cfg_load
+  printf '%s' "${CFG[cloud_push_min]}|${CFG[auto_update]}|${CFG[interval]}"
+)
+eq 'portal-owned settings override generated local defaults while local-only settings stay local' \
+  '10|install|3.0' "$managed_precedence"
 
 local_access=$(
   STATE_DIR=''
@@ -1634,12 +1651,39 @@ contains 'payload carries the agent version' "\"agent_version\": \"$HYN_VERSION\
 contains 'payload carries cpu percent'   '"cpu": {"pct":' "$CLOUD_PAYLOAD"
 contains 'payload carries an alerts array' '"alerts": ['   "$CLOUD_PAYLOAD"
 
+# A first-link report must identify the actual connection without requiring a
+# second agent version. These values are collected locally; the gateway adds
+# the public address it observes on the HTTPS request.
+NET_LOCAL_IP='192.168.50.8/24'
+NET_SSID='Office WiFi'
+NET_CONN='office-lan'
+NET_GW='192.168.50.1'
+NET_DNS='1.1.1.1,8.8.8.8'
+cloud_payload_v
+contains 'payload carries local address' '"local_ip": "192.168.50.8/24"' "$CLOUD_PAYLOAD"
+contains 'payload carries wifi name' '"ssid": "Office WiFi"' "$CLOUD_PAYLOAD"
+contains 'payload carries connection name' '"connection": "office-lan"' "$CLOUD_PAYLOAD"
+contains 'payload carries gateway' '"gateway": "192.168.50.1"' "$CLOUD_PAYLOAD"
+contains 'payload carries DNS servers' '"dns": "1.1.1.1,8.8.8.8"' "$CLOUD_PAYLOAD"
+
 # A missing thermal sensor is null, never 0: plotting 0C as a real reading would
 # be inventing data.
 CPU_TEMP=''
 cloud_payload_v
 contains 'absent temperature is null' '"temp_c": null' "$CLOUD_PAYLOAD"
 CPU_TEMP=54
+
+# Linking performs one guarded speed measurement, then sends the complete
+# first reading, then installs the recurring schedule. The speed probe may fail
+# (for example no provider is installed) without preventing telemetry.
+first_sync_calls=$(
+  first_sync_calls=''
+  st_run() { first_sync_calls+='speed>'; return 1; }
+  cloud_push() { first_sync_calls+='push>'; return 0; }
+  cloud_install_schedule() { first_sync_calls+='schedule'; return 0; }
+  if cloud_first_sync; then printf '%s' "$first_sync_calls"; else printf 'failed:%s' "$first_sync_calls"; fi
+)
+eq 'first linked sync measures before push and schedule' 'speed>push>schedule' "$first_sync_calls"
 cloud_payload_v
 contains 'present temperature is a number' '"temp_c": 54' "$CLOUD_PAYLOAD"
 

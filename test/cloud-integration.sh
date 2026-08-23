@@ -137,7 +137,7 @@ contains 'link prints the pairing code'   'QKB8-D6VQ' "$out"
 contains 'link prints the portal URL'     'https://portal.example.com/link' "$out"
 contains 'link waits for approval'        'still waiting for approval' "$out"
 contains 'link confirms the node name'    'web-01' "$out"
-contains 'link sends a verifying push'    'Sending a first push' "$out"
+contains 'link announces the complete first sync' 'Measuring the connection and sending the first full report' "$out"
 contains 'link installs its background schedule' 'test-schedule-installed' "$out"
 truthy 'a pulled update policy is applied in the same check-in' '[[ -f $TMP/update-policy-reconciled ]]'
 

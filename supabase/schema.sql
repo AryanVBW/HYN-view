@@ -1065,6 +1065,15 @@ alter table public.nodes add constraint nodes_config_portal_keys_check check (
   public._hyn_portal_config_valid(config)
 );
 
+-- Managed defaults are stored on the node as well as in the agent so old and
+-- newly installed CLIs receive the same policy on their next one-minute config
+-- check. Existing explicit choices win over these defaults.
+alter table public.nodes alter column config
+  set default '{"auto_update":"install","cloud_push_min":"10"}'::jsonb;
+update public.nodes
+   set config = '{"auto_update":"install","cloud_push_min":"10"}'::jsonb || config
+ where not (config @> '{"auto_update":"install","cloud_push_min":"10"}'::jsonb);
+
 do $$ begin
   alter table public.nodes add constraint nodes_status_check
     check (status in ('active', 'paused', 'suspended'));
@@ -1231,6 +1240,166 @@ create table if not exists public.cloud_email_dispatches (
 );
 alter table public.cloud_email_dispatches enable row level security;
 revoke all on public.cloud_email_dispatches from anon, authenticated;
+
+-- The agent gateway uses the same credential that just completed ingest to
+-- claim one first-telemetry email. This avoids requiring a service-role key in
+-- the public agent route while keeping recipient data scoped to that node.
+create or replace function public.hyn_claim_first_telemetry_email(
+  p_node_token text,
+  p_public_ip text default null
+)
+returns json
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  v_node public.nodes;
+  v_recipient text;
+  v_system_enabled boolean;
+  v_payload jsonb;
+  v_key text;
+begin
+  select * into v_node from public.nodes
+   where token_hash = public._hyn_sha256(p_node_token)
+     and revoked = false and is_demo = false;
+  if not found then raise exception 'invalid node token'; end if;
+
+  select recipient, system_enabled into v_recipient, v_system_enabled
+    from public.email_preferences where node_id = v_node.id;
+  if not found or not coalesce(v_system_enabled, false) then
+    return json_build_object('status', 'skip', 'reason', 'system email disabled');
+  end if;
+
+  select payload into v_payload from public.metrics
+   where node_id = v_node.id order by ts desc limit 1;
+  if not found then
+    return json_build_object('status', 'skip', 'reason', 'awaiting telemetry');
+  end if;
+  v_payload := coalesce(v_payload, '{}'::jsonb);
+  if p_public_ip is not null and octet_length(p_public_ip) <= 64
+     and p_public_ip ~ '^[0-9A-Fa-f:.]+$' then
+    v_payload := jsonb_set(
+      v_payload,
+      '{network}',
+      coalesce(v_payload->'network', '{}'::jsonb) || jsonb_build_object('public_ip', p_public_ip),
+      true
+    );
+  end if;
+
+  v_key := 'first-system:' || v_node.id::text;
+  insert into public.cloud_email_dispatches (idempotency_key, node_id, kind)
+  values (v_key, v_node.id, 'system')
+  on conflict (idempotency_key) do nothing;
+  if not found then
+    return json_build_object('status', 'skip', 'reason', 'already sent');
+  end if;
+
+  return json_build_object(
+    'status', 'send',
+    'idempotency_key', v_key,
+    'node_id', v_node.id,
+    'node_name', v_node.name,
+    'hostname', v_node.hostname,
+    'os', v_node.os,
+    'agent_version', v_node.agent_version,
+    'last_seen_at', v_node.last_seen_at,
+    'recipient', v_recipient,
+    'payload', v_payload
+  );
+end;
+$$;
+
+create or replace function public.hyn_complete_first_telemetry_email(
+  p_node_token text,
+  p_provider_id text default null
+)
+returns json
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare v_node public.nodes; v_key text;
+begin
+  select * into v_node from public.nodes
+   where token_hash = public._hyn_sha256(p_node_token) and revoked = false;
+  if not found then raise exception 'invalid node token'; end if;
+  v_key := 'first-system:' || v_node.id::text;
+  update public.cloud_email_dispatches
+     set provider_id = left(nullif(p_provider_id, ''), 200)
+   where idempotency_key = v_key and node_id = v_node.id;
+  return json_build_object('status', 'ok');
+end;
+$$;
+
+create or replace function public.hyn_release_first_telemetry_email(p_node_token text)
+returns json
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare v_node public.nodes; v_key text;
+begin
+  select * into v_node from public.nodes
+   where token_hash = public._hyn_sha256(p_node_token) and revoked = false;
+  if not found then raise exception 'invalid node token'; end if;
+  v_key := 'first-system:' || v_node.id::text;
+  delete from public.cloud_email_dispatches
+   where idempotency_key = v_key and node_id = v_node.id and provider_id is null;
+  return json_build_object('status', 'ok');
+end;
+$$;
+
+create or replace function public.hyn_claim_device_linked_email(p_node_id uuid)
+returns json
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare v_node public.nodes; v_recipient text; v_key text;
+begin
+  if auth.uid() is null then raise exception 'not authenticated'; end if;
+  select * into v_node from public.nodes
+   where id = p_node_id and owner = auth.uid() and revoked = false and is_demo = false;
+  if not found then raise exception 'node not found'; end if;
+  select recipient into v_recipient from public.email_preferences where node_id = v_node.id;
+  if not found then return json_build_object('status', 'skip', 'reason', 'email preference missing'); end if;
+  v_key := 'device-linked:' || v_node.id::text;
+  insert into public.cloud_email_dispatches (idempotency_key, node_id, kind)
+  values (v_key, v_node.id, 'system') on conflict (idempotency_key) do nothing;
+  if not found then return json_build_object('status', 'skip', 'reason', 'already sent'); end if;
+  return json_build_object(
+    'status', 'send', 'node_id', v_node.id, 'node_name', v_node.name,
+    'hostname', v_node.hostname, 'os', v_node.os, 'agent_version', v_node.agent_version,
+    'recipient', v_recipient, 'linked_at', v_node.created_at
+  );
+end;
+$$;
+
+create or replace function public.hyn_complete_device_linked_email(p_node_id uuid, p_provider_id text default null)
+returns json language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null or not exists (
+    select 1 from public.nodes where id = p_node_id and owner = auth.uid()
+  ) then raise exception 'node not found'; end if;
+  update public.cloud_email_dispatches set provider_id = left(nullif(p_provider_id, ''), 200)
+   where idempotency_key = 'device-linked:' || p_node_id::text and node_id = p_node_id;
+  return json_build_object('status', 'ok');
+end;
+$$;
+
+create or replace function public.hyn_release_device_linked_email(p_node_id uuid)
+returns json language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null or not exists (
+    select 1 from public.nodes where id = p_node_id and owner = auth.uid()
+  ) then raise exception 'node not found'; end if;
+  delete from public.cloud_email_dispatches
+   where idempotency_key = 'device-linked:' || p_node_id::text
+     and node_id = p_node_id and provider_id is null;
+  return json_build_object('status', 'ok');
+end;
+$$;
 
 -- ---------------------------------------------------------------------------
 -- cross-tenant read access for administrators
@@ -1442,7 +1611,12 @@ begin
     -- that it went quiet.
     'nodes_stale',       (select count(*) from public.nodes
                            where is_demo = false and revoked = false and status = 'active'
-                             and (last_seen_at is null or last_seen_at < now() - interval '15 minutes')),
+                             and (last_seen_at is null or last_seen_at < now() - make_interval(
+                               mins => greatest(15, 3 * case
+                                 when config->>'cloud_push_min' ~ '^[1-9][0-9]{0,3}$'
+                                   then (config->>'cloud_push_min')::integer
+                                 else 10 end
+                             )))),
     'alerts_open',       (select count(*) from public.alert_events where resolved = false
                             and ts > now() - interval '7 days'),
     'notifications_24h', (select count(*) from public.notification_log where ts > now() - interval '24 hours'),
@@ -1469,7 +1643,7 @@ begin
     from (
       select n.id, n.name, n.hostname, n.os, n.agent_version, n.status,
              n.paused_until, n.status_reason, n.revoked, n.is_demo,
-             n.created_at, n.last_seen_at, n.last_config_pull_at,
+             n.created_at, n.last_seen_at, n.last_config_pull_at, n.config,
              p.id as owner_id, p.email as owner_email, p.status as owner_status,
              p.role as owner_role,
              (select count(*) from public.notification_log l
@@ -1828,8 +2002,20 @@ grant execute on function public.hyn_demo_clear() to authenticated;
 -- Agent-facing, authenticated by node token rather than by session.
 revoke all on function public.hyn_fetch_config(text) from public;
 revoke all on function public.hyn_report_notification(text, jsonb) from public;
+revoke all on function public.hyn_claim_first_telemetry_email(text, text) from public;
+revoke all on function public.hyn_complete_first_telemetry_email(text, text) from public;
+revoke all on function public.hyn_release_first_telemetry_email(text) from public;
+revoke all on function public.hyn_claim_device_linked_email(uuid) from public;
+revoke all on function public.hyn_complete_device_linked_email(uuid, text) from public;
+revoke all on function public.hyn_release_device_linked_email(uuid) from public;
 grant execute on function public.hyn_fetch_config(text) to anon, authenticated;
 grant execute on function public.hyn_report_notification(text, jsonb) to anon, authenticated;
+grant execute on function public.hyn_claim_first_telemetry_email(text, text) to anon, authenticated;
+grant execute on function public.hyn_complete_first_telemetry_email(text, text) to anon, authenticated;
+grant execute on function public.hyn_release_first_telemetry_email(text) to anon, authenticated;
+grant execute on function public.hyn_claim_device_linked_email(uuid) to authenticated;
+grant execute on function public.hyn_complete_device_linked_email(uuid, text) to authenticated;
+grant execute on function public.hyn_release_device_linked_email(uuid) to authenticated;
 
 -- Session-facing helpers.
 revoke all on function public.hyn_is_admin() from public;

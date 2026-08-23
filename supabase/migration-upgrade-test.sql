@@ -50,7 +50,7 @@ declare
 begin
   select config into v_config from public.nodes
    where owner = '66666666-6666-6666-6666-666666666666';
-  if v_config <> '{"alert_mem_pct":"81","report_at":"06:15"}'::jsonb then
+  if v_config <> '{"alert_mem_pct":"81","report_at":"06:15","auto_update":"install","cloud_push_min":"10"}'::jsonb then
     raise exception 'upgrade did not remove unsafe legacy config keys: %', v_config;
   end if;
 

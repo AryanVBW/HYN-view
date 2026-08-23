@@ -279,6 +279,11 @@ cloud_payload_v() {
   done
   p+=']}'
   p+=", \"network\": {\"iface\": \"$(_jstr "$iface")\""
+  p+=", \"local_ip\": \"$(_jstr "${NET_LOCAL_IP:-}")\""
+  p+=", \"ssid\": \"$(_jstr "${NET_SSID:-}")\""
+  p+=", \"connection\": \"$(_jstr "${NET_CONN:-}")\""
+  p+=", \"gateway\": \"$(_jstr "${NET_GW:-}")\""
+  p+=", \"dns\": \"$(_jstr "${NET_DNS:-}")\""
   p+=", \"rx_bps\": $(_jnum "${NET_RXR[$iface]:-0}" 0)"
   p+=", \"tx_bps\": $(_jnum "${NET_TXR[$iface]:-0}" 0)"
   p+=", \"rx_total\": $(_jnum "${NET_RX[$iface]:-0}" 0)"
@@ -461,8 +466,9 @@ cloud_push() {
 
   # A check-in is also the node's opportunity to receive dashboard-managed
   # settings and email presentation. Reload CFG after a successful pull so the
-  # new values affect this same cycle; a local config file still wins because
-  # cfg_load deliberately reads it after the portal cache.
+  # new values affect this same cycle. Only the narrow portal allowlist wins;
+  # endpoints, credentials, privacy choices and all other local settings remain
+  # controlled by the root-owned files.
   if cloud_config_pull 1; then
     cfg_load
     # A portal change to auto_update should take effect on this check-in, not
@@ -474,8 +480,8 @@ cloud_push() {
   # The timer wakes every minute so a dashboard change is picked up quickly.
   # Expensive collection and ingestion still happen only at cloud_push_min.
   if ((respect_interval)); then
-    local prior_ts='' prior_status='' prior_error='' interval=${CFG[cloud_push_min]:-5}
-    [[ $interval =~ ^[1-9][0-9]*$ ]] || interval=5
+    local prior_ts='' prior_status='' prior_error='' interval=${CFG[cloud_push_min]:-10}
+    [[ $interval =~ ^[1-9][0-9]*$ ]] || interval=10
     local prior_stamp
     prior_stamp=$(_cloud_push_stamp)
     [[ -r $prior_stamp ]] && IFS=$'\t' read -r prior_ts prior_status prior_error <"$prior_stamp"
@@ -496,6 +502,7 @@ cloud_push() {
   # control the Highway panel reports), and the top processes. Process CPU is a
   # rate, so it needs two samples a second apart like any other.
   net_link "${NET_WAN:-}" 2>/dev/null || true
+  net_identity 1 2>/dev/null || true
   net_tuning 2>/dev/null || true
   local prows=${CFG[proc_rows]:-8} psort=${CFG[proc_sort]:-cpu}
   proc_sample 0 "$prows" "$psort" 2>/dev/null || true
@@ -666,22 +673,29 @@ cloud_link() {
   printf '  Token stored in %s (mode 0600).\n' "$(secrets_path)"
   printf '\n'
 
-  # Prove the credential works now, rather than leaving the operator to discover
-  # at 3am that pairing succeeded but ingest was never authorised.
-  printf '  Sending a first push… '
-  if cloud_push 1; then
+  # Prove the credential and the full collection path now. The initial bounded
+  # speed test is best-effort; a missing provider must not block core telemetry.
+  printf '  Measuring the connection and sending the first full report… '
+  if cloud_first_sync; then
     printf 'ok\n'
-    if cloud_install_schedule; then
-      printf '\n  Background monitoring is configured. Future dashboard changes apply on check-in.\n\n'
-    else
-      warn 'linked successfully, but the background schedule could not be installed; run: sudo hyn setup --no-wizard'
-      return 1
-    fi
+    printf '\n  Background monitoring is configured. Settings are checked every minute; full readings follow the Account interval.\n\n'
   else
     printf 'failed\n'
-    warn "the node is linked but the first push failed: $CLOUD_LAST_ERR"
+    warn "the node is linked but the first synchronization failed: $CLOUD_LAST_ERR"
     return 1
   fi
+  return 0
+}
+
+# First-link orchestration is kept separate so the package can prove the order:
+# bounded speed measurement, full telemetry, then recurring schedule.
+cloud_first_sync() {
+  st_run 0 >/dev/null 2>&1 || true
+  cloud_push 1 || return 1
+  cloud_install_schedule || {
+    warn 'linked successfully, but the background schedule could not be installed; run: sudo hyn setup --no-wizard'
+    return 1
+  }
   return 0
 }
 
@@ -692,11 +706,10 @@ cloud_link() {
 # hand-edited file to be correct. What stays local is only what is needed to
 # reach the API at all: the project URL, the public anon key and the node token.
 #
-# Pulled settings land in a cache file that cfg_load reads BEFORE the local
-# config, so a deliberate local line still wins. That ordering is the important
-# part: central management should not silently override an operator who has
-# edited a box for a reason, and a cache that outranks explicit local config
-# would be impossible to debug at 3am with no network.
+# Pulled settings land in a cache file that cfg_load applies after local files,
+# but only for the narrow `_cfg_cloud_allowed` set. This makes Account the source
+# of truth for managed thresholds and schedules without allowing the portal to
+# touch endpoints, credentials, privacy choices or other local-only settings.
 cloud_config_cache() {
   state_dir_v
   printf '%s/cloud-config' "$STATE_DIR"
