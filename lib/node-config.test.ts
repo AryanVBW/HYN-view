@@ -22,3 +22,13 @@ test("clearing an account field removes the override", () => {
     { cloud_push_min: "10" },
   );
 });
+
+test("editing one field drops invalid legacy values that would violate the node constraint", () => {
+  assert.deepEqual(
+    mergePortalConfig(
+      { cloud_push_min: "0", report_at: "99:99", alert_disk_pct: "08", auto_update: "install" },
+      { alert_mem_pct: "85" },
+    ),
+    { auto_update: "install", alert_mem_pct: "85" },
+  );
+});

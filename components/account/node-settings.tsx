@@ -86,7 +86,10 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
     setSaved(false);
     const merged = mergePortalConfig(node.config ?? {}, draft);
     const supabase = createClient();
-    const { error } = await supabase.from("nodes").update({ config: merged }).eq("id", node.id);
+    const { error } = await supabase.rpc("hyn_update_node_config", {
+      p_node_id: node.id,
+      p_config: merged,
+    });
     setBusy(false);
     if (error) {
       setError(error.message);

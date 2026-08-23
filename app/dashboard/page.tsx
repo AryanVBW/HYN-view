@@ -12,6 +12,7 @@ import { HealthPanel } from "@/components/dashboard/uptime-panel";
 import { ServerDetailsPanel } from "@/components/dashboard/server-details";
 import { EventLog } from "@/components/dashboard/event-log";
 import { AgentUpdateControl } from "@/components/dashboard/agent-update-control";
+import { HeartbeatIndicator } from "@/components/dashboard/heartbeat-indicator";
 import { DemoDataButton } from "@/components/dashboard/demo-data-button";
 import { LiveRefresh } from "@/components/live-refresh";
 import { AwaitingFirstPushState, NoNodesState } from "@/components/dashboard/empty-states";
@@ -27,8 +28,8 @@ import {
   toSpeedSeries,
   toTempSeries,
 } from "@/lib/dashboard-data";
-import { fleetFreshness } from "@/lib/admin-data";
-import { readAgentRelease } from "@/lib/node-update";
+import { heartbeatState } from "@/lib/heartbeat";
+import { readAgentRelease } from "@/lib/node-command";
 
 export const metadata: Metadata = {
   title: "Dashboard / HYN-view",
@@ -145,7 +146,8 @@ export default async function DashboardPage({
   }
 
   const latest = metrics[metrics.length - 1];
-  const freshness = fleetFreshness(node);
+  const durableHeartbeat = node.last_heartbeat_at ?? node.last_config_pull_at ?? node.last_seen_at;
+  const heartbeat = heartbeatState(durableHeartbeat);
   const agentRelease = readAgentRelease(latest.payload);
 
   return (
@@ -179,15 +181,8 @@ export default async function DashboardPage({
               <span className="flex w-fit items-center gap-2 rounded-full border border-destructive/50 bg-destructive/10 px-3 py-1.5 font-mono text-xs uppercase text-destructive">
                 suspended
               </span>
-            ) : freshness.key === "quiet" ? (
-              <span className="flex w-fit items-center gap-2 rounded-full border border-destructive/50 bg-destructive/10 px-3 py-1.5 font-mono text-xs uppercase text-destructive">
-                gone quiet · {freshness.label}
-              </span>
             ) : (
-              <span className={`flex w-fit items-center gap-2 rounded-full border border-primary/40 px-3 py-1.5 font-mono text-xs uppercase ${freshness.tone}`}>
-                <span className="size-1.5 animate-pulse rounded-full bg-current" />
-                {freshness.label}
-              </span>
+              <HeartbeatIndicator heartbeatAt={durableHeartbeat} />
             )}
             {node.is_demo ? <DemoDataButton mode="clear" /> : null}
           </div>
@@ -214,12 +209,12 @@ export default async function DashboardPage({
           </p>
         ) : null}
 
-        {node.status === "active" && freshness.key === "quiet" && !node.is_demo ? (
+        {node.status === "active" && heartbeat.key === "quiet" && !node.is_demo ? (
           <p className="border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs leading-6 text-destructive">
             This machine missed three configured telemetry intervals. HYN-view retries every
             minute; the charts show the last received values. A portal update will run as soon
-            as the machine checks in. To recover it now, run <code>sudo hyn doctor</code> and{" "}
-            <code>sudo systemctl restart hyn-push.timer</code> on the server.
+            as the machine checks in. On the server, run <code>sudo hyn doctor</code> and{" "}
+            <code>systemctl status hyn-push.timer</code>.
           </p>
         ) : null}
 
