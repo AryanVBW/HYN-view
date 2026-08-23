@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server";
-import { start } from "workflow/api";
 import { createClient } from "@/lib/supabase/server";
 import { NODE_COMMAND_COLUMNS, normalizeNodeCommand } from "@/lib/node-command";
-import { monitorNodeUpdate } from "@/workflows/node-update";
 
 export const runtime = "nodejs";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -20,12 +18,11 @@ export async function GET(request: Request) {
   }
   const { supabase, user } = await authenticatedClient();
   if (!user) return NextResponse.json({ message: "not authenticated" }, { status: 401 });
-
   const { data, error } = await supabase
     .from("node_commands")
     .select(NODE_COMMAND_COLUMNS)
     .eq("node_id", nodeId)
-    .eq("command", "update")
+    .eq("command", "sync")
     .order("requested_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -43,32 +40,16 @@ export async function POST(request: Request) {
   }
   const { supabase, user } = await authenticatedClient();
   if (!user) return NextResponse.json({ message: "not authenticated" }, { status: 401 });
-
   const { data, error } = await supabase.rpc("hyn_request_node_command", {
     p_node_id: nodeId,
-    p_command: "update",
+    p_command: "sync",
   });
   if (error) return NextResponse.json({ message: error.message }, { status: 400 });
-  const raw = data as Record<string, unknown> | null;
-  const command = normalizeNodeCommand(raw);
+  const command = normalizeNodeCommand(data);
   if (!command) {
-    return NextResponse.json({ message: "the update request returned an invalid response" }, { status: 502 });
+    return NextResponse.json({ message: "the sync request returned an invalid response" }, { status: 502 });
   }
-
-  let workflowRunId: string | null = null;
-  if (raw?.created === true) {
-    try {
-      const run = await start(monitorNodeUpdate, [command.id]);
-      workflowRunId = run.runId;
-    } catch (workflowError) {
-      // The database command remains valid and the agent can still complete it.
-      // Log the watchdog failure without turning an accepted update into a UI
-      // error or asking the user to create a duplicate command.
-      console.error("[node-update] could not start timeout monitor", workflowError);
-    }
-  }
-
-  return NextResponse.json({ command, workflowRunId }, {
+  return NextResponse.json({ command }, {
     status: 202,
     headers: { "Cache-Control": "no-store" },
   });

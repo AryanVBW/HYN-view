@@ -1,0 +1,70 @@
+import { NextResponse } from "next/server";
+import { createClient } from "@/lib/supabase/server";
+import {
+  type CommandKind,
+  NODE_COMMAND_COLUMNS,
+  normalizeNodeCommand,
+} from "@/lib/node-command";
+
+export const runtime = "nodejs";
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function kind(value: unknown): CommandKind | null {
+  return value === "sync" || value === "update" ? value : null;
+}
+
+async function authenticatedClient() {
+  const supabase = await createClient();
+  const { data: auth } = await supabase.auth.getUser();
+  return { supabase, user: auth.user };
+}
+
+export async function GET(request: Request) {
+  const query = new URL(request.url).searchParams;
+  const nodeId = query.get("nodeId") ?? "";
+  const commandKind = kind(query.get("command"));
+  if (!UUID.test(nodeId) || !commandKind) {
+    return NextResponse.json({ message: "a valid node id and command are required" }, { status: 400 });
+  }
+  const { supabase, user } = await authenticatedClient();
+  if (!user) return NextResponse.json({ message: "not authenticated" }, { status: 401 });
+  const { data, error } = await supabase
+    .from("node_commands")
+    .select(NODE_COMMAND_COLUMNS)
+    .eq("node_id", nodeId)
+    .eq("command", commandKind)
+    .order("requested_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) return NextResponse.json({ message: error.message }, { status: 403 });
+  return NextResponse.json({ command: normalizeNodeCommand(data) }, {
+    headers: { "Cache-Control": "no-store" },
+  });
+}
+
+export async function POST(request: Request) {
+  const body = await request.json().catch(() => null) as {
+    nodeId?: string;
+    command?: string;
+  } | null;
+  const nodeId = body?.nodeId ?? "";
+  const commandKind = kind(body?.command);
+  if (!UUID.test(nodeId) || !commandKind) {
+    return NextResponse.json({ message: "a valid node id and command are required" }, { status: 400 });
+  }
+  const { supabase, user } = await authenticatedClient();
+  if (!user) return NextResponse.json({ message: "not authenticated" }, { status: 401 });
+  const { data, error } = await supabase.rpc("hyn_admin_request_node_command", {
+    p_node_id: nodeId,
+    p_command: commandKind,
+  });
+  if (error) return NextResponse.json({ message: error.message }, { status: 403 });
+  const command = normalizeNodeCommand(data);
+  if (!command) {
+    return NextResponse.json({ message: "the command request returned an invalid response" }, { status: 502 });
+  }
+  return NextResponse.json({ command }, {
+    status: 202,
+    headers: { "Cache-Control": "no-store" },
+  });
+}
