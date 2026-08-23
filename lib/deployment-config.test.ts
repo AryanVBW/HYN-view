@@ -25,3 +25,11 @@ test("production cron schedules are deployable on the Vercel Hobby plan", () => 
     );
   }
 });
+
+test("Vercel Workflow endpoints bypass the authentication proxy", () => {
+  const proxy = readFileSync(new URL("../proxy.ts", import.meta.url), "utf8");
+  const nextConfig = readFileSync(new URL("../next.config.ts", import.meta.url), "utf8");
+
+  assert.match(proxy, /\.well-known\/workflow\//);
+  assert.match(nextConfig, /withWorkflow\(nextConfig\)/);
+});

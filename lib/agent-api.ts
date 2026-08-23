@@ -6,6 +6,8 @@ const AGENT_RPCS = new Set([
   "hyn_ingest",
   "hyn_fetch_config",
   "hyn_report_notification",
+  "hyn_claim_node_command",
+  "hyn_report_node_command",
 ]);
 
 export function agentRpcForAction(action: string): string | null {

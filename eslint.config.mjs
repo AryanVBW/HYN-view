@@ -11,6 +11,7 @@ const eslintConfig = defineConfig([
     ".vercel/**",
     "out/**",
     "build/**",
+    "app/.well-known/workflow/**",
     "three-effect/**",
     "next-env.d.ts",
   ]),
