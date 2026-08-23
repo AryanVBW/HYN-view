@@ -77,6 +77,11 @@ net_tuning() { :; }
 # boundary; process collection itself is covered by test/selfcheck.sh.
 proc_sample() { :; }
 is_root() { return 0; }
+# Linking is expected to finish the background integration itself. The real
+# systemd writer is covered by selfcheck; this boundary test proves the pairing
+# flow invokes it after the credential has been verified.
+cloud_install_schedule() { printf 'test-schedule-installed\n'; }
+update_startup() { : >"$TMP/update-policy-reconciled"; }
 
 HOSTNAME_S=web-01 DISTRO='Ubuntu 24.04 LTS' KERNEL='6.8.0-31-generic'
 UPTIME_S=123456 LOAD1=0.42 LOAD5=0.31 LOAD15=0.28
@@ -133,6 +138,8 @@ contains 'link prints the portal URL'     'https://portal.example.com/link' "$ou
 contains 'link waits for approval'        'still waiting for approval' "$out"
 contains 'link confirms the node name'    'web-01' "$out"
 contains 'link sends a verifying push'    'Sending a first push' "$out"
+contains 'link installs its background schedule' 'test-schedule-installed' "$out"
+truthy 'a pulled update policy is applied in the same check-in' '[[ -f $TMP/update-policy-reconciled ]]'
 
 # cloud_link ran inside a command substitution to capture its output, so its
 # in-memory config changes stayed in that subshell. Reload from disk, which is
@@ -144,6 +151,7 @@ SECRETS_LOADED=0
 eq 'node token is stored'  "$(printf 'b%.0s' {1..64})" "$(secret cloud_node_token)"
 eq 'node id is stored'     '3f7a0000-0000-4000-8000-000000000001' "${CFG[cloud_node_id]}"
 eq 'cloud is enabled'      'on' "${CFG[cloud_enabled]}"
+eq 'dashboard controls the update policy' 'install' "${CFG[auto_update]}"
 truthy 'secrets file is 0600' '[[ $(stat -f "%Lp" "$HYN_ETC/secrets" 2>/dev/null || stat -c "%a" "$HYN_ETC/secrets") == 600 ]]'
 
 # The anon key is public and belongs in the config; the token never does.
@@ -361,6 +369,17 @@ contains 'status shows a push time'  'last push'       "$st"
 
 truthy 'push succeeds when linked' 'cloud_push 1'
 
+# The system timer wakes every minute so dashboard config changes are fetched
+# promptly, but collection/ingest still honours the per-node push interval.
+before_ingest=$(grep -c hyn_ingest "$REQLOG")
+truthy 'scheduled push exits cleanly before its interval' 'cloud_push 1 1'
+after_ingest=$(grep -c hyn_ingest "$REQLOG")
+eq 'scheduled push does not collect early' "$before_ingest" "$after_ingest"
+printf '%s\tok\n' "$((EPOCHSECONDS - 600))" >"$(_cloud_push_stamp)"
+truthy 'scheduled push sends after its interval' 'cloud_push 1 1'
+after_due_ingest=$(grep -c hyn_ingest "$REQLOG")
+eq 'due scheduled push reaches ingest' "$((before_ingest + 1))" "$after_due_ingest"
+
 # A bad token must surface as a failure, not a silent success.
 secret_set cloud_node_token 'wrong-token' >/dev/null
 SECRETS_LOADED=0
@@ -378,14 +397,38 @@ SECRETS_LOADED=0
 eq 'token is gone after unlink' '' "$(secret cloud_node_token)"
 eq 'cloud disabled after unlink' 'off' "${CFG[cloud_enabled]}"
 
-# Refusing to run without configuration beats sending requests into the void.
+# Hosted pairing is the normal customer path: no Supabase prompt and no CLI
+# flags. The common API configuration belongs to the deployed portal.
+CFG[cloud_api_url]="http://127.0.0.1:$PORT/api/agent/v1"
+CFG[cloud_portal_url]='https://www.hyn-view.in'
 CFG[cloud_url]='' CFG[cloud_anon_key]=''
+out=$(cloud_link 2>&1)
+rc=$?
+eq 'zero-config hosted link succeeds' 0 "$rc"
+missing 'hosted link does not ask for a Supabase URL' 'Supabase project URL' "$out"
+missing 'hosted link does not ask for an anon key' 'Supabase anon key' "$out"
+contains 'hosted link prints the product pairing page' 'https://www.hyn-view.in/link' "$out"
+SECRETS_LOADED=0
+truthy 'hosted link stores a node token' '[[ -n $(secret cloud_node_token) ]]'
+cloud_unlink >/dev/null
+SECRETS_LOADED=0
+
+# A hosted install uses the branded API without asking the operator for a
+# Supabase URL or public key. This is the path a fresh npm install takes.
+CFG[cloud_url]='' CFG[cloud_anon_key]=''
+CFG[cloud_api_url]="http://127.0.0.1:$PORT/api/agent/v1"
+truthy 'hosted API works without Supabase configuration' '_cloud_rpc hyn_device_start "{}"'
+reqs=$(<"$REQLOG")
+contains 'hosted API route is used' '/api/agent/v1/hyn_device_start' "$reqs"
+
+# An explicit empty hosted endpoint disables that default and must fail clearly.
+CFG[cloud_api_url]=''
 if _cloud_rpc hyn_ingest '{}' 2>/dev/null; then
   bad 'an unconfigured rpc call should fail'
 else
   ok
 fi
-contains 'unconfigured error is clear' 'cloud_url is not set' "$CLOUD_LAST_ERR"
+contains 'unconfigured error is clear' 'cloud API URL is not set' "$CLOUD_LAST_ERR"
 
 # A node token in a request body over http would cross every hop in the clear.
 # Loopback stays allowed -- it is how this test reaches its own mock, and a

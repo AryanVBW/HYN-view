@@ -342,10 +342,10 @@ setup_timers() {
   # as fresh as this timer, and a 5 minute lag is what the report timer already
   # accepts as the resolution worth keeping.
   _write_unit /etc/systemd/system/hyn-push.service \
-    "$(_generic_service 'hyn-view web portal push' "$exe push")"
+    "$(_generic_service 'hyn-view web portal push' "$exe push --scheduled")"
   _write_unit /etc/systemd/system/hyn-push.timer \
     "$(_generic_timer 'hyn-view web portal push' \
-      "OnBootSec=4min"$'\n'"OnUnitActiveSec=${CFG[cloud_push_min]}min" 'hyn-push.service' 30)"
+      "OnBootSec=1min"$'\n'"OnUnitActiveSec=1min" 'hyn-push.service' 15)"
 
   systemctl daemon-reload
   setup_apply_schedule "$exe"

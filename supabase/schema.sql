@@ -1034,6 +1034,8 @@ begin
         if v::integer > 1440 then return false; end if;
       when e.key = 'alert_min_severity' then
         if v not in ('crit', 'warn', 'info') then return false; end if;
+      when e.key = 'auto_update' then
+        if v not in ('install', 'check', 'off') then return false; end if;
       when e.key = 'report_at' then
         if v !~ '^([01][0-9]|2[0-3]):[0-5][0-9]$' then return false; end if;
       else return false;
@@ -1052,7 +1054,8 @@ update public.nodes n
       where e.key = any (array[
         'alert_mem_pct', 'alert_disk_pct', 'alert_temp_c',
         'alert_load_per_core', 'alert_latency_ms', 'alert_min_severity',
-        'alert_repeat_hours', 'report_at', 'notify_max_per_day', 'cloud_push_min'
+        'alert_repeat_hours', 'report_at', 'notify_max_per_day', 'cloud_push_min',
+        'auto_update'
       ]::text[])
         and public._hyn_portal_config_valid(jsonb_build_object(e.key, e.value))
    ), '{}'::jsonb);
@@ -1140,7 +1143,7 @@ create policy admin_audit_select_admin on public.admin_audit
 -- the generated alert or report. {{content}} is mandatory so a template can
 -- never silently discard the incident details it is supposed to deliver.
 create table if not exists public.notification_templates (
-  template_key  text primary key check (template_key in ('alert', 'report')),
+  template_key  text primary key check (template_key in ('alert', 'report', 'system')),
   name          text not null,
   description   text not null,
   html_template text not null check (
@@ -1151,14 +1154,83 @@ create table if not exists public.notification_templates (
   updated_by    uuid references public.profiles (id) on delete set null
 );
 
+alter table public.notification_templates
+  drop constraint if exists notification_templates_template_key_check;
+alter table public.notification_templates
+  add constraint notification_templates_template_key_check
+  check (template_key in ('alert', 'report', 'system'));
+
 insert into public.notification_templates (template_key, name, description, html_template)
 values
   ('alert', 'Incident alert', 'Wraps new, ongoing, and resolved alert digests.', '{{content}}'),
-  ('report', 'Daily report', 'Wraps the scheduled daily system report.', '{{content}}')
+  ('report', 'Daily health digest', 'Wraps the scheduled 24-hour performance digest.', '{{content}}'),
+  ('system', 'System information', 'Wraps the scheduled hardware, software, and service inventory.', '{{content}}')
 on conflict (template_key) do nothing;
 
 alter table public.notification_templates enable row level security;
 revoke all on public.notification_templates from anon, authenticated;
+
+-- Customer-managed schedules for cloud-delivered email. Provider credentials
+-- are deployment secrets and never appear here.
+create table if not exists public.email_preferences (
+  node_id                uuid primary key references public.nodes (id) on delete cascade,
+  recipient              text not null check (recipient ~* '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$'),
+  timezone               text not null default 'UTC' check (octet_length(timezone) between 1 and 80),
+  incident_enabled       boolean not null default true,
+  daily_enabled          boolean not null default true,
+  daily_at               time not null default '08:00',
+  system_enabled         boolean not null default true,
+  system_at              time not null default '09:00',
+  last_daily_local_date  date,
+  last_system_local_date date,
+  last_alert_id          bigint not null default 0,
+  updated_at             timestamptz not null default now()
+);
+
+alter table public.email_preferences enable row level security;
+drop policy if exists email_preferences_select_own on public.email_preferences;
+create policy email_preferences_select_own on public.email_preferences
+  for select using (exists (select 1 from public.nodes n where n.id = email_preferences.node_id and n.owner = auth.uid()));
+drop policy if exists email_preferences_insert_own on public.email_preferences;
+create policy email_preferences_insert_own on public.email_preferences
+  for insert with check (exists (select 1 from public.nodes n where n.id = email_preferences.node_id and n.owner = auth.uid()));
+drop policy if exists email_preferences_update_own on public.email_preferences;
+create policy email_preferences_update_own on public.email_preferences
+  for update using (exists (select 1 from public.nodes n where n.id = email_preferences.node_id and n.owner = auth.uid()))
+  with check (exists (select 1 from public.nodes n where n.id = email_preferences.node_id and n.owner = auth.uid()));
+
+create or replace function public._hyn_create_email_preferences()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if new.is_demo = false then
+    insert into public.email_preferences (node_id, recipient)
+      select new.id, p.email from public.profiles p
+       where p.id = new.owner and p.email is not null
+    on conflict (node_id) do nothing;
+  end if;
+  return new;
+end;
+$$;
+drop trigger if exists hyn_node_email_preferences on public.nodes;
+create trigger hyn_node_email_preferences after insert on public.nodes
+  for each row execute function public._hyn_create_email_preferences();
+
+insert into public.email_preferences (node_id, recipient)
+select n.id, p.email from public.nodes n join public.profiles p on p.id = n.owner
+ where n.is_demo = false and p.email is not null
+on conflict (node_id) do nothing;
+
+-- Prevent overlapping cron invocations from sending a message twice. Browser
+-- sessions cannot access this internal ledger.
+create table if not exists public.cloud_email_dispatches (
+  idempotency_key text primary key,
+  node_id         uuid not null references public.nodes (id) on delete cascade,
+  kind            text not null check (kind in ('alert', 'report', 'system')),
+  created_at      timestamptz not null default now(),
+  provider_id     text
+);
+alter table public.cloud_email_dispatches enable row level security;
+revoke all on public.cloud_email_dispatches from anon, authenticated;
 
 -- ---------------------------------------------------------------------------
 -- cross-tenant read access for administrators
@@ -1700,7 +1772,7 @@ as $$
 declare v_actor uuid;
 begin
   v_actor := public._hyn_require_admin();
-  if p_template_key not in ('alert', 'report') then
+  if p_template_key not in ('alert', 'report', 'system') then
     raise exception 'unknown notification template: %', p_template_key;
   end if;
   if position('{{content}}' in coalesce(p_html_template, '')) = 0 then
@@ -1835,6 +1907,7 @@ grant update (config) on public.nodes to authenticated;
 grant select on public.profiles          to authenticated;
 grant select on public.notification_log  to authenticated;
 grant select on public.admin_audit       to authenticated;
+grant select, insert, update, delete on public.email_preferences to authenticated;
 
 -- A client may edit their display name only. role and status are deliberately
 -- absent: changing those goes through the admin RPCs so it lands in the audit

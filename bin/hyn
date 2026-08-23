@@ -954,11 +954,12 @@ main() {
     alerts | alert) cmd_alerts "$@" ;;
     link | pair) cloud_link "$@" ;;
     unlink) cloud_unlink "$@" ;;
-    push) cloud_push 0 ;;
+    push)
+      if [[ ${1:-} == --scheduled ]]; then cloud_push 0 1; else cloud_push 0 0; fi ;;
     cloud)
       case ${1:-status} in
         status | '') cloud_status ;;
-        push) cloud_push 0 ;;
+        push) cloud_push 0 0 ;;
         pull | config) cloud_config_pull 0 ;;
         report | flush) cloud_notify_flush 0 ;;
         link) shift; cloud_link "$@" ;;
