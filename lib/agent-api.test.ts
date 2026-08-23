@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { agentRpcForAction, MAX_AGENT_BODY_BYTES } from "./agent-api.ts";
+import {
+  agentRpcForAction,
+  enrichIngestWithPublicIp,
+  MAX_AGENT_BODY_BYTES,
+} from "./agent-api.ts";
 
 test("the hosted API exposes only the five agent RPCs", () => {
   assert.equal(agentRpcForAction("hyn_device_start"), "hyn_device_start");
@@ -14,4 +18,31 @@ test("the hosted API exposes only the five agent RPCs", () => {
 
 test("the agent gateway has a bounded request size", () => {
   assert.equal(MAX_AGENT_BODY_BYTES, 1_048_576);
+});
+
+test("ingest records the machine public IP observed by the trusted gateway", () => {
+  assert.deepEqual(
+    enrichIngestWithPublicIp(
+      {
+        p_node_token: "token",
+        p_payload: { network: { iface: "eth0", local_ip: "10.0.0.5/24" } },
+      },
+      "203.0.113.7, 10.0.0.2",
+    ),
+    {
+      p_node_token: "token",
+      p_payload: {
+        network: {
+          iface: "eth0",
+          local_ip: "10.0.0.5/24",
+          public_ip: "203.0.113.7",
+        },
+      },
+    },
+  );
+});
+
+test("the gateway rejects malformed forwarded addresses instead of storing them", () => {
+  const body = { p_payload: { network: { iface: "eth0" } } };
+  assert.deepEqual(enrichIngestWithPublicIp(body, "<script>alert(1)</script>"), body);
 });

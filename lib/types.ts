@@ -176,6 +176,7 @@ export type AdminNode = {
   created_at: string;
   last_seen_at: string | null;
   last_config_pull_at: string | null;
+  config: Record<string, unknown>;
   owner_id: string | null;
   owner_email: string | null;
   owner_status: string | null;

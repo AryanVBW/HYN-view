@@ -1,7 +1,9 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { after, NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { normalizeInternalPath } from "@/lib/legal-consent";
+import { observedPublicIp } from "@/lib/agent-api";
+import { buildSignInContent, sendResendEmail } from "@/lib/cloud-email";
 
 // Where Google (and the email confirmation link) come back to. Exchanges the
 // one-time code for a session cookie, then forwards the user on.
@@ -36,6 +38,25 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(
       `${origin}/signin?error=${encodeURIComponent(error.message)}`
     );
+  }
+
+  const { data: auth } = await supabase.auth.getUser();
+  if (auth.user?.email) {
+    const email = auth.user.email;
+    const signedInAt = new Date().toISOString();
+    const ip = observedPublicIp(
+      request.headers.get("x-forwarded-for") ?? request.headers.get("x-real-ip"),
+    );
+    const userAgent = request.headers.get("user-agent")?.slice(0, 300) ?? null;
+    after(async () => {
+      await sendResendEmail({
+        apiKey: process.env.RESEND_API_KEY ?? "",
+        from: process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.in>",
+        to: email,
+        subject: "Welcome, you signed in",
+        html: buildSignInContent({ email, signedInAt, ip, userAgent }),
+      });
+    });
   }
 
   return NextResponse.redirect(`${origin}${next}`);

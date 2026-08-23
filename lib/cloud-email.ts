@@ -68,6 +68,47 @@ function number(value: number | null, suffix = "", digits = 1) {
     : `${value.toFixed(digits)}${suffix}`;
 }
 
+function record(value: unknown): Record<string, unknown> {
+  return value && !Array.isArray(value) && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function finite(value: unknown): number | null {
+  const parsed = Number(value);
+  return value !== null && value !== "" && Number.isFinite(parsed) ? parsed : null;
+}
+
+function bitsPerSecond(value: unknown) {
+  const parsed = finite(value);
+  return parsed === null ? "Unavailable" : `${((parsed * 8) / 1_000_000).toFixed(1)} Mbps`;
+}
+
+function byteSize(value: unknown) {
+  const parsed = finite(value);
+  if (parsed === null) return "Unavailable";
+  return `${(parsed / 1_000_000_000).toFixed(1)} GB`;
+}
+
+export function buildSignInContent(details: {
+  email: string;
+  signedInAt: string;
+  ip: string | null;
+  userAgent: string | null;
+}) {
+  return `<section style="font-family:Arial,sans-serif;color:#0f172a"><h1 style="margin:0 0 8px">Welcome, you signed in</h1><p style="color:#64748b;margin:0 0 20px">A successful sign-in to your HYN-view account was recorded.</p>${metric("Account", details.email)}${metric("Time", details.signedInAt)}${metric("IP address", details.ip ?? "Unavailable")}${metric("Browser / device", details.userAgent ?? "Unavailable")}<p style="margin-top:20px;color:#64748b">If this was not you, secure your account and contact support immediately.</p></section>`;
+}
+
+export function buildDeviceLinkedContent(details: {
+  nodeName: string;
+  hostname: string | null;
+  os: string | null;
+  agentVersion: string | null;
+  linkedAt: string;
+}) {
+  return `<section style="font-family:Arial,sans-serif;color:#0f172a"><h1 style="margin:0 0 8px">${escapeHtml(details.nodeName)} is linked</h1><p style="color:#64748b;margin:0 0 20px">The first telemetry report is being collected now. You will receive a second email with network, speed, hardware, temperature, sensors, processes, and Highway details as soon as the machine checks in.</p>${metric("Node", details.nodeName)}${metric("Hostname", details.hostname ?? "Unavailable")}${metric("Operating system", details.os ?? "Unavailable")}${metric("HYN agent", details.agentVersion ?? "Unavailable")}${metric("Linked at", details.linkedAt)}</section>`;
+}
+
 export function buildDailyDigestContent(summary: {
   nodeName: string;
   sampleCount: number;
@@ -94,10 +135,55 @@ export function buildSystemSummaryContent(summary: {
   lastSeenAt: string | null;
   payload: Record<string, unknown> | null;
 }) {
+  const payload = record(summary.payload);
+  const cpu = record(payload.cpu);
+  const memory = record(payload.memory);
+  const network = record(payload.network);
+  const speedtest = record(payload.speedtest);
+  const sensors = record(payload.sensors);
+  const highway = record(payload.highway);
+  const sensorRows = Object.entries(sensors)
+    .map(([label, value]) => metric(`Sensor · ${label}`, number(finite(value), "°C")))
+    .join("");
+  const linkMbps = finite(network.link_mbps);
+  const speedLatency = finite(speedtest.latency_us);
+  const highwayPresent = finite(highway.present) === 1;
   const inventory = summary.payload
     ? `<pre style="white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid #e2e8f0;padding:14px">${escapeHtml(JSON.stringify(summary.payload, null, 2))}</pre>`
     : `<p style="color:#64748b">No detailed inventory was reported by this server.</p>`;
-  return `<section style="font-family:Arial,sans-serif;color:#0f172a"><h1 style="margin:0 0 16px">System information · ${escapeHtml(summary.nodeName)}</h1>${metric("Operating system", summary.os ?? "Unavailable")}${metric("HYN agent", summary.agentVersion ?? "Unavailable")}${metric("Last check-in", summary.lastSeenAt ?? "Never")}${inventory}</section>`;
+  return `<section style="font-family:Arial,sans-serif;color:#0f172a"><h1 style="margin:0 0 16px">System information · ${escapeHtml(summary.nodeName)}</h1>${metric("Operating system", summary.os ?? String(payload.os ?? "Unavailable"))}${metric("Kernel", String(payload.kernel ?? "Unavailable"))}${metric("HYN agent", summary.agentVersion ?? "Unavailable")}${metric("Last check-in", summary.lastSeenAt ?? "Never")}${metric("CPU model", String(cpu.model ?? "Unavailable"))}${metric("CPU cores", finite(cpu.cores)?.toFixed(0) ?? "Unavailable")}${metric("CPU usage", number(finite(cpu.pct), "%"))}${metric("CPU temperature", number(finite(cpu.temp_c), "°C"))}${metric("Memory", `${byteSize(memory.total)} · ${number(finite(memory.pct), "%")}`)}${metric("Network interface", String(network.iface ?? "Unavailable"))}${metric("Public IP", String(network.public_ip ?? "Unavailable"))}${metric("Local IP", String(network.local_ip ?? "Unavailable"))}${metric("Wi-Fi name", String(network.ssid ?? "Unavailable"))}${metric("Connection", String(network.connection ?? "Unavailable"))}${metric("Link speed", linkMbps === null ? "Unavailable" : `${new Intl.NumberFormat("en-US").format(linkMbps)} Mbps`)}${metric("Current traffic", `${bitsPerSecond(network.rx_bps)} down · ${bitsPerSecond(network.tx_bps)} up`)}${metric("Speed test", `${bitsPerSecond(speedtest.down_bps)} down · ${bitsPerSecond(speedtest.up_bps)} up`)}${metric("Speed-test latency", speedLatency === null ? "Unavailable" : `${(speedLatency / 1000).toFixed(1)} ms`)}${sensorRows}${metric("Highway health", highwayPresent ? String(highway.health ?? "Unknown") : "Not detected")}${metric("Highway version", highwayPresent ? String(highway.version ?? "Unavailable") : "Unavailable")}${metric("Highway services", highwayPresent ? `${finite(highway.units_active)?.toFixed(0) ?? "0"} active · ${finite(highway.units_failed)?.toFixed(0) ?? "0"} failed` : "Unavailable")}<h2 style="margin:24px 0 8px;font-size:16px">Complete reported inventory</h2>${inventory}</section>`;
+}
+
+export async function sendResendEmail(args: {
+  apiKey: string;
+  from: string;
+  to: string;
+  subject: string;
+  html: string;
+  fetchImpl?: typeof fetch;
+}): Promise<{ ok: true; providerId: string | null } | { ok: false; error: string }> {
+  if (!args.apiKey || !args.from || !args.to) {
+    return { ok: false, error: "email delivery is not configured" };
+  }
+  try {
+    const response = await (args.fetchImpl ?? fetch)("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${args.apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: args.from,
+        to: [args.to],
+        subject: args.subject,
+        html: args.html,
+      }),
+    });
+    const provider = await response.json().catch(() => ({})) as { id?: string; message?: string };
+    if (!response.ok) {
+      return { ok: false, error: provider.message ?? `Resend HTTP ${response.status}` };
+    }
+    return { ok: true, providerId: provider.id ?? null };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "email request failed" };
+  }
 }
 
 export function buildIncidentContent(events: Array<{

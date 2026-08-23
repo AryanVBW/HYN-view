@@ -15,10 +15,11 @@ import {
 import { PromoteAdminForm } from "@/components/admin/promote-admin-form";
 import { ClientTable, NodeTable } from "@/components/admin/tables";
 import { ParticleField } from "@/components/particle-field";
+import { LiveRefresh } from "@/components/live-refresh";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
 import { claimAdminIfAllowed } from "@/lib/admin-claim";
-import { toFleetTrend } from "@/lib/admin-data";
+import { fleetFreshness, toFleetTrend } from "@/lib/admin-data";
 import { formatRelative } from "@/lib/dashboard-data";
 import type {
   AdminClient,
@@ -164,7 +165,7 @@ export default async function AdminPage({
   const cards: AdminStat[] = [
     { label: "Clients", value: overview.clients_total, note: `${overview.admins} administrators` },
     { label: "Machines", value: overview.nodes_total, note: `${overview.nodes_active} enabled` },
-    { label: "Gone quiet", value: overview.nodes_stale, note: "No check-in for 15 minutes", tone: overview.nodes_stale ? "bad" : undefined },
+    { label: "Gone quiet", value: overview.nodes_stale, note: "Missed three configured reports", tone: overview.nodes_stale ? "bad" : undefined },
     { label: "Open alerts", value: overview.alerts_open, note: "Across the whole fleet", tone: overview.alerts_open ? "warn" : undefined },
     { label: "Paused", value: overview.nodes_paused, note: "Maintenance or operator hold", tone: overview.nodes_paused ? "warn" : undefined },
     { label: "Suspended", value: overview.nodes_suspended, note: "Telemetry refused", tone: overview.nodes_suspended ? "bad" : undefined },
@@ -179,14 +180,7 @@ export default async function AdminPage({
 
   const statusCounts = nodes.filter((node) => !node.is_demo).reduce(
     (counts, node) => {
-      if (node.revoked) counts.revoked += 1;
-      else if (node.status === "suspended") counts.suspended += 1;
-      else if (node.status === "paused") counts.paused += 1;
-      else if (
-        !node.last_seen_at ||
-        renderedAt - new Date(node.last_seen_at).getTime() > 15 * 60 * 1000
-      ) counts.quiet += 1;
-      else counts.reporting += 1;
+      counts[fleetFreshness(node, renderedAt).key] += 1;
       return counts;
     },
     { reporting: 0, quiet: 0, paused: 0, suspended: 0, revoked: 0 }
@@ -397,6 +391,7 @@ export default async function AdminPage({
 function Shell({ children, email }: { children: React.ReactNode; email?: string | null }) {
   return (
     <div className="min-h-screen bg-background">
+      {email ? <LiveRefresh /> : null}
       <ParticleField blur="subtle" />
       <main className="container pt-32 pb-10 md:pt-44">{children}</main>
       <footer className="container flex flex-col gap-3 border-t border-border py-8 font-mono text-xs text-muted-foreground md:flex-row md:items-center md:justify-between">

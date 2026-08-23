@@ -62,7 +62,9 @@ export function NoNodesState() {
         <p className="mt-6 font-mono text-[0.65rem] uppercase tracking-wide text-muted-foreground">
           finally, back on the server
         </p>
-        <CommandBlock lines={["sudo hyn setup", "# installs the 5-minute push timer"]} />
+        <CommandBlock
+          lines={["sudo hyn setup", "# checks settings every minute; reports every 10 minutes by default"]}
+        />
       </div>
 
       <div className="mx-auto mt-10 flex max-w-xl flex-col items-center gap-3 border-t border-border pt-8 text-center">

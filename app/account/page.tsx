@@ -6,6 +6,7 @@ import { NodeSettings } from "@/components/account/node-settings";
 import { EmailPreferences } from "@/components/account/email-preferences";
 import { Button } from "@/components/ui/button";
 import { ParticleField } from "@/components/particle-field";
+import { LiveRefresh } from "@/components/live-refresh";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
 import { claimAdminIfAllowed } from "@/lib/admin-claim";
@@ -263,6 +264,7 @@ export default async function AccountPage() {
 function Shell({ children, email }: { children: React.ReactNode; email?: string | null }) {
   return (
     <div className="min-h-screen bg-background">
+      {email ? <LiveRefresh /> : null}
       <ParticleField blur="subtle" />
       <main className="container pt-32 pb-10 md:pt-44">{children}</main>
       <footer className="container flex flex-col gap-3 border-t border-border py-8 font-mono text-xs text-muted-foreground md:flex-row md:items-center md:justify-between">

@@ -12,6 +12,7 @@ import { HealthPanel } from "@/components/dashboard/uptime-panel";
 import { ServerDetailsPanel } from "@/components/dashboard/server-details";
 import { EventLog } from "@/components/dashboard/event-log";
 import { DemoDataButton } from "@/components/dashboard/demo-data-button";
+import { LiveRefresh } from "@/components/live-refresh";
 import { AwaitingFirstPushState, NoNodesState } from "@/components/dashboard/empty-states";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
@@ -25,6 +26,7 @@ import {
   toSpeedSeries,
   toTempSeries,
 } from "@/lib/dashboard-data";
+import { fleetFreshness } from "@/lib/admin-data";
 
 export const metadata: Metadata = {
   title: "Dashboard / HYN-view",
@@ -141,6 +143,7 @@ export default async function DashboardPage({
   }
 
   const latest = metrics[metrics.length - 1];
+  const freshness = fleetFreshness(node);
 
   return (
     <Shell email={auth.user.email} nodes={nodes} current={node}>
@@ -173,10 +176,14 @@ export default async function DashboardPage({
               <span className="flex w-fit items-center gap-2 rounded-full border border-destructive/50 bg-destructive/10 px-3 py-1.5 font-mono text-xs uppercase text-destructive">
                 suspended
               </span>
+            ) : freshness.key === "quiet" ? (
+              <span className="flex w-fit items-center gap-2 rounded-full border border-destructive/50 bg-destructive/10 px-3 py-1.5 font-mono text-xs uppercase text-destructive">
+                gone quiet · {freshness.label}
+              </span>
             ) : (
-              <span className="flex w-fit items-center gap-2 rounded-full border border-primary/40 px-3 py-1.5 font-mono text-xs uppercase text-primary">
-                <span className="size-1.5 animate-pulse rounded-full bg-primary" />
-                live
+              <span className={`flex w-fit items-center gap-2 rounded-full border border-primary/40 px-3 py-1.5 font-mono text-xs uppercase ${freshness.tone}`}>
+                <span className="size-1.5 animate-pulse rounded-full bg-current" />
+                {freshness.label}
               </span>
             )}
             {node.is_demo ? <DemoDataButton mode="clear" /> : null}
@@ -201,6 +208,14 @@ export default async function DashboardPage({
               ? ` It resumes automatically at ${new Date(node.paused_until).toLocaleString()}.`
               : " An administrator can lift this."}{" "}
             Everything below is the last data received.
+          </p>
+        ) : null}
+
+        {node.status === "active" && freshness.key === "quiet" && !node.is_demo ? (
+          <p className="border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs leading-6 text-destructive">
+            This machine missed three configured telemetry intervals. The charts show the
+            last received values. On the server, run <code>sudo hyn doctor</code> and{" "}
+            <code>systemctl status hyn-push.timer</code>.
           </p>
         ) : null}
 
@@ -278,6 +293,7 @@ function Shell({
 }) {
   return (
     <div className="min-h-screen bg-background">
+      {email ? <LiveRefresh /> : null}
       <ParticleField blur="subtle" />
       <main className="container pt-32 pb-10 md:pt-44">
         {nodes && nodes.length > 1 ? (

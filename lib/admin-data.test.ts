@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { toFleetTrend } from "./admin-data.ts";
+import { fleetFreshness, toFleetTrend } from "./admin-data.ts";
 
 test("fleet trend buckets real samples and averages CPU and transfer rates", () => {
   const points = toFleetTrend([
@@ -39,4 +39,35 @@ test("fleet trend ignores invalid timestamps and keeps missing CPU honest", () =
   assert.equal(points[0].cpu, null);
   assert.equal(points[0].down, 0);
   assert.equal(points[0].up, 0);
+});
+
+test("fleet freshness allows three configured check-ins before declaring a machine quiet", () => {
+  const now = Date.parse("2026-08-23T12:00:00.000Z");
+  const node = {
+    revoked: false,
+    status: "active" as const,
+    last_seen_at: "2026-08-23T11:35:00.000Z",
+    config: { cloud_push_min: "10" },
+  };
+
+  assert.deepEqual(fleetFreshness(node, now), {
+    key: "reporting",
+    label: "late 25m",
+    tone: "text-[#e8a400]",
+  });
+  assert.equal(
+    fleetFreshness({ ...node, last_seen_at: "2026-08-23T11:29:00.000Z" }, now).key,
+    "quiet",
+  );
+});
+
+test("fleet freshness keeps a safe minimum window for one-minute reporting", () => {
+  const now = Date.parse("2026-08-23T12:00:00.000Z");
+  const state = fleetFreshness({
+    revoked: false,
+    status: "active",
+    last_seen_at: "2026-08-23T11:50:00.000Z",
+    config: { cloud_push_min: "1" },
+  }, now);
+  assert.equal(state.key, "reporting");
 });
