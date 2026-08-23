@@ -219,7 +219,7 @@ record_interval_min=${CFG[record_interval_min]}
 metrics_keep_days=${CFG[metrics_keep_days]}
 
 # --- self update -------------------------------------------------------------
-# off | check (default, tells you) | install (unattended npm i -g as root)
+# off | check (tell before installing) | install (managed default)
 auto_update=${CFG[auto_update]}
 update_check_hours=${CFG[update_check_hours]}
 EOF
@@ -305,7 +305,7 @@ setup_run() {
   return 0
 }
 
-# Installs all four timers. Split out so `hyn setup` and a schedule change after
+# Installs all five timers. Split out so `hyn setup` and a schedule change after
 # the wizard both go through the same code.
 setup_timers() {
   local exe=$1
@@ -338,9 +338,9 @@ setup_timers() {
     "$(_generic_timer 'hyn-view daily report' \
       "OnCalendar=*-*-* ${CFG[report_at]}:00" 'hyn-report.service' 300)"
 
-  # Web portal push. Same cadence as recording by default: the dashboard is only
-  # as fresh as this timer, and a 5 minute lag is what the report timer already
-  # accepts as the resolution worth keeping.
+  # Wake every minute to pull account settings quickly. `hyn push --scheduled`
+  # performs the full telemetry collection only when cloud_push_min is due, so
+  # the managed ten-minute default does not run expensive probes every minute.
   _write_unit /etc/systemd/system/hyn-push.service \
     "$(_generic_service 'hyn-view web portal push' "$exe push --scheduled")"
   _write_unit /etc/systemd/system/hyn-push.timer \

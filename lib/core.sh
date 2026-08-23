@@ -10,7 +10,7 @@
 # HYN_PROC / HYN_SYS exist so test/selfcheck.sh can point the readers at a
 # fixture tree and assert on known numbers. Never hardcode /proc below.
 
-HYN_VERSION="1.5.0"
+HYN_VERSION="1.6.0"
 HYN_AUTHOR='NEXUSV'
 HYN_AUTHOR_URL='https://www.hyn-view.in'
 HYN_COPYRIGHT='(c) 2026 NEXUSV TECHNOLOGIES PRIVATE LIMITED'
@@ -162,19 +162,18 @@ declare -A CFG=(
   # during `hyn link`; the agent never contacts it.
   [cloud_portal_url]='https://www.hyn-view.in'
   [cloud_node_id]=''
-  [cloud_push_min]=5
+  [cloud_push_min]=10
   [cloud_timeout]=20
 
   # --- self update -----------------------------------------------------------
   # off     never look
-  # check   (default) look on launch, tell you, change nothing
-  # install look on launch and install a newer version automatically
+  # check   look on launch, tell you, change nothing
+  # install (managed default) install a newer version automatically
   #
-  # 'check' is the default deliberately. 'install' means this tool runs
-  # `npm i -g` as root, unattended, on a production node: a bad release or a
-  # compromised registry account would land straight on the box, and a monitor
-  # that breaks itself at 3am is worse than one that is a version behind.
-  [auto_update]=check
+  # Hosted nodes default to managed updates so agent fixes and the platform
+  # contract stay synchronized. An operator can still select check or off in
+  # the account page or local root-owned configuration.
+  [auto_update]=install
   [update_check_hours]=12
   # Offer the guided setup on the first interactive launch. Asked once; a
   # decline is remembered.
@@ -256,31 +255,32 @@ _read_kv() {
 cfg_load() {
   local f tmp k
   declare -A tmp=()
-  # Order matters: later files win. The portal's pulled settings come FIRST so a
-  # deliberate local line still overrides central management -- an operator who
-  # edited a box at 3am with no network must not be silently reverted, and a
-  # cache that outranked explicit config would be undebuggable.
+  declare -A portal_tmp=()
+  # Read operator-controlled files first. A validated portal cache then
+  # overrides only the small `_cfg_cloud_allowed` set. Standard installations
+  # write defaults for every local key, so putting the cache first would make
+  # Account changes appear saved while the generated file silently won forever.
+  # Local-only settings, endpoints, privacy choices and credentials never enter
+  # the portal allowlist and remain entirely under the operator's control.
   local cloud_cache=''
   if [[ -n ${HYN_VAR:-} ]]; then
     state_dir_v
     cloud_cache="$STATE_DIR/cloud-config"
   fi
-  # Filter a stale cache written by any older agent before reading
-  # operator-controlled files. Local config is intentionally unrestricted by
-  # this portal allowlist and is read afterwards, so an operator can still set
-  # delivery destinations and every other supported local key.
-  if [[ -n $cloud_cache && -r $cloud_cache ]]; then
-    _read_kv "$cloud_cache" tmp
-    for k in "${!tmp[@]}"; do
-      if ! _cfg_cloud_allowed "$k" || ! _cfg_cloud_value_allowed "$k" "${tmp[$k]}"; then
-        unset 'tmp[$k]'
-      fi
-    done
-  fi
   for f in "$HYN_ETC/config" "${XDG_CONFIG_HOME:-$HOME/.config}/hyn-view/config" "${HYN_CONFIG:-}"; do
     [[ -n $f && -r $f ]] || continue
     _read_kv "$f" tmp
   done
+  # Use a separate map so an invalid stale portal value is discarded without
+  # deleting a valid local value for the same key.
+  if [[ -n $cloud_cache && -r $cloud_cache ]]; then
+    _read_kv "$cloud_cache" portal_tmp
+    for k in "${!portal_tmp[@]}"; do
+      if _cfg_cloud_allowed "$k" && _cfg_cloud_value_allowed "$k" "${portal_tmp[$k]}"; then
+        tmp[$k]=${portal_tmp[$k]}
+      fi
+    done
+  fi
   for k in "${!tmp[@]}"; do
     if _cfg_allowed "$k"; then
       CFG[$k]=${tmp[$k]}

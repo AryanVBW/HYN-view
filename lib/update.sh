@@ -15,9 +15,9 @@
 #     monitoring tool.
 #   * The result is cached for update_check_hours, so launching `hyn` in a loop
 #     does not hammer the registry.
-#   * auto_update defaults to `check`, not `install`. See the comment on the
-#     config key: unattended `npm i -g` as root on a production relay node is a
-#     real risk, not a convenience. Opting in is a decision the operator makes.
+#   * Hosted installs default to managed updates so the CLI and portal contract
+#     cannot drift. Operators can still choose `check` or `off` in Account or in
+#     the root-owned local config.
 
 UPD_LATEST='' UPD_AVAILABLE=0 UPD_CHECKED=0 UPD_STATE=''
 UPD_REGISTRY='https://registry.npmjs.org'
