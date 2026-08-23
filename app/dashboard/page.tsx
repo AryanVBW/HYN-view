@@ -11,6 +11,7 @@ import { SpeedChart } from "@/components/dashboard/speed-chart";
 import { HealthPanel } from "@/components/dashboard/uptime-panel";
 import { ServerDetailsPanel } from "@/components/dashboard/server-details";
 import { EventLog } from "@/components/dashboard/event-log";
+import { AgentUpdateControl } from "@/components/dashboard/agent-update-control";
 import { DemoDataButton } from "@/components/dashboard/demo-data-button";
 import { LiveRefresh } from "@/components/live-refresh";
 import { AwaitingFirstPushState, NoNodesState } from "@/components/dashboard/empty-states";
@@ -27,6 +28,7 @@ import {
   toTempSeries,
 } from "@/lib/dashboard-data";
 import { fleetFreshness } from "@/lib/admin-data";
+import { readAgentRelease } from "@/lib/node-update";
 
 export const metadata: Metadata = {
   title: "Dashboard / HYN-view",
@@ -144,6 +146,7 @@ export default async function DashboardPage({
 
   const latest = metrics[metrics.length - 1];
   const freshness = fleetFreshness(node);
+  const agentRelease = readAgentRelease(latest.payload);
 
   return (
     <Shell email={auth.user.email} nodes={nodes} current={node}>
@@ -213,10 +216,21 @@ export default async function DashboardPage({
 
         {node.status === "active" && freshness.key === "quiet" && !node.is_demo ? (
           <p className="border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs leading-6 text-destructive">
-            This machine missed three configured telemetry intervals. The charts show the
-            last received values. On the server, run <code>sudo hyn doctor</code> and{" "}
-            <code>systemctl status hyn-push.timer</code>.
+            This machine missed three configured telemetry intervals. HYN-view retries every
+            minute; the charts show the last received values. A portal update will run as soon
+            as the machine checks in. To recover it now, run <code>sudo hyn doctor</code> and{" "}
+            <code>sudo systemctl restart hyn-push.timer</code> on the server.
           </p>
+        ) : null}
+
+        {!node.is_demo ? (
+          <AgentUpdateControl
+            nodeId={node.id}
+            nodeName={node.name}
+            currentVersion={node.agent_version}
+            release={agentRelease}
+            automatic={node.config?.auto_update === "install"}
+          />
         ) : null}
 
         <StatCards latest={latest} />
