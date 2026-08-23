@@ -75,13 +75,18 @@ CLOUD_LAST_BODY=''
 CLOUD_LAST_ERR=''
 
 cloud_url() {
-  local u=${CFG[cloud_url]}
+  local u
+  if [[ -n ${CFG[cloud_url]} && -n ${CFG[cloud_anon_key]} ]]; then
+    u=${CFG[cloud_url]}
+  else
+    u=${CFG[cloud_api_url]:-}
+  fi
   u=${u%/}
   printf '%s' "$u"
 }
 
 cloud_configured() {
-  [[ -n $(cloud_url) && -n ${CFG[cloud_anon_key]} ]]
+  [[ -n ${CFG[cloud_api_url]:-} || ( -n ${CFG[cloud_url]} && -n ${CFG[cloud_anon_key]} ) ]]
 }
 
 cloud_linked() {
@@ -93,13 +98,18 @@ cloud_linked() {
 # token lands in argv; the anon key goes through curl --config on stdin for the
 # same reason, even though it is a public value.
 _cloud_rpc() {
-  local fn=$1 body=$2 url key tmp out rc
+  local fn=$1 body=$2 url key tmp out rc endpoint mode=hosted
   url=$(cloud_url)
   key=${CFG[cloud_anon_key]}
   CLOUD_LAST_ERR='' CLOUD_LAST_BODY='' CLOUD_LAST_CODE=0
 
-  [[ -n $url ]] || { CLOUD_LAST_ERR='cloud_url is not set'; return 1; }
-  [[ -n $key ]] || { CLOUD_LAST_ERR='cloud_anon_key is not set'; return 1; }
+  [[ -n $url ]] || { CLOUD_LAST_ERR='cloud API URL is not set'; return 1; }
+  if [[ -n ${CFG[cloud_url]} && -n $key ]]; then
+    mode=direct
+    endpoint="$url/rest/v1/rpc/$fn"
+  else
+    endpoint="$url/$fn"
+  fi
   # The node token travels in this request body. Over http it would cross every
   # hop in clear text, and a monitoring agent is exactly the kind of long-lived
   # unattended credential nobody notices leaking. Loopback is exempt because a
@@ -113,8 +123,11 @@ _cloud_rpc() {
       return 1 ;;
   esac
   have curl || { CLOUD_LAST_ERR='curl is required for cloud sync'; return 1; }
-  # A key with a quote or newline in it would inject a curl option.
-  valid_token "$key" || { CLOUD_LAST_ERR='cloud_anon_key contains invalid characters'; return 1; }
+  # A key with a quote or newline in it would inject a curl option. Hosted mode
+  # has no per-customer key: the web API owns its database connection.
+  if [[ $mode == direct ]]; then
+    valid_token "$key" || { CLOUD_LAST_ERR='cloud_anon_key contains invalid characters'; return 1; }
+  fi
 
   tmp=$(mktemp "${TMPDIR:-/tmp}/hyn-cloud.XXXXXX") || { CLOUD_LAST_ERR='mktemp failed'; return 1; }
   chmod 600 "$tmp" 2>/dev/null
@@ -122,12 +135,21 @@ _cloud_rpc() {
 
   # No -f: on a 4xx the body is where PostgREST explains itself, and throwing it
   # away turns "invalid node token" into a bare 400.
-  out=$(printf 'header = "apikey: %s"\nheader = "Authorization: Bearer %s"\n' "$key" "$key" |
-    curl -sS --max-time "${CFG[cloud_timeout]:-20}" --config - \
-      -X POST "$url/rest/v1/rpc/$fn" \
+  if [[ $mode == direct ]]; then
+    out=$(printf 'header = "apikey: %s"\nheader = "Authorization: Bearer %s"\n' "$key" "$key" |
+      curl -sS --max-time "${CFG[cloud_timeout]:-20}" --config - \
+        -X POST "$endpoint" \
+        -H 'Content-Type: application/json' \
+        -w $'\n%{http_code}' \
+        --data-binary "@$tmp" 2>&1)
+  else
+    out=$(curl -sS --max-time "${CFG[cloud_timeout]:-20}" \
+      -X POST "$endpoint" \
       -H 'Content-Type: application/json' \
+      -H "User-Agent: hyn-view/$HYN_VERSION" \
       -w $'\n%{http_code}' \
       --data-binary "@$tmp" 2>&1)
+  fi
   rc=$?
   rm -f "$tmp"
 
@@ -427,7 +449,7 @@ _cloud_push_stamp() {
 }
 
 cloud_push() {
-  local quiet=${1:-0}
+  local quiet=${1:-0} respect_interval=${2:-0}
   cloud_configured || {
     ((quiet)) || warn 'not configured for cloud sync; run: sudo hyn link'
     return 1
@@ -443,6 +465,25 @@ cloud_push() {
   # cfg_load deliberately reads it after the portal cache.
   if cloud_config_pull 1; then
     cfg_load
+    # A portal change to auto_update should take effect on this check-in, not
+    # one timer cycle later. The updater remains detached and never delays the
+    # telemetry push.
+    update_startup
+  fi
+
+  # The timer wakes every minute so a dashboard change is picked up quickly.
+  # Expensive collection and ingestion still happen only at cloud_push_min.
+  if ((respect_interval)); then
+    local prior_ts='' prior_status='' prior_error='' interval=${CFG[cloud_push_min]:-5}
+    [[ $interval =~ ^[1-9][0-9]*$ ]] || interval=5
+    local prior_stamp
+    prior_stamp=$(_cloud_push_stamp)
+    [[ -r $prior_stamp ]] && IFS=$'\t' read -r prior_ts prior_status prior_error <"$prior_stamp"
+    if [[ $prior_ts =~ ^[0-9]+$ && $prior_status == ok ]] &&
+       ((${EPOCHSECONDS:-0} - prior_ts < interval * 60)); then
+      ((quiet)) || printf 'hyn: configuration checked; next reading is not due yet\n'
+      return 0
+    fi
   fi
 
   # One call samples everything the alert engine needs, which is a superset of
@@ -501,10 +542,21 @@ cloud_push() {
 # ---------------------------------------------------------------------------
 # link
 # ---------------------------------------------------------------------------
+cloud_install_schedule() {
+  # A linked monitor that only pushes once is a successful demo and a failed
+  # installation. Finish the systemd integration while we already have root.
+  # Non-systemd environments can still use `hyn push` from their own scheduler.
+  have systemctl || return 0
+  source "$HYN_LIB/setup.sh" || { warn 'could not load the systemd setup helpers'; return 1; }
+  setup_run --no-wizard
+}
+
 cloud_link() {
-  local a url='' anon='' portal='' name=''
+  local a api='' url='' anon='' portal='' name=''
   while (($#)); do
     case $1 in
+      --api) api=$2; shift 2 ;;
+      --api=*) api=${1#*=}; shift ;;
       --url) url=$2; shift 2 ;;
       --url=*) url=${1#*=}; shift ;;
       --anon-key) anon=$2; shift 2 ;;
@@ -514,7 +566,8 @@ cloud_link() {
       --name) name=$2; shift 2 ;;
       --name=*) name=${1#*=}; shift ;;
       -h | --help)
-        printf 'usage: sudo hyn link [--url <supabase-url>] [--anon-key <key>] [--portal <portal-url>] [--name <node-name>]\n'
+        printf 'usage: sudo hyn link [--name <node-name>] [--api <hosted-api-url>]\n'
+        printf '       sudo hyn link --url <supabase-url> --anon-key <key> [--portal <url>]\n'
         return 0 ;;
       *) warn "unknown option: $1"; return 1 ;;
     esac
@@ -522,18 +575,15 @@ cloud_link() {
 
   is_root || die 'hyn link must run as root: it writes the node token to /etc/hyn-view/secrets (try: sudo hyn link)'
 
+  [[ -n $api ]] && { config_set cloud_api_url "${api%/}" || return 1; }
   [[ -n $url ]] && { config_set cloud_url "${url%/}" || return 1; }
   [[ -n $anon ]] && { config_set cloud_anon_key "$anon" || return 1; }
   [[ -n $portal ]] && { config_set cloud_portal_url "${portal%/}" || return 1; }
 
-  # Ask for anything still missing, rather than failing with a usage message.
-  if [[ -z ${CFG[cloud_url]} ]]; then
-    printf 'Supabase project URL (e.g. https://abcdefgh.supabase.co): '
-    read -r url || return 1
-    [[ -n $url ]] || die 'a project URL is required'
-    config_set cloud_url "${url%/}" || return 1
-  fi
-  if [[ -z ${CFG[cloud_anon_key]} ]]; then
+  # Hosted pairing has product defaults and asks for no infrastructure values.
+  # Prompt for the public key only when an operator explicitly selected the
+  # backwards-compatible direct-Supabase mode with cloud_url/--url.
+  if [[ -n ${CFG[cloud_url]} && -z ${CFG[cloud_anon_key]} ]]; then
     printf 'Supabase anon key (public; safe to paste): '
     read -r anon || return 1
     [[ -n $anon ]] || die 'an anon key is required'
@@ -621,7 +671,12 @@ cloud_link() {
   printf '  Sending a first push… '
   if cloud_push 1; then
     printf 'ok\n'
-    printf '\n  Install the push timer so this keeps happening:\n    sudo hyn setup\n\n'
+    if cloud_install_schedule; then
+      printf '\n  Background monitoring is configured. Future dashboard changes apply on check-in.\n\n'
+    else
+      warn 'linked successfully, but the background schedule could not be installed; run: sudo hyn setup --no-wizard'
+      return 1
+    fi
   else
     printf 'failed\n'
     warn "the node is linked but the first push failed: $CLOUD_LAST_ERR"

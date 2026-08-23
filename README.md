@@ -9,7 +9,7 @@ relay node (`hw-os`) if one is installed — strictly read-only.
 
 ```
 npm install -g hyn-view
-sudo hyn setup      # guided: notifications, alerts, daily report, timers
+sudo hyn link       # pair, verify, and install the recurring monitor
 hyn                 # dashboard
 ```
 
@@ -25,18 +25,16 @@ Step 1 of 8  What we found          detected hardware, WAN link, filesystems, no
 Step 2 of 8  Display mode           best looking, or best performing
 Step 3 of 8  Theme                  all six drawn live in your terminal
 Step 4 of 8  Units and layout       bits or bytes, refresh rate, rows
-Step 5 of 8  Where alerts go        email (Resend recommended) or push
+Step 5 of 8  Email and alerts       managed by the portal; no server API key
 Step 6 of 8  What counts as a problem
-Step 7 of 8  Daily report and speed tests
-Step 8 of 8  Outage detection and updates
+Step 7 of 8  Cloud reports and speed tests
+Step 8 of 8  Outage detection
 ```
 
-It shows what it *detected* before asking for anything — being told "Ubuntu
-24.04, 8 cores, 31 GiB RAM, eth0 at 1 Gbps, Highway node v0.1.75 active" earns
-the right to ask for an API key. Nothing is written until you confirm a summary,
-so abandoning halfway leaves no trace. It ends by sending a real test message,
-because a notification setup you have not seen arrive is not configured — it is
-hoped for.
+The first decision is how the CLI should update: notify before installing,
+install automatically, or manual only. It then shows what it detected before
+asking about display and monitoring preferences. No email-provider credential
+is requested. Nothing is written until you confirm the summary.
 
 Asked once. Declining is remembered, and the dashboard works fine without it
 (alerts and reports do not). Re-run any time:
@@ -112,12 +110,11 @@ Pairing works like `gh auth login`, because an Ubuntu server has no browser:
   Your phone or laptop ─────────────────── 2. open /link, sign in, type the code
                                            3. approve "web-01"
 
-  Then, every 5 minutes ────────────────── hyn push → Supabase → dashboard
+  Then, on your chosen cadence ─────────── hyn push → hosted API → Supabase → dashboard
 ```
 
 ```
-sudo hyn link          pair this machine (asks for the project URL and anon key)
-sudo hyn setup         install the 5-minute push timer
+sudo hyn link          pair this machine; no project URL, API key, or manual timer setup
 hyn cloud status       node id, and when the last push happened or why it failed
 hyn push               send one reading now
 sudo hyn unlink        forget the credential locally
@@ -130,7 +127,10 @@ sudo hyn unlink        forget the credential locally
 2. In the portal, copy `web-portal/.env.local.example` to `.env.local` and fill
    in the project URL and anon key. For Google sign-in, enable the Google
    provider in Supabase and add `<your-site>/auth/callback` as a redirect URL.
-3. On the server, `sudo hyn link`, then follow the code.
+3. Set the server-only portal variables (`SUPABASE_SERVICE_ROLE_KEY`,
+   `RESEND_API_KEY`, `EMAIL_FROM`, and `CRON_SECRET`) in the deployment.
+4. On the server, run `sudo hyn link`, then follow the code. The CLI talks to
+   the hosted `/api/agent/v1` gateway and installs its systemd schedule itself.
 
 ### What the dashboard shows
 
@@ -158,10 +158,10 @@ automatically.
 
 ## Central management
 
-Once a node is paired the dashboard can manage its ordinary monitoring settings.
-The box keeps its portal connection details and its notification delivery
-configuration locally. Provider destinations and credentials are never pulled
-from or stored in the portal.
+Once a node is paired the dashboard manages its monitoring settings, update
+policy, email recipient, timezone, delivery types, and schedule. Customers do
+not configure provider credentials: the portal uses one deployment-level email
+key for every account.
 
 ```
 hyn config pull        fetch monitoring settings from the portal
@@ -173,10 +173,11 @@ reading, so portal changes apply on the next check-in without a second timer.
 `hyn config pull` remains useful when an operator wants to apply a change
 immediately.
 
-`/account` in the portal shows the client account, node settings and every
-delivery attempt with the reason any of them failed. Thresholds, report time and
-push interval are edited there per server. Notification channels are configured
-on each server with `sudo hyn wizard`.
+`/account` shows node settings and every delivery attempt with the reason any
+failed. Thresholds, CLI update policy and push interval are edited per server.
+The Email automation section controls immediate incident alerts, the daily
+health digest and the daily system-information message. Advanced operators may
+still use `sudo hyn wizard` for an additional local-only push channel.
 
 A pulled setting is written to a cache that `cfg_load` reads **before**
 `/etc/hyn-view/config`, so a line set locally on the box still wins. That
@@ -268,25 +269,22 @@ anon key — the dashboard hiding a button is a courtesy, not a boundary.
 
 | Value | Where it lives | Why |
 | --- | --- | --- |
-| Supabase anon key | `/etc/hyn-view/config` (0644) | Public by design — it ships in every browser bundle. RLS is what protects data. |
+| Hosted API URL | built into the CLI, overridable in `/etc/hyn-view/config` | Normal customers link without knowing the Supabase project or public key. |
 | Node token | `/etc/hyn-view/secrets` (0600) | The actual credential. Sent in a request body, never in `argv`, so no local user can read it out of `ps`. |
-| Service-role key | nowhere | The agent never has one. A monitoring agent on a rented VPS is the wrong place for a key that bypasses RLS. |
-| Provider API keys and webhook credentials | `/etc/hyn-view/secrets` (0600) | Configured separately on each monitored server; never stored in or delivered by the portal. |
+| Service-role key | portal server environment only | Used by the scheduled email worker; never sent to a browser or monitored server. |
+| Shared Resend key | portal server environment only | One centrally managed provider account serves all portal users. |
 
-**Notification delivery is local-only.** Run `sudo hyn wizard` on each monitored
-server. Destinations live in `/etc/hyn-view/config`; API keys, passwords, tokens
-and webhook URLs live in `/etc/hyn-view/secrets`. The portal receives delivery
-outcomes for its history view, but it has no table or RPC for provider
-credentials and a config pull never returns a notification channel.
+**Portal email delivery is centrally managed.** Recipients and schedules are
+tenant-private rows protected by RLS; the provider key remains a server-only
+deployment secret. The cron worker sends through Resend, records every outcome,
+and uses an idempotency ledger so overlapping invocations do not duplicate mail.
 
-Administrators may edit the non-secret HTML wrappers for incident alerts and
-daily reports from the Email templates tab. A wrapper must contain
+Administrators may edit the non-secret HTML wrappers for incident alerts, daily
+health digests, and system-information messages from the Email templates tab. A wrapper must contain
 `{{content}}`; optional placeholders include `{{hostname}}`, `{{version}}`,
-`{{severity}}` and `{{subject}}`. The node pulls the wrappers as base64 alongside
-ordinary settings and applies them around the locally generated message at send
-time. Active HTML is rejected, while the generated incident detail remains
-unescaped inside `{{content}}`; credentials and recipients never cross into this
-template store.
+`{{severity}}` and `{{subject}}`. The cloud email worker applies them at send
+time. Active HTML is rejected, while generated detail remains unescaped inside
+`{{content}}`; provider credentials never cross into the template store.
 
 A node token authorises writes for that one node and nothing else. Revoking a
 node from the portal stops it, and `hyn unlink` deliberately does *not* revoke
@@ -430,11 +428,10 @@ hyn update --check    just look
 sudo hyn update --yes install it
 ```
 
-`auto_update=install` will apply updates unattended. It is **not** the default,
-deliberately: that means this tool running `npm i -g` as root on a production
-node, so a bad release or a compromised registry account lands on the box by
-itself, and a monitor that breaks itself at 3am is worse than one a version
-behind. Your call, and the wizard asks.
+`auto_update=install` applies updates unattended and refreshes the systemd units
+after npm succeeds, so the agent is not reinstalled or manually reconfigured.
+The first-run wizard asks for the policy before anything else, and it can later
+be changed from Account in the portal.
 
 **Network detail that matters on a server.** Throughput and packet rates, but
 also interface errors and drops, TCP retransmits as a share of segments sent,
@@ -509,11 +506,11 @@ sudo hyn wizard           re-run just the notification setup
 sudo hyn uninstall        remove units (add --purge to drop config and history)
 ```
 
-Four systemd timers are installed: alert evaluation (every 5 min), metric
-sampling (every 5 min), throughput tests (4×/day), and the daily report. A fifth,
-the portal push (every 5 min), is installed too but only enabled once the node is
-paired. All run as one-shots with `ProtectSystem=strict`, an empty capability set
-and a single writable path.
+Five systemd timers are installed for optional local alerts/reports, local
+metric history, guarded throughput tests, and portal sync. Portal sync checks
+configuration every minute and collects only when the dashboard-selected push
+interval is due. All run as hardened one-shots; there is no permanent Node.js
+process and an npm update refreshes the units automatically.
 
 `hyn snapshot --json` is the integration point. It emits one object with the
 network counters, latency map, speed test result, and node health, so it can be
@@ -572,9 +569,10 @@ Keys worth knowing:
 | `auto_update` | `check` | `off`, `check` or `install` |
 | `onboarding` | `on` | offer guided setup on first interactive launch |
 | `cloud_enabled` | `off` | set by `hyn link`; gates the portal push timer |
-| `cloud_url` | *(empty)* | Supabase project URL |
-| `cloud_anon_key` | *(empty)* | public anon key — see the credentials table above |
-| `cloud_portal_url` | *(empty)* | only used to print a complete `/link` URL |
+| `cloud_api_url` | `https://www.hyn-view.in/api/agent/v1` | hosted agent API; no customer key required |
+| `cloud_url` | *(empty)* | optional direct-Supabase URL for self-hosters |
+| `cloud_anon_key` | *(empty)* | optional public anon key for direct-Supabase mode |
+| `cloud_portal_url` | `https://www.hyn-view.in` | prints the complete pairing URL |
 | `cloud_push_min` | `5` | minutes between portal pushes |
 | `hide_mount` | `/snap,/var/lib/docker,…` | mount points kept out of the disk panel and alerts |
 

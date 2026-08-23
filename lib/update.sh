@@ -139,8 +139,15 @@ update_apply() {
       fi
       printf 'hyn: updating %s -> %s via npm\n' "$HYN_VERSION" "${UPD_LATEST:-latest}"
       if npm install -g "$HYN_PKG@${UPD_LATEST:-latest}" >/dev/null 2>&1; then
-        printf 'hyn: updated. Restart `hyn`, and reload the timers with:\n'
-        printf '     sudo systemctl daemon-reload\n'
+        if is_root && [[ -x $HYN_ROOT/bin/hyn ]]; then
+          if "$HYN_ROOT/bin/hyn" setup --no-wizard >/dev/null 2>&1; then
+            printf 'hyn: updated and background services refreshed. Restart `hyn` to use the new code.\n'
+          else
+            warn 'package updated, but background services could not be refreshed; run: sudo hyn setup --no-wizard'
+          fi
+        else
+          printf 'hyn: updated. Restart `hyn` to use the new code.\n'
+        fi
         return 0
       fi
       warn 'npm install failed; nothing was changed'

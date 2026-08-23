@@ -150,17 +150,17 @@ declare -A CFG=(
   [metrics_keep_days]=8
 
   # --- web portal / cloud sync ----------------------------------------------
-  # Set by `sudo hyn link`. cloud_url and cloud_anon_key are the Supabase
-  # project URL and its PUBLIC anon key -- the same key that ships in every
-  # browser bundle talking to that project, which is why it lives here in the
-  # world-readable config rather than in secrets. The node token, which is the
-  # actual credential, goes to /etc/hyn-view/secrets at 0600.
+  # Hosted installs call the product API directly. Customers never need to know
+  # the underlying Supabase project URL or public key. cloud_url and
+  # cloud_anon_key remain as a backwards-compatible, explicit self-hosted mode.
+  # The node token is the actual credential and goes to secrets at 0600.
   [cloud_enabled]=off
+  [cloud_api_url]='https://www.hyn-view.in/api/agent/v1'
   [cloud_url]=''
   [cloud_anon_key]=''
   # Where the human opens the pairing page. Only used to print a complete URL
   # during `hyn link`; the agent never contacts it.
-  [cloud_portal_url]=''
+  [cloud_portal_url]='https://www.hyn-view.in'
   [cloud_node_id]=''
   [cloud_push_min]=5
   [cloud_timeout]=20
@@ -195,7 +195,7 @@ _cfg_cloud_allowed() {
   case ${1:-} in
     alert_mem_pct | alert_disk_pct | alert_temp_c | alert_load_per_core | \
       alert_latency_ms | alert_min_severity | alert_repeat_hours | report_at | \
-      notify_max_per_day | cloud_push_min) return 0 ;;
+      notify_max_per_day | cloud_push_min | auto_update) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -222,6 +222,8 @@ _cfg_cloud_value_allowed() {
       [[ $v =~ ^[1-9][0-9]{0,3}$ ]] && ((10#$v <= 1440)) ;;
     alert_min_severity)
       [[ $v == crit || $v == warn || $v == info ]] ;;
+    auto_update)
+      [[ $v == install || $v == check || $v == off ]] ;;
     report_at)
       [[ $v =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] ;;
     *) return 1 ;;

@@ -106,6 +106,14 @@ _v_url() { [[ $1 == https://* || $1 == http://* ]]; }
 _v_host() { [[ $1 =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; }
 _v_any() { return 0; }
 
+_wiz_update_choice() {
+  local __out=$1
+  ask_choice "$__out" 'How should HYN handle new releases?' \
+    'check:Auto-update check  — notify me, then I approve the install' \
+    'install:Automatic update   — install new npm releases unattended' \
+    'off:Manual update      — only update when I run hyn update'
+}
+
 # ---------------------------------------------------------------------------
 # the wizard
 # ---------------------------------------------------------------------------
@@ -239,10 +247,7 @@ wizard_run() {
   _w_note 'by itself, so it is off unless you ask for it.'
   printf '\n'
   local au
-  ask_choice au 'On launch:' \
-    'check:Tell me when an update exists   — recommended' \
-    'install:Install updates automatically   — unattended npm i -g as root' \
-    'off:Do not check at all'
+  _wiz_update_choice au
   config_set auto_update "$au"
   if [[ $au == install ]]; then
     _w_note 'noted. `hyn update --check` still works, and the version in use is'
@@ -531,6 +536,12 @@ onboard_run() {
   printf '  %sEnter accepts the [default] — holding Enter through it all is a good\n' "${C[dim]}"
   printf '  configuration. Ctrl-C aborts and writes nothing.%s\n' "${C[reset]}"
 
+  # Update policy is the first decision on a new install. It affects the CLI
+  # itself and should not be buried after visual and notification preferences.
+  printf '\n'
+  _wiz_update_choice v
+  A[auto_update]=$v
+
   # ------------------------------------------------------------------ 1
   _ob_step 1 'What we found' 'No questions here, just so you know what it is working with.'
   onboard_detect
@@ -589,32 +600,12 @@ onboard_run() {
   fi
 
   # ------------------------------------------------------------------ 5
-  _ob_step 5 'Where should alerts go?' \
-    'Email is right for the daily report. Push is better for 3am. You can have both.'
-  printf '  %sRecommended: Resend — free 100 emails/day, one API key, working in a minute.%s\n\n' \
-    "${C[ok]}" "${C[reset]}"
-  local chan
-  ask_choice chan 'Delivery method:' \
-    'resend:Email via Resend        — RECOMMENDED. Free 100/day, just an API key' \
-    'brevo:Email via Brevo         — free 300/day, needs a verified sender' \
-    'smtp:Email via SMTP          — any provider, or a Gmail app password' \
-    'ntfy:Push via ntfy.sh        — no account at all, instant to your phone' \
-    'telegram:Telegram bot           — instant, needs a bot token' \
-    'webhook:Slack / Discord webhook — posts into a channel' \
-    'none:Skip for now           — set it up later with: sudo hyn wizard'
-
-  if [[ $chan == none ]]; then
-    _w_note 'no notifications. Alerts and the daily report will stay switched off.'
-    A[notify_channels]=''
-  else
-    # _wiz_channel writes secrets immediately (they are not part of the
-    # confirm-at-the-end set: an API key typed once should not be retyped, and it
-    # is inert until a channel references it).
-    _wiz_channel "$chan" || _w_note 'channel not completed; you can finish it with: sudo hyn wizard'
-    A[notify_channels]=${CFG[notify_channels]}
-    A[notify_to]=${CFG[notify_to]}
-    A[notify_from]=${CFG[notify_from]}
-  fi
+  _ob_step 5 'Email and alerts' \
+    'Managed by the web portal — no API key, SMTP password, recipient, or template is configured on this server.'
+  _w_ok 'incident, daily health, and system-information email are ready after linking'
+  _w_note 'set recipient, timezone, timing, and message types in Account on the dashboard.'
+  _w_note 'advanced local-only push delivery remains available with: sudo hyn wizard'
+  A[notify_channels]=''
 
   # ------------------------------------------------------------------ 6
   _ob_step 6 'What counts as a problem' 'Defaults are tuned for a 24/7 node. Any threshold set to 0 is off.'
@@ -639,20 +630,15 @@ onboard_run() {
   ask v 'Hard cap on notifications per day' "${CFG[notify_max_per_day]}" _v_int && A[notify_max_per_day]=$v
 
   # ------------------------------------------------------------------ 7
-  _ob_step 7 'Daily report and speed tests'
-  if ask_yn 'Send one report a day?' y; then
-    A[report_enabled]=on
-    ask v 'At what time (HH:MM, this server'"'"'s local time)' "${CFG[report_at]}" _v_hhmm && A[report_at]=$v
-    _w_note "server timezone is $(_wiz_tz)"
-  else
-    A[report_enabled]=off
-  fi
+  _ob_step 7 'Cloud reports and speed tests'
+  A[report_enabled]=off
+  _w_ok 'cloud reports are scheduled in the account timezone from the dashboard'
   ask v 'Throughput tests per day' "${CFG[speedtest_per_day]}" _v_int && A[speedtest_per_day]=$v
   ask v 'Skip a test when the link is busier than N% of capacity' "${CFG[speedtest_guard_pct]}" _v_int && A[speedtest_guard_pct]=$v
   _w_note 'tests are bounded by bytes and by time, so they will not disturb the node.'
 
   # ------------------------------------------------------------------ 8
-  _ob_step 8 'Outage detection and updates'
+  _ob_step 8 'Outage detection'
   printf '  %sIf this machine goes offline, hyn goes with it and cannot email you.%s\n' "${C[warn]}" "${C[reset]}"
   _w_note 'The fix is a dead man'"'"'s switch: this host checks in on a schedule and an'
   _w_note 'outside service alerts YOU when the check-ins stop. healthchecks.io is free.'
@@ -668,13 +654,6 @@ onboard_run() {
     _w_note 'skipped. Nothing will report this host going offline. Add it later with:'
     _w_note '  sudo hyn wizard'
   fi
-  printf '\n'
-  ask_choice v 'On launch, about new releases:' \
-    'check:Tell me one is available   — recommended' \
-    'install:Install it automatically    — unattended npm i -g as root' \
-    'off:Do not check'
-  A[auto_update]=$v
-
   # ------------------------------------------------------------------ summary
   printf '\n'
   rep_v '─' 64
@@ -712,7 +691,7 @@ onboard_run() {
   onboard_mark_done completed
 
   # ------------------------------------------------------------------ test
-  if [[ -n ${A[notify_channels]} ]]; then
+  if [[ -n ${A[notify_channels]:-} ]]; then
     printf '\n'
     if ask_yn 'Send a test notification now?' y; then _wiz_test; fi
   fi

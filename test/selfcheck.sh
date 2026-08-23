@@ -357,6 +357,11 @@ eq 'config strips quotes'  'bytes'   "${CFG[net_unit]}"
 eq 'config numeric'        '12'      "${CFG[proc_rows]}"
 if ((${#CFG_WARNINGS[@]} >= 1)); then ok; else bad 'unknown config key should warn'; fi
 falsy 'unknown key not applied' '[[ -v CFG[bogus_key] ]]'
+truthy 'portal may manage the update policy' '_cfg_cloud_allowed auto_update'
+truthy 'portal accepts automatic updates' '_cfg_cloud_value_allowed auto_update install'
+truthy 'portal accepts update notifications' '_cfg_cloud_value_allowed auto_update check'
+truthy 'portal accepts manual updates' '_cfg_cloud_value_allowed auto_update off'
+falsy 'portal rejects an unknown update policy' '_cfg_cloud_value_allowed auto_update surprise'
 CFG[net_unit]=bits
 CFG[theme]=hiway
 
@@ -989,6 +994,24 @@ CFG[auto_update]=check
 update_detect_method
 truthy 'install method is classified' '[[ -n $UPD_METHOD ]]'
 
+# An npm update must refresh the installed units itself. Requiring every server
+# owner to remember a second setup command defeats unattended updates.
+fake_update_root="$TMP/node_modules/hyn-view"
+fake_update_bin="$TMP/update-bin"
+mkdir -p "$fake_update_root/bin" "$fake_update_bin"
+printf '#!/bin/sh\nexit 0\n' >"$fake_update_bin/npm"
+printf '#!/bin/sh\nprintf "%%s" "$*" >"$HYN_VAR/post-update-setup"\n' >"$fake_update_root/bin/hyn"
+chmod +x "$fake_update_bin/npm" "$fake_update_root/bin/hyn"
+(
+  HYN_ROOT="$fake_update_root"
+  PATH="$fake_update_bin:$PATH"
+  UPD_AVAILABLE=1 UPD_LATEST=9.9.9
+  is_root() { return 0; }
+  update_apply 1 >/dev/null
+)
+truthy 'npm update refreshes system integration' '[[ -r $HYN_VAR/post-update-setup ]]'
+contains 'post-update setup is non-interactive' 'setup --no-wizard' "$(<"$HYN_VAR/post-update-setup")"
+
 # ---------------------------------------------------------------------------
 section 'notification safety'
 # ---------------------------------------------------------------------------
@@ -1538,6 +1561,12 @@ truthy 'onboard_run exists'    'declare -F onboard_run >/dev/null'
 truthy 'onboard_prompt exists' 'declare -F onboard_prompt >/dev/null'
 truthy 'wizard_run exists'     'declare -F wizard_run >/dev/null'
 truthy 'detection helper exists' 'declare -F onboard_detect >/dev/null'
+picked=$(printf '1\n' | { _wiz_update_choice update_mode >/dev/null; printf '%s' "$update_mode"; })
+eq 'first update choice means notify before install' 'check' "$picked"
+picked=$(printf '2\n' | { _wiz_update_choice update_mode >/dev/null; printf '%s' "$update_mode"; })
+eq 'second update choice means automatic install' 'install' "$picked"
+picked=$(printf '3\n' | { _wiz_update_choice update_mode >/dev/null; printf '%s' "$update_mode"; })
+eq 'third update choice means manual only' 'off' "$picked"
 # Non-interactive must be refused rather than hanging waiting for stdin.
 W_TTY=0
 falsy 'onboarding refuses a non-tty' 'onboard_run'
@@ -1566,6 +1595,16 @@ falsy  'rejects a host with a space' '_v_host "bad host"'
 # a token must survive intact, and a key appearing as a substring of another
 # key must not be confused for it.
 section 'cloud: json field reader'
+
+# Fresh hosted installs must be linkable with only `sudo hyn link`. The public
+# portal endpoint is product configuration, not something each customer should
+# reverse-engineer from a Supabase dashboard.
+eq 'hosted cloud API has a product default' \
+  'https://www.hyn-view.in/api/agent/v1' "${CFG[cloud_api_url]:-missing}"
+eq 'hosted pairing page has a product default' \
+  'https://www.hyn-view.in' "${CFG[cloud_portal_url]:-missing}"
+CFG[cloud_url]='' CFG[cloud_anon_key]=''
+truthy 'hosted API needs no per-user Supabase configuration' 'cloud_configured'
 
 CJ='{"status":"approved","node_id":"3f7a-11","node_token":"abc123def456","interval":5,"node_name":"web-01"}'
 json_field_v "$CJ" status;     eq 'reads a string field'    'approved'     "$JSON_FIELD"

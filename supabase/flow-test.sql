@@ -720,6 +720,7 @@ begin
     '{"alert_mem_pct":"101"}'::jsonb,
     '{"alert_latency_ms":{}}'::jsonb,
     '{"alert_min_severity":"root"}'::jsonb,
+    '{"auto_update":"surprise"}'::jsonb,
     '{"report_at":"99:99"}'::jsonb,
     '{"cloud_push_min":"0"}'::jsonb
   ] loop
@@ -743,7 +744,8 @@ update public.nodes
      "alert_mem_pct":"80", "alert_disk_pct":"85", "alert_temp_c":"75",
      "alert_load_per_core":"400", "alert_latency_ms":"250",
      "alert_min_severity":"warn", "alert_repeat_hours":"6",
-     "report_at":"07:30", "notify_max_per_day":"25", "cloud_push_min":"5"
+     "report_at":"07:30", "notify_max_per_day":"25", "cloud_push_min":"5",
+     "auto_update":"install"
    }'::jsonb
  where id = (select v from t where k = 'node_id')::uuid;
 
@@ -754,8 +756,22 @@ begin
     from public.nodes nrow,
          lateral jsonb_object_keys(nrow.config)
    where nrow.id = (select v from t where k = 'node_id')::uuid;
-  if n <> 10 then raise exception 'portal allowlist rejected a supported setting'; end if;
+  if n <> 11 then raise exception 'portal allowlist rejected a supported setting'; end if;
   raise notice 'PASS  every portal-exposed monitoring setting remains writable';
+end $$;
+
+do $$
+declare n integer;
+begin
+  select count(*) into n from public.email_preferences;
+  if n <> 1 then raise exception 'pairing should create one default email schedule, saw %', n; end if;
+  update public.email_preferences set timezone = 'Asia/Kolkata', daily_at = '08:30';
+  if not found then raise exception 'the node owner could not update their email schedule'; end if;
+  set local "test.uid" = '22222222-2222-2222-2222-222222222222';
+  select count(*) into n from public.email_preferences;
+  if n <> 0 then raise exception 'another client can read Alice''s email schedule'; end if;
+  set local "test.uid" = '11111111-1111-1111-1111-111111111111';
+  raise notice 'PASS  cloud email timing is defaulted and tenant-private';
 end $$;
 
 set local role anon;
@@ -1066,8 +1082,8 @@ do $$
 declare r json; pulled json; rendered text; rejected boolean;
 begin
   r := public.hyn_admin_templates();
-  if json_array_length(r) <> 2 then
-    raise exception 'admin template list should contain alert and report wrappers: %', r;
+  if json_array_length(r) <> 3 then
+    raise exception 'admin template list should contain alert, report and system wrappers: %', r;
   end if;
 
   r := public.hyn_admin_save_template(
