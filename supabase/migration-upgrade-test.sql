@@ -77,6 +77,14 @@ begin
      or to_regclass('public.admin_report_jobs') is null then
     raise exception 'upgrade did not install durable delivery state';
   end if;
+  update public.profiles set role = 'admin'
+   where id = '33333333-3333-3333-3333-333333333333';
+  perform set_config('test.uid', '33333333-3333-3333-3333-333333333333', true);
+  if not (public.hyn_admin_nodes()::jsonb->0 ? 'last_heartbeat_at')
+     or not (public.hyn_admin_nodes()::jsonb->0 ? 'latest_agent_version')
+     or not (public.hyn_admin_nodes()::jsonb->0 ? 'update_available') then
+    raise exception 'upgrade did not expose heartbeat and release state to administrators';
+  end if;
   raise notice 'PASS  upgrade installs heartbeat, sync, web alert, and report contracts';
 end $$;
 

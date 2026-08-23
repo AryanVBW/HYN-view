@@ -965,6 +965,21 @@ begin
 end $$;
 
 do $$
+declare r json;
+begin
+  set local role postgres;
+  update public.node_watchdogs
+     set state = 'running', run_id = 'abandoned-run', updated_at = now() - interval '6 minutes'
+   where node_id = (select v from t where k = 'node_id')::uuid;
+  set local role anon;
+  r := public.hyn_claim_node_watchdog((select v from t where k = 'node_token'));
+  if r->>'created' <> 'true' or r->>'state' <> 'starting' then
+    raise exception 'stale running watchdog was not reclaimed: %', r;
+  end if;
+  raise notice 'PASS  a crashed heartbeat watchdog is reclaimed on the next check-in';
+end $$;
+
+do $$
 declare
   first_request json;
   repeated_request json;
@@ -1427,6 +1442,43 @@ begin
   select count(*) into n from public.notification_log;
   if n <> 2 then raise exception 'admin should see all 2 notifications, saw %', n; end if;
   raise notice 'PASS  an admin reads across tenants';
+end $$;
+
+do $$
+declare nodes json; overview json; machine jsonb;
+begin
+  set local role postgres;
+  update public.nodes
+     set agent_version = '1.7.0', last_seen_at = now(),
+         last_heartbeat_at = now() - interval '4 minutes'
+   where id = (select v from t where k = 'node_id')::uuid;
+  update public.metrics
+     set payload = coalesce(payload, '{}'::jsonb)
+       || '{"agent_update":{"latest":"1.8.0","available":true}}'::jsonb
+   where id = (select max(id) from public.metrics where node_id = (select v from t where k = 'node_id')::uuid);
+  set local role authenticated;
+  nodes := public.hyn_admin_nodes();
+  select value into machine from jsonb_array_elements(nodes::jsonb)
+   where value->>'id' = (select v from t where k = 'node_id');
+  if machine->>'last_heartbeat_at' is null
+     or machine->>'latest_agent_version' <> '1.8.0'
+     or machine->>'update_available' <> 'true' then
+    raise exception 'admin machine snapshot omitted heartbeat or update state: %', machine;
+  end if;
+  overview := public.hyn_admin_overview();
+  if (overview->>'nodes_stale')::integer <> 1 then
+    raise exception 'heartbeat-capable node should be quiet after three misses: %', overview;
+  end if;
+
+  set local role postgres;
+  update public.nodes set agent_version = '1.6.0'
+   where id = (select v from t where k = 'node_id')::uuid;
+  set local role authenticated;
+  overview := public.hyn_admin_overview();
+  if (overview->>'nodes_stale')::integer <> 0 then
+    raise exception 'pre-heartbeat node ignored its configured telemetry interval: %', overview;
+  end if;
+  raise notice 'PASS  admin freshness and version controls remain accurate during the 1.7 rollout';
 end $$;
 
 -- ---------------------------------------------------------------------------

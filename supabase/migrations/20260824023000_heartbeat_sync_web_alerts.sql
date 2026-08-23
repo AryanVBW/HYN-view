@@ -10,6 +10,66 @@ update public.nodes
 create index if not exists nodes_last_heartbeat_idx
   on public.nodes (last_heartbeat_at desc) where is_demo = false and revoked = false;
 
+-- New agents check for config/commands every minute even when the telemetry
+-- collection interval is longer. Until 1.7 is published, preserve the legacy
+-- three-configured-interval rule so an installed 1.6 agent is not mislabeled.
+create or replace function public.hyn_admin_overview()
+returns json language plpgsql security definer set search_path = public as $$
+begin
+  perform public._hyn_require_admin();
+  return json_build_object(
+    'clients_total', (select count(*) from public.profiles),
+    'clients_suspended', (select count(*) from public.profiles where status = 'suspended'),
+    'admins', (select count(*) from public.profiles where role = 'admin'),
+    'nodes_total', (select count(*) from public.nodes where is_demo = false),
+    'nodes_active', (select count(*) from public.nodes where status = 'active' and revoked = false and is_demo = false),
+    'nodes_paused', (select count(*) from public.nodes where status = 'paused' and is_demo = false),
+    'nodes_suspended', (select count(*) from public.nodes where status = 'suspended' and is_demo = false),
+    'nodes_revoked', (select count(*) from public.nodes where revoked = true),
+    'nodes_stale', (select count(*) from public.nodes n
+      where n.is_demo = false and n.revoked = false and n.status = 'active'
+        and case
+          when coalesce(n.agent_version, '') ~ '^(1\.([7-9]|[1-9][0-9]+)\.|([2-9]|[1-9][0-9]+)\.)'
+            then n.last_heartbeat_at is null or n.last_heartbeat_at <= now() - interval '3 minutes'
+          else n.last_seen_at is null or n.last_seen_at < now() - make_interval(
+            mins => greatest(15, 3 * case
+              when n.config->>'cloud_push_min' ~ '^[1-9][0-9]{0,3}$'
+                then (n.config->>'cloud_push_min')::integer else 10 end))
+        end),
+    'alerts_open', (select count(*) from public.alert_events where resolved = false and ts > now() - interval '7 days'),
+    'notifications_24h', (select count(*) from public.notification_log where ts > now() - interval '24 hours'),
+    'notifications_failed_24h', (select count(*) from public.notification_log where ts > now() - interval '24 hours' and status = 'failed'),
+    'metrics_24h', (select count(*) from public.metrics where ts > now() - interval '24 hours')
+  );
+end;
+$$;
+
+create or replace function public.hyn_admin_nodes()
+returns json language plpgsql security definer set search_path = public as $$
+declare v json;
+begin
+  perform public._hyn_require_admin();
+  select coalesce(json_agg(row_to_json(x) order by x.last_heartbeat_at desc nulls last), '[]'::json)
+    into v from (
+      select n.id, n.name, n.hostname, n.os, n.agent_version, n.status,
+             n.paused_until, n.status_reason, n.revoked, n.is_demo,
+             n.created_at, n.last_seen_at, n.last_config_pull_at, n.last_heartbeat_at, n.config,
+             p.id as owner_id, p.email as owner_email, p.status as owner_status, p.role as owner_role,
+             (select count(*) from public.notification_log l where l.node_id = n.id and l.ts > now() - interval '24 hours') as notifications_24h,
+             (select count(*) from public.notification_log l where l.node_id = n.id and l.ts > now() - interval '24 hours' and l.status = 'failed') as notifications_failed_24h,
+             (select count(*) from public.alert_events a where a.node_id = n.id and a.resolved = false and a.ts > now() - interval '7 days') as alerts_open,
+             (select m.cpu_pct from public.metrics m where m.node_id = n.id order by m.ts desc limit 1) as last_cpu_pct,
+             (select m.cpu_temp_c from public.metrics m where m.node_id = n.id order by m.ts desc limit 1) as last_temp_c,
+             (select m.mem_pct from public.metrics m where m.node_id = n.id order by m.ts desc limit 1) as last_mem_pct,
+             (select m.disk_pct from public.metrics m where m.node_id = n.id order by m.ts desc limit 1) as last_disk_pct,
+             (select m.payload #>> '{agent_update,latest}' from public.metrics m where m.node_id = n.id order by m.ts desc limit 1) as latest_agent_version,
+             coalesce((select m.payload #>> '{agent_update,available}' in ('true', '1') from public.metrics m where m.node_id = n.id order by m.ts desc limit 1), false) as update_available
+        from public.nodes n left join public.profiles p on p.id = n.owner
+    ) x;
+  return v;
+end;
+$$;
+
 alter table public.node_commands drop constraint if exists node_commands_command_check;
 alter table public.node_commands add constraint node_commands_command_check
   check (command in ('update', 'sync'));
@@ -360,7 +420,7 @@ begin
   else
     select * into v_watchdog from public.node_watchdogs where node_id = v_node.id for update;
     if v_watchdog.state = 'stopped'
-       or (v_watchdog.state = 'starting' and v_watchdog.updated_at < now() - interval '5 minutes') then
+       or v_watchdog.updated_at < now() - interval '5 minutes' then
       update public.node_watchdogs
          set state = 'starting', run_id = null, updated_at = now()
        where node_id = v_node.id returning * into v_watchdog;
