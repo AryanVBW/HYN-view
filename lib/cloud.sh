@@ -707,8 +707,13 @@ cloud_push() {
 cloud_install_schedule() {
   # A linked monitor that only pushes once is a successful demo and a failed
   # installation. Finish the systemd integration while we already have root.
-  # Non-systemd environments can still use `hyn push` from their own scheduler.
-  have systemctl || return 0
+  # A successful link promises recurring monitoring, so an environment without
+  # systemd must supply a scheduler explicitly instead of being told the setup
+  # completed when only the one-time first snapshot was delivered.
+  have systemctl || {
+    warn 'systemd is not available, so the one-minute portal schedule could not be installed'
+    return 1
+  }
   source "$HYN_LIB/setup.sh" || { warn 'could not load the systemd setup helpers'; return 1; }
   setup_run --no-wizard
 }

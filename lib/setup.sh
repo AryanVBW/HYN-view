@@ -226,7 +226,7 @@ EOF
 }
 
 setup_run() {
-  local no_timer=0 wizard=1 a
+  local no_timer=0 wizard=1 integration_ok=1 a
   for a in "$@"; do
     case $a in
       --no-timer) no_timer=1 ;;
@@ -279,7 +279,7 @@ setup_run() {
   elif ! have systemctl; then
     printf '\nhyn: no systemd here, skipping the timers\n'
   else
-    setup_timers "$exe"
+    setup_timers "$exe" || integration_ok=0
   fi
 
   # The wizard runs last, so a failure in it leaves a working install behind.
@@ -287,11 +287,16 @@ setup_run() {
     source "$HYN_LIB/wizard.sh" 2>/dev/null || warn 'could not load the setup wizard'
     if declare -F wizard_run >/dev/null; then
       wizard_run || warn 'wizard did not complete; run `sudo hyn setup` again to finish'
-      setup_apply_schedule "$exe"
+      setup_apply_schedule "$exe" || integration_ok=0
     fi
   elif ((wizard)); then
     printf '\nhyn: not a terminal, so the guided setup was skipped.\n'
     printf '     run `sudo hyn setup` from a shell to configure notifications.\n'
+  fi
+
+  if ((integration_ok == 0)); then
+    warn 'one or more managed timers could not be enabled; inspect systemctl status for the failed HYN unit'
+    return 1
   fi
 
   printf '\nhyn: done. Next steps:\n'
@@ -347,9 +352,11 @@ setup_timers() {
     "$(_generic_timer 'hyn-view web portal push' \
       "OnBootSec=1min"$'\n'"OnUnitActiveSec=1min" 'hyn-push.service' 15)"
 
-  systemctl daemon-reload
+  systemctl daemon-reload || {
+    warn 'systemd daemon reload failed'
+    return 1
+  }
   setup_apply_schedule "$exe"
-  return 0
 }
 
 _write_unit() {
@@ -364,16 +371,17 @@ _write_unit() {
 # wizard so answering "no daily report" actually stops the timer.
 setup_apply_schedule() {
   have systemctl || return 0
-  systemctl daemon-reload
-  _toggle_timer "$SVC_NAME.timer" 1
-  _toggle_timer hyn-record.timer 1
-  _toggle_timer hyn-alerts.timer "$(cfg_on alert_enabled && [[ -n ${CFG[notify_channels]} ]] && printf 1 || printf 0)"
-  _toggle_timer hyn-report.timer "$(cfg_on report_enabled && [[ -n ${CFG[notify_channels]} ]] && printf 1 || printf 0)"
+  local rc=0
+  systemctl daemon-reload || return 1
+  _toggle_timer "$SVC_NAME.timer" 1 || rc=1
+  _toggle_timer hyn-record.timer 1 || rc=1
+  _toggle_timer hyn-alerts.timer "$(cfg_on alert_enabled && [[ -n ${CFG[notify_channels]} ]] && printf 1 || printf 0)" || rc=1
+  _toggle_timer hyn-report.timer "$(cfg_on report_enabled && [[ -n ${CFG[notify_channels]} ]] && printf 1 || printf 0)" || rc=1
   # Only if the node is actually paired. An enabled push timer on an unlinked
   # node would fail every few minutes and fill the journal with noise that looks
   # like a bug rather than an unfinished setup step.
-  _toggle_timer hyn-push.timer "$(cfg_on cloud_enabled && cloud_linked && printf 1 || printf 0)"
-  return 0
+  _toggle_timer hyn-push.timer "$(cfg_on cloud_enabled && cloud_linked && printf 1 || printf 0)" || rc=1
+  return "$rc"
 }
 
 _toggle_timer() {
@@ -383,10 +391,15 @@ _toggle_timer() {
       printf '  %-34s enabled\n' "$unit"
     else
       printf '  %-34s could not enable (systemctl status %s)\n' "$unit" "$unit"
+      return 1
     fi
   else
-    systemctl disable --now "$unit" >/dev/null 2>&1
-    printf '  %-34s disabled (not configured)\n' "$unit"
+    if systemctl disable --now "$unit" >/dev/null 2>&1; then
+      printf '  %-34s disabled (not configured)\n' "$unit"
+    else
+      printf '  %-34s could not disable (systemctl status %s)\n' "$unit" "$unit"
+      return 1
+    fi
   fi
   return 0
 }

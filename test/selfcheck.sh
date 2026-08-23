@@ -1869,6 +1869,29 @@ contains 'token is sent via --data-binary' '--data-binary "@$tmp"' "$_cloudsrc"
 falsy 'token never reaches a curl -d argument' '[[ $_cloudsrc == *"-d \"p_node_token"* ]]'
 contains 'anon key goes through curl --config' '--config -' "$_cloudsrc"
 
+section 'systemd schedule failure reporting'
+if (
+  source "$HYN_LIB/setup.sh"
+  systemctl() { return 1; }
+  _toggle_timer hyn-push.timer 1 >/dev/null
+); then
+  bad 'a failed timer enable was reported as success'
+else
+  ok
+fi
+if (
+  source "$HYN_LIB/setup.sh"
+  systemctl() { return 0; }
+  _toggle_timer() { [[ $1 != hyn-push.timer ]]; }
+  CFG[cloud_enabled]=on
+  cloud_linked() { return 0; }
+  setup_apply_schedule "$ROOT/bin/hyn" >/dev/null
+); then
+  bad 'setup ignored a failed required push timer'
+else
+  ok
+fi
+
 # ---------------------------------------------------------------------------
 printf '\n'
 if ((FAIL == 0)); then
