@@ -73,7 +73,7 @@ export function EmailTemplateManager({ templates }: { templates: NotificationTem
         <p className="section-kicker">// email templates</p>
         <h2 className="mt-2 font-sentient text-2xl text-card-foreground">Delivery presentation</h2>
         <p className="mt-2 max-w-3xl font-mono text-xs leading-6 text-muted-foreground">
-          Templates wrap the generated message at send time. Provider keys and recipient addresses remain local to each machine.
+          Templates wrap incident, daily health, and system-information emails. The shared provider key stays in the portal deployment environment; clients configure only recipients and timing.
         </p>
       </div>
 

@@ -9,7 +9,7 @@ export async function saveNotificationTemplate(
   templateKey: string,
   htmlTemplate: string
 ): Promise<SaveTemplateResult> {
-  if (!['alert', 'report'].includes(templateKey)) {
+  if (!['alert', 'report', 'system'].includes(templateKey)) {
     return { ok: false, error: "Unknown notification template." };
   }
   if (!htmlTemplate.includes("{{content}}")) {

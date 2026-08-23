@@ -15,7 +15,8 @@ const FIELDS: {
   key: string;
   label: string;
   hint: string;
-  type: "number" | "text" | "time";
+  type: "number" | "text" | "time" | "select";
+  choices?: { value: string; label: string }[];
 }[] = [
   { key: "alert_mem_pct", label: "Memory alert %", hint: "0 disables this rule", type: "number" },
   { key: "alert_disk_pct", label: "Disk alert %", hint: "per mount point", type: "number" },
@@ -27,6 +28,17 @@ const FIELDS: {
   { key: "report_at", label: "Daily report time", hint: "server local time, HH:MM", type: "time" },
   { key: "notify_max_per_day", label: "Daily notification cap", hint: "backstop against a flapping rule", type: "number" },
   { key: "cloud_push_min", label: "Push interval, minutes", hint: "how often this server reports in", type: "number" },
+  {
+    key: "auto_update",
+    label: "CLI updates",
+    hint: "applies on the next server check-in",
+    type: "select",
+    choices: [
+      { value: "check", label: "Notify before installing" },
+      { value: "install", label: "Install automatically" },
+      { value: "off", label: "Manual only" },
+    ],
+  },
 ];
 
 export function NodeSettings({ nodes }: { nodes: Node[] }) {
@@ -125,16 +137,32 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
             <span className="mb-1.5 block font-mono text-[0.65rem] uppercase text-muted-foreground">
               {f.label}
             </span>
-            <input
-              type={f.type === "number" ? "number" : "text"}
-              value={current(f.key)}
-              placeholder="default"
-              onChange={(event) => {
-                setDraft({ ...draft, [f.key]: event.target.value });
-                setSaved(false);
-              }}
-              className="w-full border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none focus:border-ring placeholder:text-muted-foreground/50"
-            />
+            {f.type === "select" ? (
+              <select
+                value={current(f.key)}
+                onChange={(event) => {
+                  setDraft({ ...draft, [f.key]: event.target.value });
+                  setSaved(false);
+                }}
+                className="w-full border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none focus:border-ring"
+              >
+                <option value="">Built-in default</option>
+                {f.choices?.map((choice) => (
+                  <option key={choice.value} value={choice.value}>{choice.label}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type={f.type === "number" ? "number" : f.type === "time" ? "time" : "text"}
+                value={current(f.key)}
+                placeholder="default"
+                onChange={(event) => {
+                  setDraft({ ...draft, [f.key]: event.target.value });
+                  setSaved(false);
+                }}
+                className="w-full border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none focus:border-ring placeholder:text-muted-foreground/50"
+              />
+            )}
             <span className="mt-1 block font-mono text-[0.6rem] leading-4 text-muted-foreground">
               {f.hint}
             </span>
