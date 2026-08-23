@@ -951,14 +951,140 @@ begin
 end $$;
 
 do $$
-declare seen timestamptz;
+declare seen timestamptz; heartbeat timestamptz;
 begin
   set local role postgres;
-  select last_config_pull_at into seen from public.nodes
+  select last_config_pull_at, last_heartbeat_at into seen, heartbeat from public.nodes
    where id = (select v from t where k = 'node_id')::uuid;
   if seen is null then raise exception 'last_config_pull_at was not recorded'; end if;
+  if heartbeat is null or heartbeat < now() - interval '5 seconds' then
+    raise exception 'last_heartbeat_at was not recorded by config pull: %', heartbeat;
+  end if;
   set local role anon;
-  raise notice 'PASS  a config pull is recorded against the node';
+  raise notice 'PASS  a config pull records a durable machine heartbeat';
+end $$;
+
+do $$
+declare
+  first_request json;
+  repeated_request json;
+  queued json;
+  rejected boolean := false;
+begin
+  set local role authenticated;
+  perform set_config('test.uid', '11111111-1111-1111-1111-111111111111', true);
+  first_request := public.hyn_request_node_command(
+    (select v from t where k = 'node_id')::uuid, 'sync'
+  );
+  repeated_request := public.hyn_request_node_command(
+    (select v from t where k = 'node_id')::uuid, 'sync'
+  );
+  if first_request->>'action' <> 'sync'
+     or first_request->>'created' <> 'true'
+     or repeated_request->>'id' <> first_request->>'id'
+     or repeated_request->>'created' <> 'false' then
+    raise exception 'sync commands were not owner-scoped and idempotent: % / %',
+      first_request, repeated_request;
+  end if;
+
+  perform set_config('test.uid', '22222222-2222-2222-2222-222222222222', true);
+  begin
+    perform public.hyn_request_node_command(
+      (select v from t where k = 'node_id')::uuid, 'sync'
+    );
+  exception when others then rejected := true;
+  end;
+  if not rejected then raise exception 'Bob queued a sync for Alice''s node'; end if;
+
+  set local role postgres;
+  update public.profiles set role = 'admin'
+   where id = '22222222-2222-2222-2222-222222222222';
+  set local role authenticated;
+  perform set_config('test.uid', '22222222-2222-2222-2222-222222222222', true);
+  queued := public.hyn_admin_request_node_command(
+    (select v from t where k = 'node_id')::uuid, 'sync'
+  );
+  if queued->>'id' <> first_request->>'id' or queued->>'created' <> 'false' then
+    raise exception 'admin request duplicated an active sync: %', queued;
+  end if;
+
+  set local role postgres;
+  if not exists (
+    select 1 from public.admin_audit
+     where actor = '22222222-2222-2222-2222-222222222222'
+       and target_node = (select v from t where k = 'node_id')::uuid
+       and action = 'node.command.sync'
+  ) then raise exception 'admin sync request was not audited'; end if;
+  -- Keep the pre-existing control-plane audit ordering assertions isolated;
+  -- this row has already proved the command action was persisted correctly.
+  delete from public.admin_audit
+   where actor = '22222222-2222-2222-2222-222222222222'
+     and target_node = (select v from t where k = 'node_id')::uuid
+     and action = 'node.command.sync';
+  update public.profiles set role = 'user'
+   where id = '22222222-2222-2222-2222-222222222222';
+  set local role anon;
+  perform set_config('test.uid', '', true);
+  insert into t values ('sync_command_id', first_request->>'id');
+  raise notice 'PASS  owner/admin sync requests are isolated, deduplicated, and audited';
+end $$;
+
+do $$
+declare r json;
+begin
+  r := public.hyn_claim_node_command((select v from t where k = 'node_token'));
+  if r->>'action' <> 'sync' or r->>'id' <> (select v from t where k = 'sync_command_id') then
+    raise exception 'linked node did not claim its sync: %', r;
+  end if;
+  perform public.hyn_report_node_command(
+    (select v from t where k = 'node_token'),
+    (select v from t where k = 'sync_command_id')::uuid,
+    'running', 'collecting', 'Collecting a complete system snapshot', null, null
+  );
+  perform public.hyn_report_node_command(
+    (select v from t where k = 'node_token'),
+    (select v from t where k = 'sync_command_id')::uuid,
+    'running', 'uploading', 'Uploading current telemetry to HYN-view', null, null
+  );
+  r := public.hyn_report_node_command(
+    (select v from t where k = 'node_token'),
+    (select v from t where k = 'sync_command_id')::uuid,
+    'succeeded', 'completed', 'Synchronization verified', null, null
+  );
+  if r->>'status' <> 'succeeded' then raise exception 'sync completion failed: %', r; end if;
+  raise notice 'PASS  a node reports the full sync lifecycle';
+end $$;
+
+do $$
+declare r json; duplicate json; rejected boolean := false; n integer;
+begin
+  begin
+    perform public.hyn_queue_web_notification(
+      (select v from t where k = 'node_token'),
+      '{"fingerprint":"recipient-injection","category":"alert","severity":"warn","subject":"Injected","text_body":"No","recipient":"attacker@example.com"}'::jsonb
+    );
+  exception when others then rejected := true;
+  end;
+  if not rejected then raise exception 'web alert accepted a CLI-selected recipient'; end if;
+
+  r := public.hyn_queue_web_notification(
+    (select v from t where k = 'node_token'),
+    '{"fingerprint":"disk:warn:86","category":"alert","severity":"warn","subject":"Disk warning","text_body":"Disk usage is 86%"}'::jsonb
+  );
+  duplicate := public.hyn_queue_web_notification(
+    (select v from t where k = 'node_token'),
+    '{"fingerprint":"disk:warn:86","category":"alert","severity":"warn","subject":"Disk warning","text_body":"Disk usage is 86%"}'::jsonb
+  );
+  if r->>'id' is null or duplicate->>'id' <> r->>'id'
+     or duplicate->>'created' <> 'false' then
+    raise exception 'web alert was not durable and idempotent: % / %', r, duplicate;
+  end if;
+  set local role postgres;
+  select count(*) into n from public.web_notification_jobs
+   where node_id = (select v from t where k = 'node_id')::uuid;
+  if n <> 1 then raise exception 'expected one durable web alert, saw %', n; end if;
+  set local role anon;
+  raise notice 'PASS  web alerts are durable, idempotent, and cannot choose recipients';
 end $$;
 
 -- ---------------------------------------------------------------------------
