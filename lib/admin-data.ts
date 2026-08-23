@@ -15,6 +15,45 @@ type Bucket = {
 
 const HALF_HOUR = 30 * 60 * 1000;
 
+type FreshnessNode = {
+  revoked: boolean;
+  status: "active" | "paused" | "suspended";
+  last_seen_at: string | null;
+  config?: Record<string, unknown> | null;
+};
+
+export type FleetFreshness = {
+  key: "reporting" | "quiet" | "paused" | "suspended" | "revoked";
+  label: string;
+  tone: string;
+};
+
+function pushIntervalMinutes(config: Record<string, unknown> | null | undefined) {
+  const value = Number(config?.cloud_push_min ?? 10);
+  return Number.isInteger(value) && value >= 1 && value <= 1440 ? value : 10;
+}
+
+export function fleetFreshness(node: FreshnessNode, now = Date.now()): FleetFreshness {
+  if (node.revoked) return { key: "revoked", label: "revoked", tone: "text-muted-foreground" };
+  if (node.status === "suspended") return { key: "suspended", label: "suspended", tone: "text-destructive" };
+  if (node.status === "paused") return { key: "paused", label: "paused", tone: "text-[#e8a400]" };
+  if (!node.last_seen_at) return { key: "quiet", label: "never reported", tone: "text-muted-foreground" };
+
+  const seenAt = new Date(node.last_seen_at).getTime();
+  if (!Number.isFinite(seenAt)) return { key: "quiet", label: "invalid check-in", tone: "text-destructive" };
+  const minutes = Math.max(0, (now - seenAt) / 60_000);
+  const interval = pushIntervalMinutes(node.config);
+  const quietAfter = Math.max(15, interval * 3);
+  const lateAfter = Math.max(8, interval * 1.5);
+  if (minutes > quietAfter) {
+    return { key: "quiet", label: `quiet ${Math.round(minutes)}m`, tone: "text-destructive" };
+  }
+  if (minutes > lateAfter) {
+    return { key: "reporting", label: `late ${Math.round(minutes)}m`, tone: "text-[#e8a400]" };
+  }
+  return { key: "reporting", label: "reporting", tone: "text-primary" };
+}
+
 function clockLabel(timestamp: number): string {
   const date = new Date(timestamp);
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;

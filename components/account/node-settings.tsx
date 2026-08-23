@@ -6,6 +6,7 @@ import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/client";
 import type { Node } from "@/lib/types";
+import { mergePortalConfig } from "@/lib/node-config";
 
 // The settings worth exposing in a browser. Deliberately not every config key
 // the agent understands: the long tail (theme, graph style, panel order) only
@@ -23,11 +24,18 @@ const FIELDS: {
   { key: "alert_temp_c", label: "Temperature alert °C", hint: "0 disables", type: "number" },
   { key: "alert_load_per_core", label: "Load alert, % per core", hint: "400 means load 4.0 per core", type: "number" },
   { key: "alert_latency_ms", label: "Latency alert, ms", hint: "first-hop and internet", type: "number" },
-  { key: "alert_min_severity", label: "Minimum severity", hint: "crit, warn or info", type: "text" },
+  {
+    key: "alert_min_severity", label: "Minimum severity", hint: "minimum alert level sent", type: "select",
+    choices: [
+      { value: "crit", label: "Critical only" },
+      { value: "warn", label: "Warnings and critical" },
+      { value: "info", label: "All events" },
+    ],
+  },
   { key: "alert_repeat_hours", label: "Repeat interval, hours", hint: "how often a still-firing alert repeats", type: "number" },
   { key: "report_at", label: "Daily report time", hint: "server local time, HH:MM", type: "time" },
   { key: "notify_max_per_day", label: "Daily notification cap", hint: "backstop against a flapping rule", type: "number" },
-  { key: "cloud_push_min", label: "Push interval, minutes", hint: "how often this server reports in", type: "number" },
+  { key: "cloud_push_min", label: "Telemetry interval, minutes", hint: "10 recommended; settings still sync every minute", type: "number" },
   {
     key: "auto_update",
     label: "CLI updates",
@@ -76,16 +84,7 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
     setBusy(true);
     setError(null);
     setSaved(false);
-    const merged: Record<string, string> = {
-      ...((node.config ?? {}) as Record<string, string>),
-    };
-    // An emptied field means "stop overriding this", not "set it to empty" --
-    // otherwise clearing a box would push a blank value to the agent and the
-    // built-in default would become unreachable.
-    for (const [k, v] of Object.entries(draft)) {
-      if (v.trim() === "") delete merged[k];
-      else merged[k] = v.trim();
-    }
+    const merged = mergePortalConfig(node.config ?? {}, draft);
     const supabase = createClient();
     const { error } = await supabase.from("nodes").update({ config: merged }).eq("id", node.id);
     setBusy(false);
@@ -108,8 +107,9 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
           </p>
           <p className="mt-2 max-w-xl font-mono text-xs leading-6 text-muted-foreground">
             Saved here and pulled by the server on its next check-in. A value left
-            blank uses the built-in default. A setting written directly on the box
-            still wins, so a local override is never silently reverted.
+            blank uses the built-in default. These managed thresholds and schedules
+            take precedence on linked servers; local-only settings and credentials
+            remain on the machine.
           </p>
         </div>
         {real.length > 1 ? (
@@ -156,6 +156,8 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
                 type={f.type === "number" ? "number" : f.type === "time" ? "time" : "text"}
                 value={current(f.key)}
                 placeholder="default"
+                min={f.key === "cloud_push_min" ? 1 : f.type === "number" ? 0 : undefined}
+                max={f.key === "cloud_push_min" ? 1440 : undefined}
                 onChange={(event) => {
                   setDraft({ ...draft, [f.key]: event.target.value });
                   setSaved(false);

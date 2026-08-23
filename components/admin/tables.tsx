@@ -6,6 +6,7 @@ import Link from "next/link";
 import { Loader2, Pause, Play, ShieldOff, Unplug } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { compareVersions, formatRelative, newestVersion } from "@/lib/dashboard-data";
+import { fleetFreshness } from "@/lib/admin-data";
 import type { AdminClient, AdminNode } from "@/lib/types";
 
 function pct(v: number | null, suffix = "%") {
@@ -25,14 +26,7 @@ function isBehind(node: AdminNode, newest: string | null): boolean {
 // machine is down -- only that it went quiet -- and saying "no data for 22m" is
 // honest where a red "OFFLINE" badge would be a guess.
 function staleness(node: AdminNode): { label: string; tone: string } {
-  if (node.revoked) return { label: "revoked", tone: "text-muted-foreground" };
-  if (node.status === "suspended") return { label: "suspended", tone: "text-destructive" };
-  if (node.status === "paused") return { label: "paused", tone: "text-[#e8a400]" };
-  if (!node.last_seen_at) return { label: "never reported", tone: "text-muted-foreground" };
-  const mins = (Date.now() - new Date(node.last_seen_at).getTime()) / 60000;
-  if (mins > 15) return { label: `quiet ${Math.round(mins)}m`, tone: "text-destructive" };
-  if (mins > 8) return { label: `late ${Math.round(mins)}m`, tone: "text-[#e8a400]" };
-  return { label: "reporting", tone: "text-primary" };
+  return fleetFreshness(node);
 }
 
 export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
