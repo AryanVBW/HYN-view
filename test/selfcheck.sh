@@ -1017,17 +1017,35 @@ fake_update_root="$TMP/node_modules/hyn-view"
 fake_update_bin="$TMP/update-bin"
 mkdir -p "$fake_update_root/bin" "$fake_update_bin"
 printf '#!/bin/sh\nexit 0\n' >"$fake_update_bin/npm"
-printf '#!/bin/sh\nprintf "%%s" "$*" >"$HYN_VAR/post-update-setup"\n' >"$fake_update_root/bin/hyn"
-chmod +x "$fake_update_bin/npm" "$fake_update_root/bin/hyn"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'if [ "$1" = "--version" ]; then printf "hyn-view 9.9.9\n"; exit 0; fi' \
+  'printf "%s" "$*" >"$HYN_VAR/post-update-setup"' \
+  >"$fake_update_root/bin/hyn"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'case "$1" in' \
+  '  is-enabled) exit 0 ;;' \
+  '  is-active) printf "active\n"; exit 0 ;;' \
+  '  *) printf "%s\n" "$*" >>"$HYN_VAR/post-update-systemctl"; exit 0 ;;' \
+  'esac' \
+  >"$fake_update_bin/systemctl"
+chmod +x "$fake_update_bin/npm" "$fake_update_bin/systemctl" "$fake_update_root/bin/hyn"
+test_update_progress() { printf '%s|%s\n' "$1" "$2" >>"$HYN_VAR/post-update-progress"; }
 (
   HYN_ROOT="$fake_update_root"
   PATH="$fake_update_bin:$PATH"
   UPD_AVAILABLE=1 UPD_LATEST=9.9.9
+  UPD_PROGRESS_HOOK=test_update_progress
   is_root() { return 0; }
   update_apply 1 >/dev/null
 )
 truthy 'npm update refreshes system integration' '[[ -r $HYN_VAR/post-update-setup ]]'
 contains 'post-update setup is non-interactive' 'setup --no-wizard' "$(<"$HYN_VAR/post-update-setup")"
+contains 'package update restarts the push timer' 'restart hyn-push.timer' "$(<"$HYN_VAR/post-update-systemctl")"
+contains 'package update reports installation progress' 'installing|' "$(<"$HYN_VAR/post-update-progress")"
+contains 'package update reports service restart progress' 'restarting|' "$(<"$HYN_VAR/post-update-progress")"
+contains 'package update reports verification progress' 'verifying|' "$(<"$HYN_VAR/post-update-progress")"
 
 # ---------------------------------------------------------------------------
 section 'notification safety'

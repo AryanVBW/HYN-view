@@ -10,7 +10,7 @@
 # HYN_PROC / HYN_SYS exist so test/selfcheck.sh can point the readers at a
 # fixture tree and assert on known numbers. Never hardcode /proc below.
 
-HYN_VERSION="1.6.0"
+HYN_VERSION="1.7.0"
 HYN_AUTHOR='NEXUSV'
 HYN_AUTHOR_URL='https://www.hyn-view.in'
 HYN_COPYRIGHT='(c) 2026 NEXUSV TECHNOLOGIES PRIVATE LIMITED'

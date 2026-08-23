@@ -44,6 +44,19 @@ begin
 end $$;
 
 do $$
+begin
+  if to_regclass('public.node_commands') is null then
+    raise exception 'upgrade did not install the portal-to-agent command queue';
+  end if;
+  if to_regprocedure('public.hyn_request_node_update(uuid)') is null
+     or to_regprocedure('public.hyn_claim_node_command(text)') is null
+     or to_regprocedure('public.hyn_report_node_command(text,uuid,text,text,text,text,text)') is null then
+    raise exception 'upgrade did not install every command lifecycle RPC';
+  end if;
+  raise notice 'PASS  upgrade installs the portal-to-agent update lifecycle';
+end $$;
+
+do $$
 declare
   v_config jsonb;
   rejected boolean := false;

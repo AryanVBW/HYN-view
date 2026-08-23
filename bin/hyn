@@ -792,7 +792,7 @@ cmd_doctor() {
   printf '\n%sTimers%s\n' "${C[bold]}" "${C[reset]}"
   if have systemctl; then
     local u
-    for u in hyn-speedtest.timer hyn-record.timer hyn-alerts.timer hyn-report.timer; do
+    for u in hyn-speedtest.timer hyn-record.timer hyn-alerts.timer hyn-report.timer hyn-push.timer; do
       if systemctl cat "$u" >/dev/null 2>&1; then
         local st
         st=$(systemctl is-active "$u" 2>/dev/null)

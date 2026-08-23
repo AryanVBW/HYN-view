@@ -19,8 +19,19 @@
 #     cannot drift. Operators can still choose `check` or `off` in Account or in
 #     the root-owned local config.
 
-UPD_LATEST='' UPD_AVAILABLE=0 UPD_CHECKED=0 UPD_STATE=''
+UPD_LATEST='' UPD_AVAILABLE=0 UPD_CHECKED=0 UPD_STATE='' UPD_LAST_ERR=''
 UPD_REGISTRY='https://registry.npmjs.org'
+UPD_PROGRESS_HOOK=''
+
+# A portal-triggered update installs through the same path as an unattended
+# update. The optional hook lets the cloud command report each durable stage;
+# local/manual updates simply print their normal terminal output.
+update_emit_progress() {
+  local stage=$1 message=$2
+  if [[ -n $UPD_PROGRESS_HOOK ]] && declare -F "$UPD_PROGRESS_HOOK" >/dev/null 2>&1; then
+    "$UPD_PROGRESS_HOOK" "$stage" "$message" || true
+  fi
+}
 
 update_cache_file() {
   state_dir_v
@@ -82,18 +93,32 @@ update_check_async() {
 
 # Blocking check, for `hyn update` and doctor where waiting is the point.
 update_check_now() {
-  have curl || { warn 'curl is required to check for updates'; return 1; }
+  UPD_LAST_ERR=''
+  have curl || {
+    UPD_LAST_ERR='curl is required to check for updates'
+    warn "$UPD_LAST_ERR"
+    return 1
+  }
   local body ver f
   body=$(curl -fsSL --max-time 12 --proto '=https' \
     -H 'Accept: application/vnd.npm.install-v1+json' \
     "$UPD_REGISTRY/$HYN_PKG" 2>/dev/null) || {
-    warn "could not reach $UPD_REGISTRY"
+    UPD_LAST_ERR="could not reach $UPD_REGISTRY"
+    warn "$UPD_LAST_ERR"
     return 1
   }
-  [[ $body == *'"latest"'* ]] || { warn 'unexpected registry response'; return 1; }
+  [[ $body == *'"latest"'* ]] || {
+    UPD_LAST_ERR='unexpected registry response'
+    warn "$UPD_LAST_ERR"
+    return 1
+  }
   ver=${body#*\"latest\":\"}
   ver=${ver%%\"*}
-  [[ $ver =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$ ]] || { warn "bad version from registry: $ver"; return 1; }
+  [[ $ver =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$ ]] || {
+    UPD_LAST_ERR="bad version from registry: $ver"
+    warn "$UPD_LAST_ERR"
+    return 1
+  }
   UPD_LATEST=$ver
   UPD_CHECKED=${EPOCHSECONDS:-0}
   UPD_AVAILABLE=0
@@ -121,9 +146,39 @@ update_detect_method() {
   return 0
 }
 
-# update_apply -- performs the upgrade. Returns 0 only if something changed.
+# Reload and restart only hyn-view's managed timers. Restarting a timer reloads
+# its schedule without firing daily reports or alert jobs out of band. The
+# current hyn-push one-shot is deliberately not restarted from inside itself;
+# this invocation sends a fresh reading after the update finishes.
+update_refresh_services() {
+  is_root || return 0
+  have systemctl || return 0
+  systemctl daemon-reload >/dev/null 2>&1 || {
+    UPD_LAST_ERR='systemd daemon reload failed'
+    return 1
+  }
+
+  local unit state
+  for unit in hyn-speedtest.timer hyn-record.timer hyn-alerts.timer hyn-report.timer hyn-push.timer; do
+    systemctl is-enabled --quiet "$unit" >/dev/null 2>&1 || continue
+    if ! systemctl restart "$unit" >/dev/null 2>&1; then
+      UPD_LAST_ERR="could not restart $unit"
+      return 1
+    fi
+    state=$(systemctl is-active "$unit" 2>/dev/null)
+    if [[ $state != active ]]; then
+      UPD_LAST_ERR="$unit is $state after restart"
+      return 1
+    fi
+  done
+  return 0
+}
+
+# update_apply -- performs the upgrade. Returns 0 only when the package,
+# systemd integration and installed version all verify successfully.
 update_apply() {
-  local force=${1:-0}
+  local force=${1:-0} installed=''
+  UPD_LAST_ERR=''
   update_detect_method
   if ((UPD_AVAILABLE == 0 && force == 0)); then
     printf 'hyn: already on the newest published version (%s)\n' "$HYN_VERSION"
@@ -138,19 +193,45 @@ update_apply() {
         return 1
       fi
       printf 'hyn: updating %s -> %s via npm\n' "$HYN_VERSION" "${UPD_LATEST:-latest}"
+      update_emit_progress installing "Downloading and installing hyn-view ${UPD_LATEST:-latest}"
       if npm install -g "$HYN_PKG@${UPD_LATEST:-latest}" >/dev/null 2>&1; then
         if is_root && [[ -x $HYN_ROOT/bin/hyn ]]; then
+          update_emit_progress restarting 'Refreshing configuration and restarting hyn-view timers'
           if "$HYN_ROOT/bin/hyn" setup --no-wizard >/dev/null 2>&1; then
-            printf 'hyn: updated and background services refreshed. Restart `hyn` to use the new code.\n'
+            if ! update_refresh_services; then
+              warn "package updated, but managed services did not restart cleanly: $UPD_LAST_ERR"
+              return 1
+            fi
           else
+            UPD_LAST_ERR='background services could not be refreshed'
             warn 'package updated, but background services could not be refreshed; run: sudo hyn setup --no-wizard'
+            return 1
           fi
-        else
-          printf 'hyn: updated. Restart `hyn` to use the new code.\n'
         fi
+
+        update_emit_progress verifying 'Verifying the installed CLI and managed timers'
+        if [[ -x $HYN_ROOT/bin/hyn ]]; then
+          installed=$("$HYN_ROOT/bin/hyn" --version 2>/dev/null)
+          installed=${installed##* }
+        fi
+        if [[ -z $installed || ! $installed =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$ ]]; then
+          UPD_LAST_ERR='the installed CLI version could not be verified'
+          warn "$UPD_LAST_ERR"
+          return 1
+        fi
+        if [[ -n $UPD_LATEST && $installed != "$UPD_LATEST" ]]; then
+          UPD_LAST_ERR="expected $UPD_LATEST but found $installed after installation"
+          warn "$UPD_LAST_ERR"
+          return 1
+        fi
+
+        HYN_VERSION=$installed
+        UPD_AVAILABLE=0
+        printf 'hyn: updated to %s; managed services restarted and verified.\n' "$installed"
         return 0
       fi
-      warn 'npm install failed; nothing was changed'
+      UPD_LAST_ERR='npm install failed; nothing was changed'
+      warn "$UPD_LAST_ERR"
       return 1
       ;;
     git)

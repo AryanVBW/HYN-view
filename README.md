@@ -433,6 +433,16 @@ after npm succeeds, so the agent is not reinstalled or manually reconfigured.
 The first-run wizard asks for the policy before anything else, and it can later
 be changed from Account in the portal.
 
+The portal also shows the installed and available agent versions. Choosing
+**Update machine** creates an owner-scoped, one-time command that the agent picks
+up on its next one-minute check-in. The page shows registry check, installation,
+HYN service restart, verification, and final synchronization progress. A
+successful update restarts and verifies every enabled HYN timer, then immediately
+sends fresh telemetry instead of waiting for the configured reporting interval.
+If a machine is offline, the command safely waits for it to check in; run
+`sudo hyn doctor` and `sudo systemctl restart hyn-push.timer` on the server to
+recover a stopped check-in timer.
+
 **Network detail that matters on a server.** Throughput and packet rates, but
 also interface errors and drops, TCP retransmits as a share of segments sent,
 listen-queue drops, socket state distribution, conntrack headroom, UDP receive
