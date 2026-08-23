@@ -1,4 +1,5 @@
-import { bytesPerSecToMbit } from "./dashboard-data.ts";
+import { bytesPerSecToMbit, compareVersions } from "./dashboard-data.ts";
+import { heartbeatState } from "./heartbeat.ts";
 import type { AdminTrendPoint, Metric } from "./types.ts";
 
 type FleetMetric = Pick<Metric, "ts" | "cpu_pct" | "net_rx_bps" | "net_tx_bps">;
@@ -19,6 +20,8 @@ type FreshnessNode = {
   revoked: boolean;
   status: "active" | "paused" | "suspended";
   last_seen_at: string | null;
+  last_heartbeat_at?: string | null;
+  agent_version?: string | null;
   config?: Record<string, unknown> | null;
 };
 
@@ -37,6 +40,24 @@ export function fleetFreshness(node: FreshnessNode, now = Date.now()): FleetFres
   if (node.revoked) return { key: "revoked", label: "revoked", tone: "text-muted-foreground" };
   if (node.status === "suspended") return { key: "suspended", label: "suspended", tone: "text-destructive" };
   if (node.status === "paused") return { key: "paused", label: "paused", tone: "text-[#e8a400]" };
+  if (node.agent_version && compareVersions(node.agent_version, "1.7.0") >= 0) {
+    const heartbeat = heartbeatState(node.last_heartbeat_at, now);
+    if (heartbeat.key === "connected") {
+      return { key: "reporting", label: "reporting", tone: "text-primary" };
+    }
+    if (heartbeat.key === "delayed") {
+      return {
+        key: "reporting",
+        label: `delayed ${Math.max(1, Math.floor((heartbeat.ageSeconds ?? 0) / 60))}m`,
+        tone: "text-[#e8a400]",
+      };
+    }
+    return {
+      key: "quiet",
+      label: heartbeat.ageSeconds === null ? "never heartbeated" : `quiet ${Math.round(heartbeat.ageSeconds / 60)}m`,
+      tone: heartbeat.ageSeconds === null ? "text-muted-foreground" : "text-destructive",
+    };
+  }
   if (!node.last_seen_at) return { key: "quiet", label: "never reported", tone: "text-muted-foreground" };
 
   const seenAt = new Date(node.last_seen_at).getTime();

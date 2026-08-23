@@ -1,25 +1,27 @@
 import { compareVersions, newestVersion } from "@/lib/dashboard-data";
+import { AdminFleetUpdateButton } from "@/components/admin/client-actions";
 import type { AdminNode } from "@/lib/types";
 
-// Which hyn CLI versions are running across the fleet, and how many machines are
-// behind. The yardstick is the newest version reporting in, not the npm registry:
-// no page load should depend on an outbound request, and "older than one of your
-// own boxes" is a claim that cannot be wrong. Demo nodes carry a fake version and
-// are excluded from both the yardstick and the counts.
+// The registry result is reported by the agents themselves during telemetry, so
+// this page does not make an outbound request and the update button can use the
+// exact release each machine observed.
 export function AgentVersions({ nodes }: { nodes: AdminNode[] }) {
   const real = nodes.filter((n) => !n.is_demo);
   if (real.length === 0) return null;
 
-  const newest = newestVersion(real.map((n) => n.agent_version));
+  const newestInstalled = newestVersion(real.map((n) => n.agent_version));
+  const newestRelease = newestVersion(real.map((n) => n.latest_agent_version));
+  const newest = newestRelease ?? newestInstalled;
   const counts = new Map<string, number>();
   for (const n of real) {
     const key = n.agent_version ?? "unknown";
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   const rows = [...counts.entries()].sort((a, b) => compareVersions(b[0], a[0]));
-  const behind = real.filter(
-    (n) => !n.agent_version || (newest !== null && compareVersions(n.agent_version, newest) < 0)
-  ).length;
+  const behind = real.filter((n) => n.update_available || (
+    n.latest_agent_version !== null &&
+    (!n.agent_version || compareVersions(n.agent_version, n.latest_agent_version) < 0)
+  )).length;
 
   return (
     <div className="terminal-panel p-6">
@@ -31,7 +33,7 @@ export function AgentVersions({ nodes }: { nodes: AdminNode[] }) {
           </p>
         </div>
         <p className="font-mono text-xs text-muted-foreground">
-          newest reporting:{" "}
+          latest reported release:{" "}
           <span className="text-card-foreground">hyn {newest ?? "unknown"}</span>
           {behind > 0 ? (
             <span className="text-[#e8a400]">
@@ -63,6 +65,7 @@ export function AgentVersions({ nodes }: { nodes: AdminNode[] }) {
           );
         })}
       </ul>
+      <AdminFleetUpdateButton nodes={real} />
     </div>
   );
 }

@@ -71,3 +71,24 @@ test("fleet freshness keeps a safe minimum window for one-minute reporting", () 
   }, now);
   assert.equal(state.key, "reporting");
 });
+
+test("heartbeat-capable agents go quiet after three missed one-minute heartbeats", () => {
+  const now = Date.parse("2026-08-24T12:00:00.000Z");
+  const base = {
+    revoked: false,
+    status: "active" as const,
+    agent_version: "1.7.0",
+    last_seen_at: "2026-08-24T11:59:30.000Z",
+    last_heartbeat_at: "2026-08-24T11:57:31.000Z",
+    config: { cloud_push_min: "10" },
+  };
+  assert.deepEqual(fleetFreshness(base, now), {
+    key: "reporting",
+    label: "delayed 2m",
+    tone: "text-[#e8a400]",
+  });
+  assert.equal(
+    fleetFreshness({ ...base, last_heartbeat_at: "2026-08-24T11:57:00.000Z" }, now).key,
+    "quiet",
+  );
+});

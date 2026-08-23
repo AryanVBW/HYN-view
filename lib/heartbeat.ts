@@ -13,15 +13,23 @@ function elapsed(seconds: number) {
   return remainder === 0 ? `${minutes}m` : `${minutes}m ${remainder}s`;
 }
 
-export function heartbeatState(iso: string | null | undefined, now = Date.now()): HeartbeatState {
+export function heartbeatState(
+  iso: string | null | undefined,
+  now = Date.now(),
+  quietAfterSeconds = 180,
+): HeartbeatState {
   const receivedAt = typeof iso === "string" ? Date.parse(iso) : Number.NaN;
   if (!Number.isFinite(receivedAt) || !Number.isFinite(now)) {
     return { key: "unknown", ageSeconds: null, label: "Heartbeat unknown" };
   }
   const ageSeconds = Math.max(0, Math.floor((now - receivedAt) / 1_000));
-  const key: HeartbeatKey = ageSeconds < 90
+  const quietAfter = Number.isFinite(quietAfterSeconds) && quietAfterSeconds >= 2
+    ? quietAfterSeconds
+    : 180;
+  const delayedAfter = Math.floor(quietAfter / 2);
+  const key: HeartbeatKey = ageSeconds < delayedAfter
     ? "connected"
-    : ageSeconds < 180
+    : ageSeconds < quietAfter
       ? "delayed"
       : "quiet";
   const prefix = key === "connected" ? "Connected" : key === "delayed" ? "Delayed" : "Gone quiet";

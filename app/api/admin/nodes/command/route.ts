@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
+import { start } from "workflow/api";
 import { createClient } from "@/lib/supabase/server";
 import {
   type CommandKind,
   NODE_COMMAND_COLUMNS,
   normalizeNodeCommand,
 } from "@/lib/node-command";
+import { monitorNodeUpdate } from "@/workflows/node-update";
 
 export const runtime = "nodejs";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -59,11 +61,21 @@ export async function POST(request: Request) {
     p_command: commandKind,
   });
   if (error) return NextResponse.json({ message: error.message }, { status: 403 });
-  const command = normalizeNodeCommand(data);
+  const raw = data as Record<string, unknown> | null;
+  const command = normalizeNodeCommand(raw);
   if (!command) {
     return NextResponse.json({ message: "the command request returned an invalid response" }, { status: 502 });
   }
-  return NextResponse.json({ command }, {
+  let workflowRunId: string | null = null;
+  if (commandKind === "update" && raw?.created === true) {
+    try {
+      const run = await start(monitorNodeUpdate, [command.id]);
+      workflowRunId = run.runId;
+    } catch (workflowError) {
+      console.error("[admin-node-update] could not start timeout monitor", workflowError);
+    }
+  }
+  return NextResponse.json({ command, workflowRunId }, {
     status: 202,
     headers: { "Cache-Control": "no-store" },
   });

@@ -190,6 +190,8 @@ export type AdminNode = {
   last_temp_c: number | null;
   last_mem_pct: number | null;
   last_disk_pct: number | null;
+  latest_agent_version: string | null;
+  update_available: boolean;
 };
 
 export type AdminClient = {

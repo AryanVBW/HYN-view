@@ -25,3 +25,8 @@ test("missing, invalid, and future heartbeats are reported honestly", () => {
   });
   assert.equal(heartbeatState("2026-08-24T12:00:30Z", now).ageSeconds, 0);
 });
+
+test("legacy agents use their configured three-report compatibility window", () => {
+  assert.equal(heartbeatState("2026-08-24T11:35:01Z", now, 1_800).key, "delayed");
+  assert.equal(heartbeatState("2026-08-24T11:30:00Z", now, 1_800).key, "quiet");
+});

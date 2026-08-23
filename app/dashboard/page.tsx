@@ -22,6 +22,7 @@ import type { AlertEvent, Metric, Node, Speedtest } from "@/lib/types";
 import { NODE_COLUMNS } from "@/lib/types";
 import {
   formatRelative,
+  compareVersions,
   toCpuSeries,
   toMemSeries,
   toNetSeries,
@@ -147,7 +148,17 @@ export default async function DashboardPage({
 
   const latest = metrics[metrics.length - 1];
   const durableHeartbeat = node.last_heartbeat_at ?? node.last_config_pull_at ?? node.last_seen_at;
-  const heartbeat = heartbeatState(durableHeartbeat);
+  const configuredInterval = Number(node.config?.cloud_push_min ?? 10);
+  const legacyQuietSeconds = Math.max(
+    15,
+    Number.isInteger(configuredInterval) && configuredInterval >= 1 && configuredInterval <= 1440
+      ? configuredInterval * 3
+      : 30,
+  ) * 60;
+  const quietAfterSeconds = node.agent_version && compareVersions(node.agent_version, "1.7.0") >= 0
+    ? 180
+    : legacyQuietSeconds;
+  const heartbeat = heartbeatState(durableHeartbeat, Date.now(), quietAfterSeconds);
   const agentRelease = readAgentRelease(latest.payload);
 
   return (
@@ -182,7 +193,7 @@ export default async function DashboardPage({
                 suspended
               </span>
             ) : (
-              <HeartbeatIndicator heartbeatAt={durableHeartbeat} />
+              <HeartbeatIndicator heartbeatAt={durableHeartbeat} quietAfterSeconds={quietAfterSeconds} />
             )}
             {node.is_demo ? <DemoDataButton mode="clear" /> : null}
           </div>
