@@ -576,7 +576,7 @@ Keys worth knowing:
 | `alert_min_severity` | `warn` | `crit`, `warn` or `info` |
 | `alert_repeat_hours` | `6` | reminder interval while still firing |
 | `report_at` | `08:00` | server local time |
-| `auto_update` | `check` | `off`, `check` or `install` |
+| `auto_update` | `install` | `off`, `check` or `install`; linked installs stay synchronized by default |
 | `onboarding` | `on` | offer guided setup on first interactive launch |
 | `cloud_enabled` | `off` | set by `hyn link`; gates the portal push timer |
 | `cloud_api_url` | `https://www.hyn-view.in/api/agent/v1` | hosted agent API; no customer key required |

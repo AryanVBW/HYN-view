@@ -541,6 +541,12 @@ cloud_command_report() {
   local status=$1 stage=$2 message=$3 target=${4:-} result=${5:-}
   local token body
   [[ -n $CLOUD_COMMAND_ID ]] || return 1
+  # Match the database contract even when curl/npm returns a very long error.
+  # A progress report must never fail merely because its diagnostic text was
+  # larger than the bounded command row can accept.
+  message=${message:0:500}
+  target=${target:0:64}
+  result=${result:0:64}
   token=$(secret cloud_node_token)
   body="{\"p_node_token\": \"$(_jstr "$token")\""
   body+=", \"p_command_id\": \"$(_jstr "$CLOUD_COMMAND_ID")\""
@@ -620,8 +626,23 @@ cloud_command_poll() {
   if update_apply 1; then
     UPD_PROGRESS_HOOK=''
     CLOUD_COMMAND_UPDATED=1
+    # Do not declare the portal operation complete until a full snapshot using
+    # the newly installed version has been accepted. Otherwise the modal and
+    # completion email can say "updated" while every chart and the fleet
+    # version still show the pre-update reading until the next interval.
+    cloud_command_report running verifying \
+      "Synchronizing fresh telemetry from hyn-view $HYN_VERSION" \
+      "$CLOUD_COMMAND_TARGET" "$HYN_VERSION" || true
+    cloud_collect_full
+    if ! cloud_ingest_collected 1 || ((CLOUD_INGESTED == 0)); then
+      cloud_command_report failed failed \
+        "hyn-view $HYN_VERSION was installed and its services restarted, but fresh telemetry did not reach the portal: ${CLOUD_LAST_ERR:-upload failed; run sudo hyn doctor}" \
+        "$CLOUD_COMMAND_TARGET" "$HYN_VERSION" || true
+      return 1
+    fi
+    CLOUD_COMMAND_SYNCED=1
     cloud_command_report succeeded completed \
-      "Updated to hyn-view $HYN_VERSION; managed services restarted and verified" \
+      "Updated to hyn-view $HYN_VERSION; managed services restarted, verified, and current telemetry synchronized" \
       "$CLOUD_COMMAND_TARGET" "$HYN_VERSION" || true
     return 0
   fi
