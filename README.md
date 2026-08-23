@@ -36,10 +36,12 @@ EMAIL_FROM
 CRON_SECRET
 ```
 
-`vercel.json` invokes `/api/cron/email` every minute. The worker checks each
-account's local time, claims an idempotency key before sending, writes the
-delivery result to `notification_log`, and never exposes provider credentials
-to a browser or monitored server.
+`vercel.json` invokes `/api/cron/email` once daily at 12:00 UTC so the portal
+can deploy on Vercel Hobby. The worker checks each account's local send-time
+threshold, claims an idempotency key before sending, writes the delivery result
+to `notification_log`, and never exposes provider credentials to a browser or
+monitored server. Minute-accurate delivery requires Vercel Pro or an external
+scheduler calling the same protected route.
 
 ## Verification
 
