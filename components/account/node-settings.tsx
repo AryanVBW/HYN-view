@@ -185,7 +185,7 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
           Saved. {node?.name} will apply this on its next check-in
           {node?.last_config_pull_at
             ? ` (last pulled ${new Date(node.last_config_pull_at).toLocaleString()})`
-            : " — it has not pulled config yet; run `hyn config pull` to apply now"}
+            : " — it has not pulled config yet; use Sync now on the dashboard or run `sudo hyn cloud pull`"}
           .
         </p>
       ) : null}

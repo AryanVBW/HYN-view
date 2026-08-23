@@ -33,3 +33,18 @@ test("Vercel Workflow endpoints bypass the authentication proxy", () => {
   assert.match(proxy, /\.well-known\/workflow\//);
   assert.match(nextConfig, /withWorkflow\(nextConfig\)/);
 });
+
+test("accepted telemetry evaluates user email schedules with the daily cron as fallback", () => {
+  const agentRoute = readFileSync(
+    new URL("../app/api/agent/v1/[action]/route.ts", import.meta.url),
+    "utf8",
+  );
+  const cronRoute = readFileSync(
+    new URL("../app/api/cron/email/route.ts", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(agentRoute, /rpc === "hyn_ingest"[\s\S]*dispatchScheduledEmails\(nodeId\)/);
+  assert.match(cronRoute, /dispatchScheduledEmails\(\)/);
+  assert.match(cronRoute, /maxDuration = 300/);
+});
