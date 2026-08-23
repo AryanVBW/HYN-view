@@ -457,13 +457,85 @@ _cloud_push_stamp() {
   printf '%s/cloud-last-push' "$STATE_DIR"
 }
 
+# The managed web channel sends only event content. Recipient, sender and
+# provider credentials are resolved by the portal from the node owner.
+cloud_web_notify() {
+  local subject=${1:0:300} text=${2:0:10000} html=${3:0:20000}
+  local severity=${4:-info} category=${5:-alert} token body checksum bucket material
+  cloud_configured && cloud_linked || {
+    CLOUD_LAST_ERR='the machine must be linked before using the web channel'
+    return 1
+  }
+  case $severity in info | warn | crit) ;; *) severity=info ;; esac
+  case $category in alert | report | test | other) ;; *) category=other ;; esac
+  bucket=$((${EPOCHSECONDS:-0} / 600))
+  material="$category|$severity|$subject|$text|$bucket"
+  checksum=$(printf '%s' "$material" | cksum 2>/dev/null) || checksum='0'
+  checksum=${checksum%% *}
+  token=$(secret cloud_node_token)
+  body="{\"p_node_token\": \"$(_jstr "$token")\", \"p_event\": {"
+  body+="\"fingerprint\": \"$(_jstr "$category:$severity:$bucket:$checksum")\""
+  body+=", \"category\": \"$(_jstr "$category")\""
+  body+=", \"severity\": \"$(_jstr "$severity")\""
+  body+=", \"subject\": \"$(_jstr "$subject")\""
+  body+=", \"text_body\": \"$(_jstr "$text")\""
+  body+=", \"html_body\": \"$(_jstr "$html")\"}}"
+  _cloud_rpc hyn_queue_web_notification "$body"
+}
+
+# Expensive collection is shared by scheduled pushes, first-link telemetry and
+# one-off synchronization commands. Keeping one implementation prevents the
+# dashboard sync button from returning a reduced snapshot.
+cloud_collect_full() {
+  alerts_collect
+  alerts_evaluate
+  net_link "${NET_WAN:-}" 2>/dev/null || true
+  net_identity 1 2>/dev/null || true
+  net_tuning 2>/dev/null || true
+  local prows=${CFG[proc_rows]:-8} psort=${CFG[proc_sort]:-cpu}
+  proc_sample 0 "$prows" "$psort" 2>/dev/null || true
+  sleep 1
+  proc_sample 1000 "$prows" "$psort" 2>/dev/null || true
+  cloud_payload_v
+}
+
+cloud_ingest_collected() {
+  local quiet=${1:-0} token body f
+  CLOUD_INGESTED=0
+  token=$(secret cloud_node_token)
+  body="{\"p_node_token\": \"$(_jstr "$token")\", \"p_payload\": $CLOUD_PAYLOAD}"
+  f=$(_cloud_push_stamp)
+  if _cloud_rpc hyn_ingest "$body"; then
+    CLOUD_INGESTED=1
+    printf '%s\tok\n' "${EPOCHSECONDS:-0}" >"$f" 2>/dev/null
+    ((quiet)) || printf 'hyn: pushed to %s\n' "$(cloud_url)"
+    cloud_notify_flush 1
+    return 0
+  fi
+  case $CLOUD_LAST_ERR in
+    *'node paused'*)
+      printf '%s\tpaused\n' "${EPOCHSECONDS:-0}" >"$f" 2>/dev/null
+      ((quiet)) || printf 'hyn: monitoring is paused for this node by an administrator\n'
+      return 0 ;;
+    *'node suspended'*)
+      printf '%s\tsuspended\t%s\n' "${EPOCHSECONDS:-0}" "$CLOUD_LAST_ERR" >"$f" 2>/dev/null
+      warn "this node is suspended: $CLOUD_LAST_ERR"
+      return 1 ;;
+  esac
+  printf '%s\tfail\t%s\n' "${EPOCHSECONDS:-0}" "$CLOUD_LAST_ERR" >"$f" 2>/dev/null
+  ((quiet)) || warn "push failed: $CLOUD_LAST_ERR"
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # portal-requested maintenance
 # ---------------------------------------------------------------------------
 CLOUD_COMMAND_CLAIMED=0
 CLOUD_COMMAND_UPDATED=0
+CLOUD_COMMAND_SYNCED=0
 CLOUD_COMMAND_ID=''
 CLOUD_COMMAND_TARGET=''
+CLOUD_INGESTED=0
 
 cloud_command_report() {
   local status=$1 stage=$2 message=$3 target=${4:-} result=${5:-}
@@ -493,6 +565,7 @@ cloud_command_poll() {
   local quiet=${1:-0} token body status action id
   CLOUD_COMMAND_CLAIMED=0
   CLOUD_COMMAND_UPDATED=0
+  CLOUD_COMMAND_SYNCED=0
   CLOUD_COMMAND_ID=''
   CLOUD_COMMAND_TARGET=''
 
@@ -506,13 +579,30 @@ cloud_command_poll() {
   [[ $status == command ]] || return 0
   json_field_v "$CLOUD_LAST_BODY" id && id=$JSON_FIELD
   json_field_v "$CLOUD_LAST_BODY" action && action=$JSON_FIELD
-  if [[ ! $id =~ ^[0-9A-Fa-f-]{36}$ || $action != update ]]; then
+  if [[ ! $id =~ ^[0-9A-Fa-f-]{36}$ || ( $action != update && $action != sync ) ]]; then
     ((quiet)) || warn "portal returned an invalid maintenance command (id=${id:-missing}, action=${action:-missing})"
     return 1
   fi
 
   CLOUD_COMMAND_CLAIMED=1
   CLOUD_COMMAND_ID=$id
+  if [[ $action == sync ]]; then
+    cloud_command_report running collecting 'Collecting a complete system snapshot' '' '' || true
+    cloud_collect_full
+    cloud_command_report running uploading 'Uploading current telemetry to HYN-view' '' '' || true
+    if ! cloud_ingest_collected 1 || ((CLOUD_INGESTED == 0)); then
+      cloud_command_report failed failed \
+        "${CLOUD_LAST_ERR:-synchronization could not upload; run sudo hyn doctor on the machine}" \
+        '' '' || true
+      return 1
+    fi
+    cloud_command_report running verifying 'Confirming the new reading reached the portal' '' '' || true
+    cloud_command_report succeeded completed \
+      'Synchronization completed and the portal accepted the current reading' '' "$HYN_VERSION" || true
+    CLOUD_COMMAND_SYNCED=1
+    return 0
+  fi
+
   if ! cloud_command_report running checking 'Checking the npm registry for the newest hyn-view release' '' ''; then
     ((quiet)) || warn "could not report command progress: $CLOUD_LAST_ERR"
   fi
@@ -544,6 +634,7 @@ cloud_command_poll() {
 
 cloud_push() {
   local quiet=${1:-0} respect_interval=${2:-0}
+  CLOUD_COMMAND_SYNCED=0
   cloud_configured || {
     ((quiet)) || warn 'not configured for cloud sync; run: sudo hyn link'
     return 1
@@ -564,6 +655,9 @@ cloud_push() {
     # detached automatic updater. With no command, a policy change to
     # auto_update still takes effect in this same check-in.
     cloud_command_poll 1 || true
+    # Sync performs its own complete collection and ingest. Do not immediately
+    # send a duplicate snapshot from the ordinary scheduled path.
+    ((CLOUD_COMMAND_SYNCED)) && return 0
     ((CLOUD_COMMAND_CLAIMED)) || update_startup
   fi
 
@@ -582,58 +676,8 @@ cloud_push() {
     fi
   fi
 
-  # One call samples everything the alert engine needs, which is a superset of
-  # what the payload needs -- including the second sample a rate requires.
-  alerts_collect
-  alerts_evaluate
-
-  # Three things the alert path has no use for, so it does not collect them:
-  # the WAN link's negotiated speed, the kernel's TCP tuning (the congestion
-  # control the Highway panel reports), and the top processes. Process CPU is a
-  # rate, so it needs two samples a second apart like any other.
-  net_link "${NET_WAN:-}" 2>/dev/null || true
-  net_identity 1 2>/dev/null || true
-  net_tuning 2>/dev/null || true
-  local prows=${CFG[proc_rows]:-8} psort=${CFG[proc_sort]:-cpu}
-  proc_sample 0 "$prows" "$psort" 2>/dev/null || true
-  sleep 1
-  proc_sample 1000 "$prows" "$psort" 2>/dev/null || true
-
-  cloud_payload_v
-
-  local token body
-  token=$(secret cloud_node_token)
-  # The token is a body field, not a header or an argument, so it stays out of
-  # /proc/<pid>/cmdline.
-  body="{\"p_node_token\": \"$(_jstr "$token")\", \"p_payload\": $CLOUD_PAYLOAD}"
-
-  local f
-  f=$(_cloud_push_stamp)
-  if _cloud_rpc hyn_ingest "$body"; then
-    printf '%s\tok\n' "${EPOCHSECONDS:-0}" >"$f" 2>/dev/null
-    ((quiet)) || printf 'hyn: pushed to %s\n' "$(cloud_url)"
-    # Piggyback the delivery report on the push, so one timer covers both.
-    cloud_notify_flush 1
-    return 0
-  fi
-
-  # A paused or suspended node is an administrative decision, not a fault. Say
-  # so plainly and exit zero for pause, so a maintenance window does not fill the
-  # journal with failures that look like a broken agent.
-  case $CLOUD_LAST_ERR in
-    *'node paused'*)
-      printf '%s\tpaused\n' "${EPOCHSECONDS:-0}" >"$f" 2>/dev/null
-      ((quiet)) || printf 'hyn: monitoring is paused for this node by an administrator\n'
-      return 0 ;;
-    *'node suspended'*)
-      printf '%s\tsuspended\t%s\n' "${EPOCHSECONDS:-0}" "$CLOUD_LAST_ERR" >"$f" 2>/dev/null
-      warn "this node is suspended: $CLOUD_LAST_ERR"
-      return 1 ;;
-  esac
-
-  printf '%s\tfail\t%s\n' "${EPOCHSECONDS:-0}" "$CLOUD_LAST_ERR" >"$f" 2>/dev/null
-  ((quiet)) || warn "push failed: $CLOUD_LAST_ERR"
-  return 1
+  cloud_collect_full
+  cloud_ingest_collected "$quiet"
 }
 
 # ---------------------------------------------------------------------------
@@ -757,6 +801,12 @@ cloud_link() {
   secret_set cloud_node_token "$node_token" || die 'could not write the node token to secrets'
   config_set cloud_node_id "$node_id" || return 1
   config_set cloud_enabled on || return 1
+  # The portal is the managed delivery plane. Fresh installs need no local
+  # provider setup, while an operator's explicit smtp/resend/webhook choice is
+  # never overwritten.
+  if [[ -z ${CFG[notify_channels]:-} ]]; then
+    config_set notify_channels web || return 1
+  fi
 
   printf '\n'
   printf '  Linked. This node is "%s" (%s).\n' "${node_name:-$HOSTNAME_S}" "$node_id"

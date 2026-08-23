@@ -166,7 +166,13 @@ eq 'node token is stored'  "$(printf 'b%.0s' {1..64})" "$(secret cloud_node_toke
 eq 'node id is stored'     '3f7a0000-0000-4000-8000-000000000001' "${CFG[cloud_node_id]}"
 eq 'cloud is enabled'      'on' "${CFG[cloud_enabled]}"
 eq 'dashboard controls the update policy' 'install' "${CFG[auto_update]}"
+eq 'a linked machine defaults to the portal web channel' 'web' "${CFG[notify_channels]}"
 truthy 'secrets file is 0600' '[[ $(stat -f "%Lp" "$HYN_ETC/secrets" 2>/dev/null || stat -c "%a" "$HYN_ETC/secrets") == 600 ]]'
+
+NOTIFY_CATEGORY=alert
+truthy 'the default web channel queues an alert with the portal' \
+  'notify_send warn "[hyn] web-01 disk warning" "Disk / is at 86%" "<p>Disk / is at 86%</p>"'
+NOTIFY_CATEGORY=''
 
 # The next one-minute check-in receives a portal update command. It must report
 # each stage and continue into a fresh full telemetry push with the new version.
@@ -175,6 +181,17 @@ cloud_push 0 0
 command_rc=$?
 eq 'portal update command completes during a push' 0 "$command_rc"
 eq 'portal update changes the running agent version' '1.8.0' "$HYN_VERSION"
+
+# A synchronization is an explicit full-data request. It must bypass the normal
+# telemetry interval once and report its distinct collection/upload stages.
+printf '%s\tok\n' "${EPOCHSECONDS:-0}" >"$(_cloud_push_stamp)"
+before_sync_ingest=$(grep -c hyn_ingest "$REQLOG")
+curl -sS "http://127.0.0.1:$PORT/command/sync" >/dev/null
+cloud_push 0 1
+sync_rc=$?
+after_sync_ingest=$(grep -c hyn_ingest "$REQLOG")
+eq 'portal sync command completes during a scheduled check-in' 0 "$sync_rc"
+eq 'portal sync bypasses the telemetry interval exactly once' "$((before_sync_ingest + 1))" "$after_sync_ingest"
 
 # The anon key is public and belongs in the config; the token never does.
 cfgtext=$(<"$HYN_ETC/config")
@@ -195,6 +212,14 @@ contains 'command reports installation' '\"p_stage\": \"installing\"' "$reqs"
 contains 'command reports timer restart' '\"p_stage\": \"restarting\"' "$reqs"
 contains 'command reports verification' '\"p_stage\": \"verifying\"' "$reqs"
 contains 'command reports completion' '\"p_stage\": \"completed\"' "$reqs"
+contains 'sync reports collection' '\"p_stage\": \"collecting\"' "$reqs"
+contains 'sync reports upload' '\"p_stage\": \"uploading\"' "$reqs"
+contains 'web alert is queued through the agent RPC' '/rest/v1/rpc/hyn_queue_web_notification' "$reqs"
+web_line=$(printf '%s\n' "$reqs" | grep hyn_queue_web_notification | tail -1)
+missing 'web alert cannot select a recipient' 'recipient' "$web_line"
+missing 'web alert cannot carry a provider credential' 'api_key' "$web_line"
+delivery_lines=$(printf '%s\n' "$reqs" | grep hyn_report_notification || true)
+missing 'queued web alerts are not falsely reported as already sent' '[hyn] web-01 disk warning' "$delivery_lines"
 contains 'apikey header is sent'   '"apikey": "test.anon.key"'     "$reqs"
 contains 'bearer auth is sent'     'Bearer test.anon.key'          "$reqs"
 contains 'content type is json'    'application/json'              "$reqs"
@@ -434,12 +459,15 @@ eq 'cloud disabled after unlink' 'off' "${CFG[cloud_enabled]}"
 CFG[cloud_api_url]="http://127.0.0.1:$PORT/api/agent/v1"
 CFG[cloud_portal_url]='https://www.hyn-view.in'
 CFG[cloud_url]='' CFG[cloud_anon_key]=''
+config_set notify_channels smtp >/dev/null
 out=$(cloud_link 2>&1)
 rc=$?
 eq 'zero-config hosted link succeeds' 0 "$rc"
 missing 'hosted link does not ask for a Supabase URL' 'Supabase project URL' "$out"
 missing 'hosted link does not ask for an anon key' 'Supabase anon key' "$out"
 contains 'hosted link prints the product pairing page' 'https://www.hyn-view.in/link' "$out"
+cfg_load
+eq 'an existing local notification channel is preserved' 'smtp' "${CFG[notify_channels]}"
 SECRETS_LOADED=0
 truthy 'hosted link stores a node token' '[[ -n $(secret cloud_node_token) ]]'
 cloud_unlink >/dev/null

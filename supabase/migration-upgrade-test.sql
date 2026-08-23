@@ -57,6 +57,38 @@ begin
 end $$;
 
 do $$
+begin
+  if not exists (
+    select 1 from information_schema.columns
+     where table_schema = 'public' and table_name = 'nodes'
+       and column_name = 'last_heartbeat_at'
+  ) then
+    raise exception 'upgrade did not install durable machine heartbeats';
+  end if;
+  if to_regprocedure('public.hyn_request_node_command(uuid,text)') is null
+     or to_regprocedure('public.hyn_admin_request_node_command(uuid,text)') is null
+     or to_regprocedure('public.hyn_claim_node_watchdog(text)') is null
+     or to_regprocedure('public.hyn_queue_web_notification(text,jsonb)') is null
+     or to_regprocedure('public.hyn_claim_admin_report(uuid)') is null then
+    raise exception 'upgrade did not install every heartbeat, command, alert, and report RPC';
+  end if;
+  if to_regclass('public.web_notification_jobs') is null
+     or to_regclass('public.node_watchdogs') is null
+     or to_regclass('public.admin_report_jobs') is null then
+    raise exception 'upgrade did not install durable delivery state';
+  end if;
+  update public.profiles set role = 'admin'
+   where id = '33333333-3333-3333-3333-333333333333';
+  perform set_config('test.uid', '33333333-3333-3333-3333-333333333333', true);
+  if not (public.hyn_admin_nodes()::jsonb->0 ? 'last_heartbeat_at')
+     or not (public.hyn_admin_nodes()::jsonb->0 ? 'latest_agent_version')
+     or not (public.hyn_admin_nodes()::jsonb->0 ? 'update_available') then
+    raise exception 'upgrade did not expose heartbeat and release state to administrators';
+  end if;
+  raise notice 'PASS  upgrade installs heartbeat, sync, web alert, and report contracts';
+end $$;
+
+do $$
 declare
   v_config jsonb;
   rejected boolean := false;

@@ -4,7 +4,7 @@
 # One job: take a subject, a body and a severity, and get it to the operator.
 # Everything is a curl call, so there is no new dependency.
 #
-# Channels: resend | brevo | smtp | telegram | ntfy | webhook | stdout
+# Channels: web | resend | brevo | smtp | telegram | ntfy | webhook | stdout
 #
 # SECRETS. API keys live in $HYN_ETC/secrets at mode 0600, never in
 # $HYN_ETC/config which is world-readable 0644. Two further rules are enforced
@@ -495,6 +495,19 @@ ch_stdout() {
   return 0
 }
 
+ch_web() {
+  local subject=$1 text=$2 html=$3 sev=$4
+  if ! declare -F cloud_web_notify >/dev/null 2>&1; then
+    NOTIFY_LAST_ERR='web delivery needs the cloud module'
+    return 1
+  fi
+  if cloud_web_notify "$subject" "$text" "$html" "$sev" "${NOTIFY_CATEGORY:-alert}"; then
+    return 0
+  fi
+  NOTIFY_LAST_ERR=${CLOUD_LAST_ERR:-portal rejected the web notification}
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # dispatch
 # ---------------------------------------------------------------------------
@@ -538,6 +551,7 @@ notify_apply_template() {
 _notify_target() {
   local ch=$1 u
   case $ch in
+    web) printf 'web portal' ;;
     resend | brevo | smtp) printf '%s' "${CFG[notify_to]:-}" ;;
     ntfy) printf '%s/%s' "${CFG[ntfy_server]:-}" "${CFG[ntfy_topic]:-}" ;;
     telegram) printf 'chat %s' "${CFG[telegram_chat_id]:-}" ;;
@@ -574,6 +588,7 @@ notify_send() {
     NOTIFY_LAST_ERR=''
     local chok=0
     case $ch in
+      web) ch_web "$subject" "$text" "$html" "$sev" && chok=1 ;;
       resend) ch_resend "$subject" "$text" "$html" "$sev" && chok=1 ;;
       brevo) ch_brevo "$subject" "$text" "$html" "$sev" && chok=1 ;;
       smtp) ch_smtp "$subject" "$text" "$html" "$sev" && chok=1 ;;
@@ -589,7 +604,10 @@ notify_send() {
     # notifications went out and why any failed. Guarded because notify.sh is
     # usable without the cloud layer loaded, and a reporting problem must never
     # stop an alert from being sent.
-    if declare -F cloud_notify_record >/dev/null 2>&1; then
+    # Web delivery is only queued here. The portal records the actual Resend
+    # result after its durable worker runs; reporting it as sent now would make
+    # the dashboard lie during a provider failure.
+    if [[ $ch != web ]] && declare -F cloud_notify_record >/dev/null 2>&1; then
       cloud_notify_record "$ch" "$(_notify_target "$ch")" "$sev" "$subject" \
         "$( ((chok)) && printf 'sent' || printf 'failed')" \
         "$NOTIFY_LAST_ERR" "${NOTIFY_CATEGORY:-alert}" || true
