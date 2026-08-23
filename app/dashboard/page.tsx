@@ -158,6 +158,7 @@ export default async function DashboardPage({
   const quietAfterSeconds = node.agent_version && compareVersions(node.agent_version, "1.7.0") >= 0
     ? 180
     : legacyQuietSeconds;
+  const heartbeatCapable = quietAfterSeconds === 180;
   const heartbeat = heartbeatState(durableHeartbeat, Date.now(), quietAfterSeconds);
   const agentRelease = readAgentRelease(latest.payload);
 
@@ -222,9 +223,12 @@ export default async function DashboardPage({
 
         {node.status === "active" && heartbeat.key === "quiet" && !node.is_demo ? (
           <p className="border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs leading-6 text-destructive">
-            This machine missed three configured telemetry intervals. HYN-view retries every
-            minute; the charts show the last received values. A portal update will run as soon
-            as the machine checks in. On the server, run <code>sudo hyn doctor</code> and{" "}
+            {heartbeatCapable
+              ? "This machine missed three one-minute heartbeat intervals. "
+              : `This machine missed three configured telemetry intervals (${configuredInterval} minutes each). `}
+            HYN-view retries every minute; the charts show the last received values. A queued
+            synchronization or update will run as soon as the machine checks in. On the server,
+            run <code>sudo hyn doctor</code> and{" "}
             <code>systemctl status hyn-push.timer</code>.
           </p>
         ) : null}

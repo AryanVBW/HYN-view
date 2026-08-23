@@ -8,6 +8,7 @@ import {
   observedPublicIp,
 } from "@/lib/agent-api";
 import { buildSystemSummaryContent, renderHynEmailShell, sendResendEmail } from "@/lib/cloud-email";
+import { dispatchScheduledEmails } from "@/lib/scheduled-email";
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from "@/lib/supabase/config";
 import {
   dispatchCommandNotification,
@@ -141,6 +142,7 @@ export async function POST(
 
   if (rpc === "hyn_ingest") {
     const nodeToken = typeof body.p_node_token === "string" ? body.p_node_token : "";
+    const nodeId = typeof response?.node_id === "string" ? response.node_id : null;
     if (nodeToken) {
       const publicIp = observedPublicIp(
         request.headers.get("x-forwarded-for") ?? request.headers.get("x-real-ip"),
@@ -202,6 +204,13 @@ export async function POST(
             });
           } else {
             await supabase.rpc("hyn_release_first_telemetry_email", { p_node_token: nodeToken });
+          }
+        }
+        if (nodeId) {
+          try {
+            await dispatchScheduledEmails(nodeId);
+          } catch (scheduledError) {
+            console.error("[scheduled-email] telemetry-triggered dispatch failed", scheduledError);
           }
         }
       });

@@ -165,7 +165,7 @@ export default async function AdminPage({
   const cards: AdminStat[] = [
     { label: "Clients", value: overview.clients_total, note: `${overview.admins} administrators` },
     { label: "Machines", value: overview.nodes_total, note: `${overview.nodes_active} enabled` },
-    { label: "Gone quiet", value: overview.nodes_stale, note: "Missed three configured reports", tone: overview.nodes_stale ? "bad" : undefined },
+    { label: "Gone quiet", value: overview.nodes_stale, note: "Missed expected check-ins", tone: overview.nodes_stale ? "bad" : undefined },
     { label: "Open alerts", value: overview.alerts_open, note: "Across the whole fleet", tone: overview.alerts_open ? "warn" : undefined },
     { label: "Paused", value: overview.nodes_paused, note: "Maintenance or operator hold", tone: overview.nodes_paused ? "warn" : undefined },
     { label: "Suspended", value: overview.nodes_suspended, note: "Telemetry refused", tone: overview.nodes_suspended ? "bad" : undefined },
