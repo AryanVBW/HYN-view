@@ -139,12 +139,27 @@ export type AdminTrendPoint = {
 };
 
 export type NotificationTemplate = {
-  template_key: "alert" | "report";
+  template_key: "alert" | "report" | "system";
   name: string;
   description: string;
   html_template: string;
   updated_at: string;
   updated_by_email: string | null;
+};
+
+export type EmailPreference = {
+  node_id: string;
+  recipient: string;
+  timezone: string;
+  incident_enabled: boolean;
+  daily_enabled: boolean;
+  daily_at: string;
+  system_enabled: boolean;
+  system_at: string;
+  last_daily_local_date: string | null;
+  last_system_local_date: string | null;
+  last_alert_id: number;
+  updated_at: string;
 };
 
 export type AdminNode = {

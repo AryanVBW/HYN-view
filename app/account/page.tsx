@@ -3,6 +3,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { AlertTriangle, CheckCircle2, LayoutDashboard, Mail, ShieldCheck, UserCircle2, XCircle } from "lucide-react";
 import { NodeSettings } from "@/components/account/node-settings";
+import { EmailPreferences } from "@/components/account/email-preferences";
 import { Button } from "@/components/ui/button";
 import { ParticleField } from "@/components/particle-field";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
@@ -11,6 +12,7 @@ import { claimAdminIfAllowed } from "@/lib/admin-claim";
 import { formatRelative } from "@/lib/dashboard-data";
 import type {
   Node,
+  EmailPreference,
   NotificationLogRow,
   Profile,
 } from "@/lib/types";
@@ -43,7 +45,7 @@ export default async function AccountPage() {
 
   await claimAdminIfAllowed(supabase, auth.user.email);
 
-  const [profileRes, nodesRes, logRes] = await Promise.all([
+  const [profileRes, nodesRes, logRes, emailPrefsRes] = await Promise.all([
     supabase.from("profiles").select("*").eq("id", auth.user.id).maybeSingle(),
     supabase.from("nodes").select(NODE_COLUMNS).eq("revoked", false).order("created_at"),
     supabase
@@ -51,11 +53,13 @@ export default async function AccountPage() {
       .select("*")
       .order("ts", { ascending: false })
       .limit(50),
+    supabase.from("email_preferences").select("*").order("node_id"),
   ]);
 
   const profile = profileRes.data as Profile | null;
   const nodes = (nodesRes.data ?? []) as Node[];
   const log = (logRes.data ?? []) as NotificationLogRow[];
+  const emailPreferences = (emailPrefsRes.data ?? []) as EmailPreference[];
 
   // Counted over a 30-day window rather than all time: "how many emails have
   // come" is a question about recent behaviour, and an all-time total only ever
@@ -165,19 +169,7 @@ export default async function AccountPage() {
           ))}
         </div>
 
-        <div className="terminal-panel p-6">
-          <p className="section-kicker">// notification delivery</p>
-          <p className="mt-2 font-sentient text-2xl text-card-foreground">
-            Configured on each server
-          </p>
-          <p className="mt-2 max-w-2xl font-mono text-xs leading-6 text-muted-foreground">
-            The portal does not store provider destinations, API keys, passwords or
-            webhooks. On each monitored server, run <code>sudo hyn wizard</code>.
-            Provider credentials stay in <code>/etc/hyn-view/secrets</code> with
-            root-only permissions. This page keeps only the delivery results reported
-            by your server.
-          </p>
-        </div>
+        <EmailPreferences nodes={nodes} preferences={emailPreferences} accountEmail={auth.user.email ?? ""} />
 
         <NodeSettings nodes={nodes} />
 

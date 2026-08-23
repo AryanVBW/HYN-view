@@ -1,32 +1,50 @@
-# Archive
+# HYN-view portal
 
-*Automatically synced with your [v0.app](https://v0.app) deployments*
+Next.js customer and fleet dashboard for the HYN Ubuntu monitoring agent.
 
-[![Deployed on Vercel](https://img.shields.io/badge/Deployed%20on-Vercel-black?style=for-the-badge&logo=vercel)](https://vercel.com/shared-8867s-projects/v0-archive)
-[![Built with v0](https://img.shields.io/badge/Built%20with-v0.app-black?style=for-the-badge)](https://v0.app/chat/projects/7OBKdWwIbzR)
+## Local development
 
-## Overview
+```bash
+cp .env.local.example .env.local
+pnpm install
+pnpm dev
+```
 
-This repository will stay in sync with your deployed chats on [v0.app](https://v0.app).
-Any changes you make to your deployed app will be automatically pushed to this repository from [v0.app](https://v0.app).
+Apply `../supabase/schema.sql` to the Supabase project before starting. The
+public URL and anon key power authenticated browser access through RLS.
 
-## Deployment
+## Hosted agent API
 
-Your project is live at:
+The CLI calls `/api/agent/v1/[action]`; customers do not enter a Supabase URL
+or anon key. The gateway exposes only pairing, ingest, config-pull, and delivery
+reporting RPCs, caps request bodies at 1 MB, and keeps the database contract out
+of the CLI-facing URL.
 
-**[https://vercel.com/shared-8867s-projects/v0-archive](https://vercel.com/shared-8867s-projects/v0-archive)**
+## Managed email
 
-## Build your app
+One deployment-level Resend key serves all accounts. Each linked node receives
+a tenant-private default schedule using the account email. In Account, a client
+can change the recipient, IANA timezone, incident alerts, daily health time, and
+daily system-information time. Administrators control all three HTML wrappers.
 
-Continue building your app on:
+Set these server-only deployment variables:
 
-**[https://v0.app/chat/projects/7OBKdWwIbzR](https://v0.app/chat/projects/7OBKdWwIbzR)**
+```text
+SUPABASE_SERVICE_ROLE_KEY
+RESEND_API_KEY
+EMAIL_FROM
+CRON_SECRET
+```
 
-## How It Works
+`vercel.json` invokes `/api/cron/email` every minute. The worker checks each
+account's local time, claims an idempotency key before sending, writes the
+delivery result to `notification_log`, and never exposes provider credentials
+to a browser or monitored server.
 
-1. Create and modify your project using [v0.app](https://v0.app)
-2. Deploy your chats from the v0 interface
-3. Changes are automatically pushed to this repository
-4. Vercel deploys the latest version from this repository
-# HYN-view-web
-# HYN-view-web
+## Verification
+
+```bash
+pnpm test
+pnpm lint
+pnpm build
+```
