@@ -41,6 +41,9 @@ export function AdminClientActions({
   }
 
   function updateOutdated() {
+    if (!window.confirm(
+      `Queue a HYN CLI update for ${outdated.length} outdated machine${outdated.length === 1 ? "" : "s"} belonging to ${client.email ?? "this client"}?`,
+    )) return;
     setMessage(null);
     setError(null);
     startTransition(async () => {
@@ -141,11 +144,16 @@ export function AdminFleetUpdateButton({ nodes }: { nodes: AdminNode[] }) {
       <button
         type="button"
         disabled={pending || outdated.length === 0}
-        onClick={() => startTransition(async () => {
-          setResult(null);
-          const response = await requestAdminNodeUpdates(outdated.map((node) => node.id));
-          setResult(`${response.queued.length} queued · ${response.skipped.length} already active · ${response.failed.length} failed`);
-        })}
+        onClick={() => {
+          if (!window.confirm(
+            `Queue a HYN CLI update for ${outdated.length} outdated machine${outdated.length === 1 ? "" : "s"} across the fleet?`,
+          )) return;
+          startTransition(async () => {
+            setResult(null);
+            const response = await requestAdminNodeUpdates(outdated.map((node) => node.id));
+            setResult(`${response.queued.length} queued · ${response.skipped.length} already active · ${response.failed.length} failed`);
+          });
+        }}
         className="inline-flex items-center gap-2 border border-[#e8a400]/60 bg-[#e8a400]/5 px-4 py-2.5 font-mono text-xs uppercase text-[#e8a400] hover:bg-[#e8a400]/10 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {pending ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
