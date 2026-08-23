@@ -175,12 +175,20 @@ truthy 'the default web channel queues an alert with the portal' \
 NOTIFY_CATEGORY=''
 
 # The next one-minute check-in receives a portal update command. It must report
-# each stage and continue into a fresh full telemetry push with the new version.
+# each stage and finish only after a fresh full telemetry push with the new
+# version has reached the portal.
+before_update_ingest=$(grep -c hyn_ingest "$REQLOG")
 curl -sS "http://127.0.0.1:$PORT/command/queue" >/dev/null
 cloud_push 0 0
 command_rc=$?
+after_update_ingest=$(grep -c hyn_ingest "$REQLOG")
 eq 'portal update command completes during a push' 0 "$command_rc"
 eq 'portal update changes the running agent version' '1.8.0' "$HYN_VERSION"
+eq 'portal update synchronizes exactly one fresh reading' "$((before_update_ingest + 1))" "$after_update_ingest"
+update_ingest_line=$(grep -n hyn_ingest "$REQLOG" | tail -1 | cut -d: -f1)
+update_complete_line=$(grep -n 'p_stage.*completed' "$REQLOG" | tail -1 | cut -d: -f1)
+truthy 'portal update completes only after fresh telemetry is accepted' \
+  '[[ $update_ingest_line =~ ^[0-9]+$ && $update_complete_line =~ ^[0-9]+$ && $update_ingest_line -lt $update_complete_line ]]'
 
 # A synchronization is an explicit full-data request. It must bypass the normal
 # telemetry interval once and report its distinct collection/upload stages.
@@ -211,6 +219,7 @@ contains 'command reports registry check' '\"p_stage\": \"checking\"' "$reqs"
 contains 'command reports installation' '\"p_stage\": \"installing\"' "$reqs"
 contains 'command reports timer restart' '\"p_stage\": \"restarting\"' "$reqs"
 contains 'command reports verification' '\"p_stage\": \"verifying\"' "$reqs"
+contains 'command reports post-update synchronization' 'Synchronizing fresh telemetry from hyn-view 1.8.0' "$reqs"
 contains 'command reports completion' '\"p_stage\": \"completed\"' "$reqs"
 contains 'sync reports collection' '\"p_stage\": \"collecting\"' "$reqs"
 contains 'sync reports upload' '\"p_stage\": \"uploading\"' "$reqs"

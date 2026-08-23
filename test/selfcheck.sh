@@ -1047,6 +1047,21 @@ contains 'package update reports installation progress' 'installing|' "$(<"$HYN_
 contains 'package update reports service restart progress' 'restarting|' "$(<"$HYN_VAR/post-update-progress")"
 contains 'package update reports verification progress' 'verifying|' "$(<"$HYN_VAR/post-update-progress")"
 
+# Portal command progress is bounded by the database RPC. Long provider errors
+# must be truncated locally instead of leaving a command stuck in running.
+(
+  CLOUD_COMMAND_ID='11111111-1111-4111-8111-111111111111'
+  secret() { printf 'test-token'; }
+  _cloud_rpc() { printf '%s' "$2" >"$HYN_VAR/bounded-command-progress"; }
+  cloud_command_report running verifying "$(printf 'x%.0s' {1..700})" \
+    "$(printf '9%.0s' {1..80})" "$(printf '8%.0s' {1..80})"
+)
+bounded_progress=$(<"$HYN_VAR/bounded-command-progress")
+json_field_v "$bounded_progress" p_message
+eq 'portal command message is bounded to 500 bytes' 500 "${#JSON_FIELD}"
+json_field_v "$bounded_progress" p_target_version
+eq 'portal command versions are bounded to 64 bytes' 64 "${#JSON_FIELD}"
+
 # ---------------------------------------------------------------------------
 section 'notification safety'
 # ---------------------------------------------------------------------------
