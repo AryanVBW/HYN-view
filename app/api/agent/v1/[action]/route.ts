@@ -1,13 +1,20 @@
 import { createClient } from "@supabase/supabase-js";
 import { after, NextResponse } from "next/server";
+import { start } from "workflow/api";
 import {
   agentRpcForAction,
   enrichIngestWithPublicIp,
   MAX_AGENT_BODY_BYTES,
   observedPublicIp,
 } from "@/lib/agent-api";
-import { buildSystemSummaryContent, sendResendEmail } from "@/lib/cloud-email";
+import { buildSystemSummaryContent, renderHynEmailShell, sendResendEmail } from "@/lib/cloud-email";
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from "@/lib/supabase/config";
+import {
+  dispatchCommandNotification,
+  dispatchQueuedWebNotification,
+  retryNodeCommandNotification,
+} from "@/lib/web-notification";
+import { monitorNodeHeartbeat } from "@/workflows/heartbeat-watchdog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -64,6 +71,74 @@ export async function POST(
     return jsonError(status, message);
   }
 
+  const response = data as Record<string, unknown> | null;
+  if (rpc === "hyn_queue_web_notification") {
+    const jobId = typeof response?.id === "string" ? response.id : null;
+    if (jobId) {
+      after(async () => {
+        try {
+          await dispatchQueuedWebNotification(jobId);
+        } catch (dispatchError) {
+          console.error("[web-notification] dispatch failed; the next heartbeat will retry it", dispatchError);
+        }
+      });
+    }
+  }
+
+  if (rpc === "hyn_report_node_command") {
+    const commandId = typeof body.p_command_id === "string" ? body.p_command_id : null;
+    const terminal = body.p_status === "succeeded" || body.p_status === "failed";
+    if (commandId && terminal) {
+      after(async () => {
+        try {
+          await dispatchCommandNotification(commandId);
+        } catch (notificationError) {
+          console.error("[node-command] completion email failed; next heartbeat will retry it", notificationError);
+        }
+      });
+    }
+  }
+
+  if (rpc === "hyn_fetch_config") {
+    const nodeId = typeof response?.node_id === "string" ? response.node_id : null;
+    const watchdog = response?.watchdog && !Array.isArray(response.watchdog)
+      && typeof response.watchdog === "object"
+      ? response.watchdog as Record<string, unknown>
+      : null;
+    after(async () => {
+      try {
+        await dispatchQueuedWebNotification();
+      } catch (dispatchError) {
+        console.error("[web-notification] retry failed", dispatchError);
+      }
+      if (nodeId) {
+        try {
+          await retryNodeCommandNotification(nodeId);
+        } catch (notificationError) {
+          console.error("[node-command] completion email retry failed", notificationError);
+        }
+      }
+      if (nodeId && watchdog?.created === true) {
+        try {
+          const run = await start(monitorNodeHeartbeat, [nodeId]);
+          const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
+          if (serviceKey) {
+            const service = createClient(SUPABASE_URL, serviceKey, {
+              auth: { persistSession: false, autoRefreshToken: false },
+            });
+            await service.from("node_watchdogs").update({
+              state: "running",
+              run_id: run.runId,
+              updated_at: new Date().toISOString(),
+            }).eq("node_id", nodeId);
+          }
+        } catch (watchdogError) {
+          console.error("[heartbeat-watchdog] could not start", watchdogError);
+        }
+      }
+    });
+  }
+
   if (rpc === "hyn_ingest") {
     const nodeToken = typeof body.p_node_token === "string" ? body.p_node_token : "";
     if (nodeToken) {
@@ -77,6 +152,7 @@ export async function POST(
         });
         const email = claim as null | {
           status?: string;
+          node_id?: string;
           node_name?: string;
           hostname?: string | null;
           os?: string | null;
@@ -92,13 +168,20 @@ export async function POST(
             from: process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.in>",
             to: email.recipient,
             subject,
-            html: buildSystemSummaryContent({
-              nodeName: email.node_name ?? email.hostname ?? "linked machine",
-              os: email.os ?? null,
-              agentVersion: email.agent_version ?? null,
-              lastSeenAt: email.last_seen_at ?? null,
-              payload: email.payload ?? null,
+            html: renderHynEmailShell({
+              subject,
+              preview: "Your first complete HYN-view system report is ready.",
+              hostname: email.hostname ?? email.node_name ?? "linked machine",
+              severity: "info",
+              content: buildSystemSummaryContent({
+                nodeName: email.node_name ?? email.hostname ?? "linked machine",
+                os: email.os ?? null,
+                agentVersion: email.agent_version ?? null,
+                lastSeenAt: email.last_seen_at ?? null,
+                payload: email.payload ?? null,
+              }),
             }),
+            idempotencyKey: `first-system:${email.node_id ?? nodeToken.slice(0, 12)}`,
           });
           await supabase.rpc("hyn_report_notification", {
             p_node_token: nodeToken,

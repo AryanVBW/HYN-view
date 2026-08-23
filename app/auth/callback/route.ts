@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { normalizeInternalPath } from "@/lib/legal-consent";
 import { observedPublicIp } from "@/lib/agent-api";
-import { buildSignInContent, sendResendEmail } from "@/lib/cloud-email";
+import { buildSignInContent, renderHynEmailShell, sendResendEmail } from "@/lib/cloud-email";
 
 // Where Google (and the email confirmation link) come back to. Exchanges the
 // one-time code for a session cookie, then forwards the user on.
@@ -49,12 +49,20 @@ export async function GET(request: NextRequest) {
     );
     const userAgent = request.headers.get("user-agent")?.slice(0, 300) ?? null;
     after(async () => {
+      const subject = "Welcome, you signed in";
       await sendResendEmail({
         apiKey: process.env.RESEND_API_KEY ?? "",
         from: process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.in>",
         to: email,
-        subject: "Welcome, you signed in",
-        html: buildSignInContent({ email, signedInAt, ip, userAgent }),
+        subject,
+        html: renderHynEmailShell({
+          subject,
+          preview: "A successful sign-in to your HYN-view account was recorded.",
+          hostname: email,
+          severity: "info",
+          content: buildSignInContent({ email, signedInAt, ip, userAgent }),
+        }),
+        idempotencyKey: `sign-in:${auth.user.id}:${signedInAt}`,
       });
     });
   }
