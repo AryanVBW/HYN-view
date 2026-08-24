@@ -2438,6 +2438,9 @@ grant execute on function public.hyn_claim_env_admin(text) to authenticated;
 -- Kept at the end so reapplying this canonical schema upgrades every earlier
 -- command/config definition in place, matching migration 20260824023000.
 alter table public.nodes add column if not exists last_heartbeat_at timestamptz;
+-- `nodes` uses a column-level browser grant so token_hash never reaches a
+-- session. Every safe column added after that grant must be granted explicitly.
+grant select (last_heartbeat_at) on public.nodes to authenticated;
 update public.nodes
    set last_heartbeat_at = coalesce(last_config_pull_at, last_seen_at, created_at)
  where last_heartbeat_at is null;
