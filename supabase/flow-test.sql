@@ -1275,10 +1275,11 @@ begin
   begin
     select count(*) into n from (
       select id, owner, name, hostname, os, agent_version, is_demo, revoked, created_at,
-             last_seen_at, status, paused_until, status_reason, config, last_config_pull_at
+             last_seen_at, status, paused_until, status_reason, config,
+             last_config_pull_at, last_heartbeat_at
         from public.nodes) t;
   exception when insufficient_privilege then
-    raise exception 'the granted node columns are not readable';
+    raise exception 'the portal node columns are not all readable by authenticated';
   end;
   raise notice 'PASS  nodes.token_hash is unreadable while the other columns are not';
 end $$;
