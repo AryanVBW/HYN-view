@@ -73,7 +73,7 @@ footer_line() {
   local w=$1 s right
   s="${C[dim]}"
   s+="${C[accent]}q${C[dim]} quit  "
-  s+="${C[accent]}1${C[dim]} dash ${C[accent]}2${C[dim]} net ${C[accent]}3${C[dim]} proc ${C[accent]}4${C[dim]} node  "
+  s+="${C[accent]}1${C[dim]} dash ${C[accent]}0${C[dim]} simple ${C[accent]}2${C[dim]} net ${C[accent]}3${C[dim]} proc ${C[accent]}4${C[dim]} node  "
   s+="${C[accent]}t${C[dim]} theme  ${C[accent]}p${C[dim]} profile  ${C[accent]}u${C[dim]} units  ${C[accent]}m${C[dim]} sort  "
   s+="${C[accent]}s${C[dim]} test  ${C[accent]}+/-${C[dim]} rate  ${C[accent]}i${C[dim]} iface"
   s+="${C[reset]}"
@@ -560,6 +560,25 @@ panel_disk() {
 # ---------------------------------------------------------------------------
 # PROCESSES
 # ---------------------------------------------------------------------------
+# proc_state_label_v <rank> -- the group name and colour for a state rank
+# (0..3, see proc_state_rank_v). One place defining "what a rank is called",
+# so the group divider and the per-row dot always agree with each other.
+PROC_STATE_LABEL='' PROC_STATE_COLOR=''
+proc_state_label_v() {
+  case $1 in
+    0) PROC_STATE_LABEL='ACTIVE' PROC_STATE_COLOR=${C[ok]} ;;
+    1) PROC_STATE_LABEL='PAUSED' PROC_STATE_COLOR=${C[warn]} ;;
+    2) PROC_STATE_LABEL='STOPPED' PROC_STATE_COLOR=${C[crit]} ;;
+    *) PROC_STATE_LABEL='INACTIVE' PROC_STATE_COLOR=${C[dim]} ;;
+  esac
+  return 0
+}
+
+# Rows arrive from proc_sample already sequenced active -> paused -> stopped ->
+# inactive (see proc_state_rank_v). This panel's only job is to show that
+# sequence: a coloured state dot per row, green/yellow/red/dim, and one slim
+# divider the moment the group changes -- not a repeated header per state, and
+# not a re-sort, since the data is already in the right order.
 panel_proc() {
   local w=$2 nrows=$3 line i
   local inner=$((w - 4))
@@ -570,8 +589,7 @@ panel_proc() {
   # Columns are dropped, not truncated, as the panel narrows. An ellipsis in the
   # middle of a header row tells the reader nothing; fewer columns still tell
   # them which process is busy and how busy it is.
-  local show_user=0 show_thr=0 show_state=0
-  ((inner >= 46)) && show_state=1
+  local show_user=0 show_thr=0
   ((inner >= 54)) && show_thr=1
   ((inner >= 66)) && show_user=1
   local wpid=7 wcpu=7 wrss=10 wuser=10 wthr=5
@@ -581,11 +599,18 @@ panel_proc() {
   pad_v 'CPU%' "$wcpu"; line+="$PAD_OUT"
   pad_v 'RSS' "$wrss"; line+="$PAD_OUT"
   ((show_thr)) && { pad_v 'THR' "$wthr"; line+="$PAD_OUT"; }
-  ((show_state)) && line+='S  '
-  line+="COMMAND${C[reset]}"
+  line+="  COMMAND${C[reset]}"
   panel_row P_PROCS "$w" "$line"
 
+  local prev_rank=-1 rank
   for ((i = 0; i < ${#P_PID[@]} && i < nrows; i++)); do
+    proc_state_rank_v "${P_STATE[i]}"; rank=$PROC_STATE_RANK
+    if ((rank != prev_rank)); then
+      proc_state_label_v "$rank"
+      rep_v "$G_HLINE" 2
+      panel_row P_PROCS "$w" "$PROC_STATE_COLOR$REP_OUT $PROC_STATE_LABEL${C[reset]}"
+      prev_rank=$rank
+    fi
     pad_v "${P_PID[i]}" "$wpid"; line="${C[dim]}$PAD_OUT${C[reset]}"
     if ((show_user)); then
       pad_v "${P_USER[i]}" "$wuser"; line+="${C[dim]}$PAD_OUT${C[reset]}"
@@ -599,14 +624,8 @@ panel_proc() {
     if ((show_thr)); then
       pad_v "${P_THR[i]}" "$wthr"; line+="${C[dim]}$PAD_OUT${C[reset]}"
     fi
-    if ((show_state)); then
-      local st=${P_STATE[i]} stc=${C[dim]}
-      case $st in
-        R) stc=${C[ok]} ;;
-        D | Z) stc=${C[crit]} ;;
-      esac
-      line+="$stc$st${C[reset]}  "
-    fi
+    proc_state_label_v "$rank"
+    line+="$PROC_STATE_COLOR$G_DOT${C[reset]} "
     # The node's own process is highlighted: it is why the operator is here.
     case ${P_NAME[i]} in
       highway | hw-os | nebula) line+="${C[accent]}${C[bold]}${P_NAME[i]}${C[reset]}" ;;
@@ -786,6 +805,28 @@ _render_panel() {
   return 0
 }
 
+# frame_open <width> -- every render_* function starts a frame the same way:
+# draw the header, reset the line buffer, and seed it with that header line.
+# Five render functions repeated this verbatim; one helper means the header
+# logic can only drift in one place instead of five.
+frame_open() {
+  header_line "$1"
+  fb_reset
+  fb_add "$HDR_OUT"
+  return 0
+}
+
+# frame_close <width> <height> -- pads the buffer out to a full screen and pins
+# the footer to the last row. Same repetition as frame_open, at the other end
+# of every render function.
+frame_close() {
+  local w=$1 h=$2
+  while ((${#FB[@]} < h - 1)); do fb_add ''; done
+  footer_line "$w"
+  FB[h - 1]=$FTR_OUT
+  return 0
+}
+
 # The dashboard.
 #
 # Row budget is settled before anything is drawn, and the network panel is paid
@@ -797,9 +838,7 @@ render_dash() {
   local w=$TERM_COLS h=$TERM_ROWS
   local avail=$((h - 2))
 
-  header_line "$w"
-  fb_reset
-  fb_add "$HDR_OUT"
+  frame_open "$w"
 
   # Graph height scales with the terminal. Two rows is the floor at which a
   # braille plot still shows a shape rather than a smear.
@@ -883,10 +922,7 @@ render_dash() {
     ((i += group))
   done
 
-  # Footer pinned to the last row.
-  while ((${#FB[@]} < h - 1)); do fb_add ''; done
-  footer_line "$w"
-  FB[h - 1]=$FTR_OUT
+  frame_close "$w" "$h"
   return 0
 }
 
@@ -906,9 +942,7 @@ _equalize() {
 
 render_net_full() {
   local w=$TERM_COLS h=$TERM_ROWS
-  header_line "$w"
-  fb_reset
-  fb_add "$HDR_OUT"
+  frame_open "$w"
   local graph_h=$(((h - 2 - 8) / 2))
   ((graph_h > 14)) && graph_h=14
   ((graph_h < 0)) && graph_h=0
@@ -953,30 +987,22 @@ render_net_full() {
     panel_close P_IF "$w"
     fb_addmany "${P_IF[@]}"
   fi
-  while ((${#FB[@]} < h - 1)); do fb_add ''; done
-  footer_line "$w"
-  FB[h - 1]=$FTR_OUT
+  frame_close "$w" "$h"
   return 0
 }
 
 render_proc_full() {
   local w=$TERM_COLS h=$TERM_ROWS
-  header_line "$w"
-  fb_reset
-  fb_add "$HDR_OUT"
+  frame_open "$w"
   panel_proc P_PROCS "$w" $((h - 5))
   fb_addmany "${P_PROCS[@]}"
-  while ((${#FB[@]} < h - 1)); do fb_add ''; done
-  footer_line "$w"
-  FB[h - 1]=$FTR_OUT
+  frame_close "$w" "$h"
   return 0
 }
 
 render_node_full() {
   local w=$TERM_COLS h=$TERM_ROWS
-  header_line "$w"
-  fb_reset
-  fb_add "$HDR_OUT"
+  frame_open "$w"
   panel_node P_NODE "$w" 8
   fb_addmany "${P_NODE[@]}"
   local left=$((h - 1 - ${#FB[@]} - 1))
@@ -992,8 +1018,168 @@ render_node_full() {
     panel_close P_J "$w"
     fb_addmany "${P_J[@]}"
   fi
-  while ((${#FB[@]} < h - 1)); do fb_add ''; done
-  footer_line "$w"
-  FB[h - 1]=$FTR_OUT
+  frame_close "$w" "$h"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# SIMPLE DASHBOARD -- premium, minimal, glanceable
+# ---------------------------------------------------------------------------
+# The advanced dashboard (render_dash) is for someone diagnosing. This one is
+# for someone who just wants to know, from across the room: is the node up,
+# is the internet fine, is the box hot. Four things, each answered in one
+# glance, nothing repeated from panel to panel.
+
+declare -a P_SIMPLE=()
+
+# _simple_node_line -- one big coloured verdict for the Highway node, or a
+# calm "not tracked" note when there is nothing to watch. This is the
+# headline: on a relay box a node that is not running is the one fact that
+# matters more than everything else in the view combined.
+_simple_node_line() {
+  local w=$1 line
+  if ! cfg_on highway_track || [[ $HW_HEALTH == absent ]]; then
+    line="${C[dim]}$G_DOT node tracking off${C[reset]}"
+    panel_row P_SIMPLE "$w" "$line"
+    return 0
+  fi
+  local word verdict
+  case $HW_HEALTH in
+    ok) word=ok verdict='RUNNING' ;;
+    warn) word=warn verdict='DEGRADED' ;;
+    crit) word=crit verdict='NOT RUNNING' ;;
+    *) word=dim verdict='UNKNOWN' ;;
+  esac
+  local col=${C[$word]:-${C[dim]}}
+  line="$col${C[bold]}$G_DOT $verdict${C[reset]}"
+  [[ -n $HW_HEALTH_WHY ]] && line+="  ${C[dim]}$HW_HEALTH_WHY${C[reset]}"
+  panel_row P_SIMPLE "$w" "$line"
+  if ((HW_PID > 0)); then
+    fmt_dur_v "$HW_UPTIME"
+    panel_row P_SIMPLE "$w" "${C[dim]}up $FMT_OUT · ${HW_ACTIVE} unit(s) active${C[reset]}"
+  fi
+  return 0
+}
+
+# _simple_speed_lines -- current throughput, today's fastest result, and a
+# braille sparkline of the day's tests so "the high" has a shape, not just a
+# number. Falls back to a plain sentence when there is no history yet, rather
+# than drawing an empty graphic that looks broken.
+_simple_speed_lines() {
+  local w=$1 inner=$2 line
+  local iface=${NET_WAN:-}
+  if [[ -n $iface ]]; then
+    fmt_rate_v "${NET_RXR[$iface]:-0}"; line="${C[dim]}now${C[reset]}   ${C[rx]}${C[bold]}$G_DOWN $FMT_OUT${C[reset]}"
+    fmt_rate_v "${NET_TXR[$iface]:-0}"; line+="  ${C[tx]}$G_UP $FMT_OUT${C[reset]}"
+    panel_row P_SIMPLE "$w" "$line"
+  fi
+
+  st_today_high_v
+  if ((ST_TODAY_HIGH == 0)); then
+    panel_row P_SIMPLE "$w" "${C[dim]}today's high  no speed test yet — press s${C[reset]}"
+    return 0
+  fi
+  fmt_rate_v "$ST_TODAY_HIGH"
+  fmt_dur_v $((${EPOCHSECONDS:-0} - ST_TODAY_HIGH_TS))
+  line="${C[dim]}high${C[reset]}  ${C[accent2]}${C[bold]}$G_UP $FMT_OUT${C[reset]} ${C[dim]}today, $FMT_OUT ago${C[reset]}"
+  panel_row P_SIMPLE "$w" "$line"
+
+  # The graphic: today's tests only, oldest to newest, so the bar chart reads
+  # left-to-right as the day progressing rather than as a rolling window.
+  local today i ts down
+  local -a today_down=()
+  printf -v today '%(%Y%m%d)T' -1
+  for ((i = 0; i < ${#ST_H_TS[@]}; i++)); do
+    ts=${ST_H_TS[i]} down=${ST_H_DOWN[i]}
+    [[ $down =~ ^[0-9]+$ ]] || continue
+    local day; printf -v day '%(%Y%m%d)T' "$ts"
+    [[ $day == "$today" ]] && today_down+=("$down")
+  done
+  if ((${#today_down[@]} > 1 && inner >= 24)); then
+    sparkline_v today_down $((inner - 2)) "$ST_TODAY_HIGH" "${C[accent2]}"
+    panel_row P_SIMPLE "$w" "  $SPARK_OUT"
+  fi
+  return 0
+}
+
+# _simple_temp_line -- CPU temperature, the one sensor number a "simple" view
+# keeps, coloured against fixed thresholds rather than a relative gradient:
+# 70C means the same thing on every machine, so the colour should not depend
+# on what else this box has seen.
+_simple_temp_line() {
+  local w=$1 line
+  if [[ -z $CPU_TEMP ]]; then
+    panel_row P_SIMPLE "$w" "${C[dim]}cpu temp  no thermal sensor${C[reset]}"
+    return 0
+  fi
+  local tc=${C[ok]}
+  ((CPU_TEMP >= 70)) && tc=${C[warn]}
+  ((CPU_TEMP >= 85)) && tc=${C[crit]}
+  local bw=20
+  bar_v $((CPU_TEMP > 100 ? 100 : CPU_TEMP)) "$bw" "$tc"
+  line="${C[dim]}cpu temp${C[reset]}  $tc${C[bold]}${CPU_TEMP}°C${C[reset]}  $BAR_OUT"
+  panel_row P_SIMPLE "$w" "$line"
+  return 0
+}
+
+# _simple_essentials_line -- the handful of facts worth one line each: memory,
+# the tightest disk, and load. Anyone who needs more than this reaches for the
+# advanced dashboard (key 1) or the dedicated panel (2/3/4) -- this view's job
+# is to not make them read that far in the common case.
+_simple_essentials_line() {
+  local w=$1 line
+  fmt_size_v "$MEM_USED"; local mu=$FMT_OUT
+  fmt_size_v "$MEM_TOTAL"
+  local mc=${C[ok]}
+  ((MEM_PCT >= 80)) && mc=${C[warn]}
+  ((MEM_PCT >= 93)) && mc=${C[crit]}
+  line="${C[dim]}memory${C[reset]}  $mc$mu / $FMT_OUT ($MEM_PCT%)${C[reset]}"
+  panel_row P_SIMPLE "$w" "$line"
+
+  if ((${#MOUNTS[@]} > 0)); then
+    local worst_mp='' worst_pct=-1 mp
+    for mp in "${MOUNTS[@]}"; do
+      local p=${MP_PCT[$mp]:-0}
+      ((p > worst_pct)) && { worst_pct=$p; worst_mp=$mp; }
+    done
+    if [[ -n $worst_mp ]]; then
+      fmt_size_v "${MP_AVAIL[$worst_mp]}"
+      local dc=${C[ok]}
+      ((worst_pct >= 80)) && dc=${C[warn]}
+      ((worst_pct >= 93)) && dc=${C[crit]}
+      line="${C[dim]}disk${C[reset]}    $dc$worst_mp ${worst_pct}%${C[reset]} ${C[dim]}($FMT_OUT free)${C[reset]}"
+      panel_row P_SIMPLE "$w" "$line"
+    fi
+  fi
+
+  line="${C[dim]}load${C[reset]}    ${LOAD1:-?} ${LOAD5:-?} ${LOAD15:-?}"
+  fmt_dur_v "$UPTIME_S"
+  line+="  ${C[dim]}up${C[reset]} $FMT_OUT"
+  panel_row P_SIMPLE "$w" "$line"
+  return 0
+}
+
+# render_simple -- the premium "just tell me" dashboard. One panel, four
+# sections in fixed order (node, internet, temperature, essentials), each
+# section appearing exactly once. Sized to fill whatever height is available
+# rather than fighting the advanced view's multi-column layout logic.
+render_simple() {
+  local w=$TERM_COLS h=$TERM_ROWS
+  frame_open "$w"
+
+  local inner=$((w - 4))
+  P_SIMPLE=()
+  panel_open P_SIMPLE "$w" 'HYN' "$HOSTNAME_S" "${C[title]}"
+  _simple_node_line "$w"
+  panel_row P_SIMPLE "$w" ''
+  _simple_speed_lines "$w" "$inner"
+  panel_row P_SIMPLE "$w" ''
+  _simple_temp_line "$w"
+  panel_row P_SIMPLE "$w" ''
+  _simple_essentials_line "$w"
+  panel_close P_SIMPLE "$w"
+  fb_addmany "${P_SIMPLE[@]}"
+
+  frame_close "$w" "$h"
   return 0
 }

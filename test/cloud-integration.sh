@@ -94,7 +94,7 @@ is_root() { return 0; }
 cloud_install_schedule() { printf 'test-schedule-installed\n'; }
 update_startup() { : >"$TMP/update-policy-reconciled"; }
 update_read() {
-  UPD_LATEST=1.8.0
+  UPD_LATEST=$HYN_VERSION
   UPD_CHECKED=${EPOCHSECONDS:-0}
   if [[ $HYN_VERSION == "$UPD_LATEST" ]]; then UPD_AVAILABLE=0; else UPD_AVAILABLE=1; fi
 }
@@ -195,7 +195,7 @@ cloud_push 0 0
 command_rc=$?
 after_update_ingest=$(grep -c hyn_ingest "$REQLOG")
 eq 'portal update command completes during a push' 0 "$command_rc"
-eq 'portal update changes the running agent version' '1.8.0' "$HYN_VERSION"
+eq 'portal update changes the running agent version' "$UPD_LATEST" "$HYN_VERSION"
 eq 'portal update synchronizes exactly one fresh reading' "$((before_update_ingest + 1))" "$after_update_ingest"
 update_ingest_line=$(grep -n hyn_ingest "$REQLOG" | tail -1 | cut -d: -f1)
 update_complete_line=$(grep -n 'p_stage.*completed' "$REQLOG" | tail -1 | cut -d: -f1)
@@ -248,7 +248,7 @@ before_pending_ingest=$(grep -c hyn_ingest "$REQLOG")
 cloud_run_pending 1
 pending_rc=$?
 eq 'the maintenance unit finishes the handed-off update' 0 "$pending_rc"
-eq 'the maintenance unit installs the new version' '1.8.0' "$HYN_VERSION"
+eq 'the maintenance unit installs the new version' "$UPD_LATEST" "$HYN_VERSION"
 eq 'the maintenance unit synchronizes one fresh reading' \
   "$((before_pending_ingest + 1))" "$(grep -c hyn_ingest "$REQLOG")"
 truthy 'the pending command is consumed exactly once' '! [[ -e $(cloud_pending_file) ]]'
@@ -291,7 +291,7 @@ contains 'command reports registry check' '\"p_stage\": \"checking\"' "$reqs"
 contains 'command reports installation' '\"p_stage\": \"installing\"' "$reqs"
 contains 'command reports timer restart' '\"p_stage\": \"restarting\"' "$reqs"
 contains 'command reports verification' '\"p_stage\": \"verifying\"' "$reqs"
-contains 'command reports post-update synchronization' 'Synchronizing fresh telemetry from hyn-view 1.8.0' "$reqs"
+contains 'command reports post-update synchronization' "Synchronizing fresh telemetry from hyn-view $HYN_VERSION" "$reqs"
 contains 'command reports completion' '\"p_stage\": \"completed\"' "$reqs"
 contains 'sync reports collection' '\"p_stage\": \"collecting\"' "$reqs"
 contains 'sync reports upload' '\"p_stage\": \"uploading\"' "$reqs"
@@ -324,8 +324,8 @@ assert body[\"p_payload\"][\"cpu\"][\"temp_c\"] == 52
 assert body[\"p_payload\"][\"disk\"][\"pct\"] == 58.4
 assert body[\"p_payload\"][\"alerts\"][0][\"severity\"] == \"warn\"
 assert body[\"p_payload\"][\"latency_ms\"] == 1.20, body[\"p_payload\"][\"latency_ms\"]
-assert body[\"p_payload\"][\"agent_version\"] == \"1.8.0\", body[\"p_payload\"][\"agent_version\"]
-assert body[\"p_payload\"][\"agent_update\"][\"latest\"] == \"1.8.0\", body[\"p_payload\"][\"agent_update\"]
+assert body[\"p_payload\"][\"agent_version\"] == \"$HYN_VERSION\", body[\"p_payload\"][\"agent_version\"]
+assert body[\"p_payload\"][\"agent_update\"][\"latest\"] == \"$HYN_VERSION\", body[\"p_payload\"][\"agent_update\"]
 assert body[\"p_payload\"][\"agent_update\"][\"available\"] is False, body[\"p_payload\"][\"agent_update\"]
 top = body[\"p_payload\"][\"processes\"][\"top\"][0]
 assert top[\"name\"] == \"queue-worker\", top
@@ -365,6 +365,57 @@ assert \"peer handshake timeout\" not in json.dumps(hw), hw
 assert \"reconnecting to lighthouse\" not in json.dumps(hw), hw
 assert hw[\"bin_path\"] == \"/usr/local/bin/highway\" and hw[\"bin_size\"] == 48234496, hw
 "'
+
+# ---------------------------------------------------------------------------
+# heartbeat: the cheapest thing the agent sends, and the one the portal reads as
+# proof of life
+# ---------------------------------------------------------------------------
+printf '\nheartbeat\n'
+
+hb_stamp=$(cloud_heartbeat_stamp)
+rm -f "$hb_stamp"
+truthy 'a beat is accepted' 'cloud_heartbeat 1'
+hb_line=$(<"$hb_stamp")
+contains 'the beat outcome is recorded locally' $'\tok\t' "$hb_line"
+eq 'the beat learns the node status' 'active' "$CLOUD_HEARTBEAT_STATUS"
+hb_req=$(grep 'hyn_heartbeat' "$REQLOG" | tail -1)
+# The whole point of a separate RPC: it must NOT be the settings pull. A beat
+# that fetched the config would be 2.5x the portal work of the check-in it sits
+# beside, every 24 seconds, on every node.
+contains 'the beat calls its own RPC'  '/hyn_heartbeat' "$hb_req"
+contains 'the beat carries the version' 'p_agent_version' "$hb_req"
+missing  'the beat asks for no config'  'alert_template_b64' "$hb_req"
+# Same credential rule as every other request: body, never argv, never the URL.
+contains 'the token travels in the body' 'p_node_token' "$hb_req"
+# The logged request records the path separately from the body, so a token that
+# had leaked into the URL would show up in the path field.
+hb_path=${hb_req#*\"path\": \"}
+hb_path=${hb_path%%\"*}
+missing 'the token is not in the request path' "$(printf 'b%.0s' {1..64})" "$hb_path"
+# Age is what doctor and the self-heal check read.
+cloud_heartbeat_age_v
+truthy 'the beat age is readable' '((CLOUD_HEARTBEAT_AGE >= 0 && CLOUD_HEARTBEAT_AGE < 120))'
+
+# A portal that has not applied the migration must not leave a machine with no
+# heartbeat at all: the settings pull has always recorded one, so fall back to it
+# rather than going quiet.
+curl -s -o /dev/null "http://127.0.0.1:$PORT/heartbeat/off"
+rm -f "$hb_stamp"
+truthy 'a portal without the RPC still records a beat' 'cloud_heartbeat 1'
+contains 'the fallback is recorded as such' 'fallback' "$(<"$hb_stamp")"
+contains 'the fallback used the settings pull' '/hyn_fetch_config' "$(tail -1 "$REQLOG")"
+curl -s -o /dev/null "http://127.0.0.1:$PORT/heartbeat/on"
+
+# An unlinked machine must not beat, and must not treat that as a fault worth
+# retrying: there is no credential to beat with.
+rm -f "$hb_stamp"
+(
+  cloud_linked() { return 1; }
+  ! cloud_heartbeat 1
+) && ok || bad 'an unlinked machine tries to beat anyway'
+falsy 'no stamp is written without a credential' '[[ -e $hb_stamp ]]'
+# Restore a good stamp for anything downstream that reads it.
+cloud_heartbeat 1 >/dev/null 2>&1
 
 # ---------------------------------------------------------------------------
 # config pull: the dashboard is the source of truth

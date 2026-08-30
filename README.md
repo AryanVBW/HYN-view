@@ -8,6 +8,18 @@ the headline, not the CPU. It also tracks a [Highway](https://highwayp2p.com)
 relay node (`hw-os`) if one is installed — strictly read-only.
 
 ```
+curl -fsSL https://www.hyn-view.in/install.sh | sudo bash
+```
+
+One command, one password prompt, nothing to answer. It installs node if the box
+has none, installs the CLI globally from npm, writes `/etc/hyn-view/config`,
+installs and starts the systemd units — including the resident agent that beats
+every 24 seconds and updates itself — and then *verifies* that the agent is
+actually running rather than trusting that it must be.
+
+If you would rather do it by hand, npm is the same installation:
+
+```
 sudo npm install -g hyn-view   # installs, configures and schedules itself
 sudo hyn link                  # pair with the web portal (only if you want it)
 hyn                            # dashboard
@@ -414,9 +426,16 @@ Set any threshold to `0` to switch that rule off.
 tool claiming otherwise from inside the machine is lying to you.
 
 So the check that matters is made from outside it, and the portal makes it. Pairing
-starts a watchdog for that node; when three one-minute heartbeats are missed the
-owner gets a `[HYN CRIT]` email, and another when they resume. Nothing to configure
-and nothing to install.
+starts a watchdog for that node. `hyn-agent.service` beats every 24 seconds; after
+three minutes of silence — seven missed beats — the owner gets a `[HYN CRIT]`
+email, and another when the beats resume. Nothing to configure and nothing to
+install.
+
+Seven missed beats rather than three is deliberate. The threshold is what makes
+the difference between "reports an outage" and "cries wolf": at a one-minute
+cadence a single dropped packet spent a third of the budget, and on a domestic
+link that happens. A 24-second beat buys the same three-minute detection time with
+seven independent chances to be heard.
 
 That replaced a healthchecks.io ping URL entered on every machine. It was a second
 third-party account, configured per box, to detect exactly what the portal already
@@ -603,6 +622,7 @@ status.
 
 | Key | View |
 | --- | --- |
+| `0` | simple — node status, internet speed now + today's high, CPU temp, essentials |
 | `1` | dashboard |
 | `2` | network detail — all interfaces, kernel tuning snapshot |
 | `3` | processes |
@@ -612,6 +632,19 @@ status.
 Other keys: `t` cycle theme, `p` switch visual profile, `u` bits/bytes, `m` sort
 by cpu/mem, `i` cycle interface, `s` run a speed test now, `+`/`-` refresh rate,
 `r` redraw, `q` quit.
+
+The processes view sequences rows rather than sorting flat by cpu or mem: every
+process is grouped active (green, on a CPU right now), paused (yellow, sleeping
+or waiting on I/O), stopped (red, job-control stopped), then inactive (dim,
+zombie) — cpu/mem only breaks ties inside a group, so the panel always reads as
+"what's actually running" first.
+
+The simple view (`0`) is the one to leave on a screen nobody is actively working
+at: a single glanceable verdict for the node (running / degraded / not running),
+current throughput next to today's fastest recorded speed test with a braille
+sparkline of the day's tests, CPU temperature against fixed thresholds, and one
+line each for memory, the tightest disk and load. Set `default_view=simple` to
+open there by default; `hyn net`/`hyn proc`/`hyn node` still override it.
 
 The network panel header names the connection the way you do — Wi-Fi SSID or
 NetworkManager connection name, not just `enp3s0` — alongside the link speed,
@@ -638,6 +671,8 @@ hyn record                sample metrics once
 sudo hyn link             pair with the web portal (device-code flow)
 sudo hyn unlink           forget the portal credential
 hyn push                  send one reading to the portal
+hyn heartbeat             send one liveness beat now
+hyn agent                 run the resident loop in the foreground (debugging)
 hyn config pull           fetch monitoring settings from the portal
 hyn cloud status          node id, last push, and any error
 
@@ -651,8 +686,36 @@ sudo hyn setup            re-apply config, secrets and timers (no questions)
 sudo hyn uninstall        remove units (add --purge to drop config and history)
 ```
 
-Five systemd timers are installed by the postinstall. One rule decides whether
-each is running: **a timer is enabled if its job can ever do something useful.**
+**One resident service and five timers** are installed by the postinstall.
+
+`hyn-agent.service` is the only thing here that stays running. It sleeps, wakes
+every `heartbeat_sec` (24 by default), sends one small POST that says this machine
+is alive, and goes back to sleep. Every five minutes it also reloads the config,
+looks for a newer release, and re-arms any timer that has drifted.
+
+It is a resident process rather than a sixth timer for a reason. A heartbeat is
+what the portal reads as proof of life, so it has to be the most reliable thing
+the agent does — and a timer is not that: the minimum useful cadence still pays a
+whole process start per beat, and `AccuracySec` plus `RandomizedDelaySec`
+coalescing turns a "24 second" timer into a 24-to-50 second one. Three of those in
+a row and a healthy machine is reported as gone.
+
+| Property | Why |
+| --- | --- |
+| `Restart=always`, `RestartSec=5s` | systemd is the supervisor. "Keep it running" is not code we have to write. |
+| `StartLimitIntervalSec=0` | the default gives up after five restarts in ten seconds. A heartbeat must never be permanently abandoned over a bad ten seconds. |
+| a liveness stamp every tick | a loop that is *running and not beating* is the one failure a restart policy cannot see. A stale stamp gets the unit restarted — see `setup_heal_agent`. |
+| it exits when the version on disk changes | a resident process otherwise runs last week's code for ever. Exiting **is** the upgrade: systemd starts the new one. |
+| `MemoryMax=128M`, `CPUWeight=20`, `OOMScoreAdjust=500` | it lives beside a relayer for months. ~11 MiB of bash, one `curl` per beat, and the node wins every contended scheduler. |
+
+It is enabled whether or not the machine is paired. Without a token it does not
+beat, but it is still the only thing on an unpaired box that looks for a release
+or repairs a stopped timer — and an unpaired box is precisely the one nobody logs
+into. Telemetry deliberately stays out of it: an expensive collector that leaks or
+wedges must not be able to take the heartbeat down with it.
+
+The five timers follow one rule: **a timer is enabled if its job can ever do
+something useful.**
 
 | Timer | On when |
 | --- | --- |
@@ -672,13 +735,15 @@ as a warning — a correctly installed machine should not look broken. Portal sy
 configuration every minute and collects only when the dashboard-selected push
 interval is due. All five are one-shots that yield to the node — low CPU and I/O
 weight, `MemoryMax=256M`, `OOMScoreAdjust=500` — with full filesystem write
-access so the agent can update and repair itself. There is no permanent Node.js
-process and an npm update refreshes the units automatically.
+access so the agent can update and repair itself. There is no Node.js process at
+any point, and an npm update refreshes the units automatically.
 
-A sixth unit, `hyn-update.service`, is installed but never enabled. It has no
+A seventh unit, `hyn-update.service`, is installed but never enabled. It has no
 timer and no `[Install]` section: it exists only to be started by name when an
-update is due, so a sixty-second check-in is never the process holding an `npm
-install` open. See "Updates".
+update is due, so neither a sixty-second check-in nor the heartbeat loop is ever
+the process holding an `npm install` open. It also has its own cgroup, which is
+what lets an update restart the resident agent without killing the install doing
+it. See "Updates".
 
 `hyn snapshot --json` is the integration point. It emits one object with the
 network counters, latency map, speed test result, and node health, so it can be
@@ -738,6 +803,7 @@ Keys worth knowing:
 
 | Key | Default | Notes |
 | --- | --- | --- |
+| `default_view` | `dash` | `simple` opens the premium glance view (`0`) instead of the full dashboard (`1`) |
 | `interval` | `1.0` | seconds. `2.0`–`3.0` is lighter still |
 | `net_unit` | `bits` | how links are sold; `bytes` if you prefer |
 | `panels` | `net,cpu,mem,node,proc,disk` | **order is priority** — the last ones are dropped first on a short terminal |
@@ -761,6 +827,7 @@ Keys worth knowing:
 | `cloud_anon_key` | *(empty)* | optional public anon key for direct-Supabase mode |
 | `cloud_portal_url` | `https://www.hyn-view.in` | prints the complete pairing URL |
 | `cloud_push_min` | `10` | minutes between full portal readings; heartbeat/config checks remain one minute |
+| `heartbeat_sec` | `24` | seconds between liveness beats from `hyn-agent.service`; clamped to 5–3600, local-only |
 | `hide_mount` | `/snap,/var/lib/docker,…` | mount points kept out of the disk panel and alerts |
 
 Themes: `hiway` (default), `nord`, `gruvbox`, `dracula`, `solar`, `mono`. Drop a
@@ -778,6 +845,23 @@ filesystems and fire twenty disk-full alerts that could never clear.
 `curl` for speed tests and the update check; `ping` for latency, falling back to
 a TCP handshake when ICMP is filtered; `systemd` for unit tracking and the timer.
 `hyn doctor` reports which of these you have.
+
+**The package has no npm dependencies, and that is not an accident.** `dependencies`
+in `package.json` is empty and stays empty: nothing here runs on node, so a
+dependency would be a supply-chain risk taken on behalf of a root process for no
+functional gain. What the agent actually needs is a handful of system packages, and
+those are declared where they can be acted on — the one-line installer installs
+them, and `hyn doctor` reports any that are missing:
+
+| Dependency | Needed for | If absent |
+| --- | --- | --- |
+| `bash` 4.3+ | everything | nothing runs; Ubuntu ships 5.1+ |
+| `systemd` | the resident agent and the five timers | the CLI still works, nothing is scheduled, no heartbeat |
+| `curl` | the portal, the npm registry, speed tests | no beat, no update check, no throughput test |
+| `ca-certificates` | verifying every https endpoint above | every request fails certificate verification |
+| `iputils-ping` | first-hop and internet latency | latency falls back to a TCP handshake |
+| `node` 18+ and `npm` | delivery and self-update only — never at runtime | the package cannot install or update itself |
+| `python3`, `postgresql` | `test/` and `supabase/` only | the test suites skip |
 
 Terminals down to 80×24 are supported — the layout drops panels rather than
 wrapping, and the network graph and node health badge are the last things to go.

@@ -560,6 +560,24 @@ _uid_name_v() {
   return 0
 }
 
+# proc_state_rank_v <stat-char> -- maps /proc/<pid>/stat's state letter onto the
+# four-tier sequence the process panel displays in: active, paused, stopped,
+# inactive. Kept as one small pure function rather than inlined in two places
+# (the sort above and the colour choice in panel_proc) so the mapping cannot
+# drift between "what order" and "what colour".
+PROC_STATE_RANK=3
+proc_state_rank_v() {
+  case $1 in
+    R) PROC_STATE_RANK=0 ;;                 # active   -- on a CPU right now
+    S | I) PROC_STATE_RANK=1 ;;             # paused   -- idle/sleeping, waiting on something
+    D) PROC_STATE_RANK=1 ;;                 # paused   -- waiting on uninterruptible I/O
+    T | t) PROC_STATE_RANK=2 ;;             # stopped  -- job-control stop, not running
+    Z | X) PROC_STATE_RANK=3 ;;             # inactive -- zombie / dead, nothing left to run
+    *) PROC_STATE_RANK=3 ;;
+  esac
+  return 0
+}
+
 # Top-K by insertion rather than a full sort: an 800-process box costs 800*K
 # integer compares and zero forks, where `ps | sort | head` costs three
 # processes and a pipeline every tick.
@@ -624,15 +642,20 @@ proc_sample() {
     kp[i]=$pid kn[i]=$comm kc[i]=$cpu kr[i]=$rss kt[i]=$thr ks[i]=$st
   done
 
-  # Order the K survivors. Selection sort on single digits to low tens is
-  # smaller and cheaper than reaching for an external sort.
-  local -a idx=()
-  for ((i = 0; i < n; i++)); do idx+=("$i"); done
+  # Order the K survivors. Primary key is the state sequence the process panel
+  # wants on screen -- active, paused, stopped, inactive -- so the coloured
+  # groups land together instead of being interleaved by whoever happens to be
+  # busiest; the chosen sort metric (cpu or mem) only breaks ties inside a
+  # group. Selection sort on single digits to low tens is smaller and cheaper
+  # than reaching for an external sort.
+  local -a idx=() rank=()
+  for ((i = 0; i < n; i++)); do idx+=("$i"); proc_state_rank_v "${ks[i]}"; rank[i]=$PROC_STATE_RANK; done
   for ((i = 0; i < n; i++)); do
-    local best=$i a b t
+    local best=$i ra rb a b t
     for ((j = i + 1; j < n; j++)); do
+      ra=${rank[idx[j]]} rb=${rank[idx[best]]}
       if [[ $sortby == mem ]]; then a=${kr[idx[j]]} b=${kr[idx[best]]}; else a=${kc[idx[j]]} b=${kc[idx[best]]}; fi
-      ((a > b)) && best=$j
+      if ((ra < rb || (ra == rb && a > b))); then best=$j; fi
     done
     t=${idx[i]}; idx[i]=${idx[best]}; idx[best]=$t
   done

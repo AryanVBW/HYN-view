@@ -3004,3 +3004,44 @@ begin
   end if;
 end;
 $$;
+
+-- ---------------------------------------------------------------------------
+-- resident agent heartbeat (see migrations/20260830120000_resident_agent_heartbeat.sql)
+--
+-- One column written, four fields returned. Deliberately NOT hyn_fetch_config:
+-- that call claims the watchdog, encodes two email templates and triggers
+-- notification dispatch, none of which a 24-second liveness beat needs.
+create or replace function public.hyn_heartbeat(
+  p_node_token text,
+  p_agent_version text default null
+)
+returns json language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v_node public.nodes;
+begin
+  select * into v_node from public.nodes where token_hash = public._hyn_sha256(p_node_token);
+  if not found then raise exception 'invalid node token'; end if;
+  if v_node.revoked then raise exception 'node revoked'; end if;
+  if v_node.status = 'paused' and v_node.paused_until is not null
+     and v_node.paused_until <= now() then
+    update public.nodes set status = 'active', paused_until = null, status_reason = null
+     where id = v_node.id returning * into v_node;
+  end if;
+  -- last_seen_at is left alone on purpose: it means "last sent us a reading",
+  -- and several portal views distinguish a node that is reachable from one that
+  -- is actually reporting telemetry. A beat is not a reading.
+  update public.nodes
+     set last_heartbeat_at = now(),
+         agent_version = coalesce(nullif(left(coalesce(p_agent_version, ''), 50), ''), agent_version)
+   where id = v_node.id;
+  return json_build_object(
+    'status', 'ok',
+    'node_id', v_node.id,
+    'node_status', v_node.status,
+    'heartbeat_at', now()
+  );
+end;
+$$;
+
+revoke all on function public.hyn_heartbeat(text, text) from public;
+grant execute on function public.hyn_heartbeat(text, text) to anon, authenticated;

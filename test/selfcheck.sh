@@ -236,6 +236,7 @@ _default_of() {
 eq 'notification access details default off' 'off' "${CFG[notify_access_details]:-missing}"
 eq 'cloud telemetry defaults to ten minutes' '10' "${CFG[cloud_push_min]:-missing}"
 eq 'automatic CLI updates are the default' 'install' "$(_default_of auto_update)"
+eq 'default view is the advanced dashboard' 'dash' "$(_default_of default_view)"
 color_detect
 theme_load hiway || { printf 'theme load failed\n' >&2; exit 1; }
 ui_init
@@ -625,6 +626,52 @@ eq 'second proc rss'   '10485760' "${P_RSS[1]}"
 proc_sample 1000 5 mem
 eq 'mem sort picks biggest' '1000' "${P_PID[0]}"
 
+# State sequencing: active (R) before paused (S/D) before stopped (T) before
+# inactive (Z), regardless of which one happens to be busiest. Five processes,
+# one per state plus a second sleeper, sorted by cpu -- if the panel only sorted
+# by cpu the zombie with the highest cpu delta would land first, which is
+# exactly the bug this ordering exists to prevent.
+write_proc_state() {
+  local pid=$1 comm=$2 state=$3 ut=$4
+  printf '%s (%s) %s 1 %s %s 0 -1 4194304 100 0 0 0 %s 0 0 0 20 0 11 0 5000 100000000 2560 0 0 0 0 0 0 0 0 0\n' \
+    "$pid" "$comm" "$state" "$pid" "$pid" "$ut" >"$FP/$pid/stat"
+  printf 'Name:\t%s\nUid:\t0\t0\t0\t0\n' "$comm" >"$FP/$pid/status"
+}
+mkdir -p "$FP/2000" "$FP/2001" "$FP/2002" "$FP/2003" "$FP/2004"
+write_proc_state 2000 zombie1 Z 900   # inactive, but the busiest of the five
+write_proc_state 2001 running1 R 100  # active
+write_proc_state 2002 sleeper1 S 500  # paused
+write_proc_state 2003 stopped1 T 300  # stopped
+write_proc_state 2004 waiter1 D 700   # paused (uninterruptible I/O)
+proc_sample 1000 20 cpu          # seeds baselines for the new pids too
+write_proc_state 2000 zombie1 Z 1800
+write_proc_state 2001 running1 R 200
+write_proc_state 2002 sleeper1 S 1000
+write_proc_state 2003 stopped1 T 600
+write_proc_state 2004 waiter1 D 1400
+proc_sample 1000 20 cpu
+# Robust to the pre-existing 'highway'/'sshd(x)' fixtures (also state S, also
+# competing for the "paused" group): assert relative order via each name's
+# position, not fixed indices, since exactly how many other paused processes
+# sort ahead of/behind them is not this test's concern.
+_pos_of() {
+  local want=$1 i
+  for i in "${!P_NAME[@]}"; do [[ ${P_NAME[i]} == "$want" ]] && { printf '%s' "$i"; return 0; }; done
+  printf -- '-1'
+}
+r_pos=$(_pos_of running1) p1_pos=$(_pos_of sleeper1) p2_pos=$(_pos_of waiter1)
+s_pos=$(_pos_of stopped1) z_pos=$(_pos_of zombie1)
+truthy 'state sequencing: active before paused'   "(( $r_pos < $p1_pos && $r_pos < $p2_pos ))"
+truthy 'state sequencing: paused before stopped'  "(( $p1_pos < $s_pos && $p2_pos < $s_pos ))"
+truthy 'state sequencing: stopped before inactive' "(( $s_pos < $z_pos ))"
+eq 'state sequencing: active is first overall' 'running1' "${P_NAME[0]}"
+eq 'state sequencing: inactive is last despite highest cpu' 'zombie1' "${P_NAME[${#P_NAME[@]}-1]}"
+eq 'proc_state_rank_v: running is 0'  '0' "$(proc_state_rank_v R; printf %s "$PROC_STATE_RANK")"
+eq 'proc_state_rank_v: sleeping is 1' '1' "$(proc_state_rank_v S; printf %s "$PROC_STATE_RANK")"
+eq 'proc_state_rank_v: disk-wait is 1' '1' "$(proc_state_rank_v D; printf %s "$PROC_STATE_RANK")"
+eq 'proc_state_rank_v: stopped is 2'  '2' "$(proc_state_rank_v T; printf %s "$PROC_STATE_RANK")"
+eq 'proc_state_rank_v: zombie is 3'   '3' "$(proc_state_rank_v Z; printf %s "$PROC_STATE_RANK")"
+
 # ---------------------------------------------------------------------------
 section 'speed test history'
 # ---------------------------------------------------------------------------
@@ -647,6 +694,19 @@ eq 'last good download kept' '11000000' "$ST_LAST_DOWN"
 eq 'last good ts kept'       '1700000000' "$ST_LAST_TS"
 contains 'skip reason recorded' 'skipped' "$ST_LAST_NOTE"
 eq 'baseline is best result' '11000000' "$(st_baseline)"
+
+# Today's high must ignore old history (the rows above, from 2023) and pick the
+# best of only today's runs, not just the latest or the largest ever recorded.
+now=${EPOCHSECONDS:-0}
+ST_TS=$((now - 7200)) ST_DOWN=9000000 ST_UP=4000000 ST_NOTE='ok'
+st_append eth0
+ST_TS=$((now - 3600)) ST_DOWN=15000000 ST_UP=6000000 ST_NOTE='ok'
+st_append eth0
+ST_TS=$((now - 1800)) ST_DOWN=12000000 ST_UP=5500000 ST_NOTE='ok'
+st_append eth0
+st_today_high_v
+eq "today's high picks today's best, not the all-time or latest" '15000000' "$ST_TODAY_HIGH"
+eq "today's high timestamp matches the winning run" "$((now - 3600))" "$ST_TODAY_HIGH_TS"
 
 # ---------------------------------------------------------------------------
 section 'highway tracker'
@@ -766,7 +826,7 @@ for _f in "$HYN_LIB"/*.sh "$ROOT/bin/hyn"; do
 done
 # Every unit hyn is allowed to act on, spelled out. If a new managed unit is
 # added it has to be added here too, which is the point.
-for _u in hyn-speedtest hyn-record hyn-alerts hyn-report hyn-push hyn-update; do
+for _u in hyn-speedtest hyn-record hyn-alerts hyn-report hyn-push hyn-agent hyn-update; do
   if code_only "$HYN_LIB/setup.sh" "$HYN_LIB/update.sh" "$HYN_LIB/cloud.sh" |
      grep  "$_u"; then ok
   else bad "$_u is not referenced by the unit management code"; fi
@@ -1094,6 +1154,25 @@ test_update_progress() { printf '%s|%s\n' "$1" "$2" >>"$HYN_VAR/post-update-prog
 truthy 'npm update refreshes system integration' '[[ -r $HYN_VAR/post-update-setup ]]'
 contains 'post-update setup is non-interactive' 'setup --no-wizard' "$(<"$HYN_VAR/post-update-setup")"
 contains 'package update restarts the push timer' 'restart hyn-push.timer' "$(<"$HYN_VAR/post-update-systemctl")"
+# A resident process keeps the code it started with, so an update that does not
+# restart it leaves the previous release beating for ever. This is the only unit
+# where "restarted" is the difference between an update applying and not.
+contains 'package update restarts the resident agent' 'restart hyn-agent.service' "$(<"$HYN_VAR/post-update-systemctl")"
+# ...unless the update is running inside the agent, where restarting the unit
+# would kill the install that is doing it. The loop exits on the version change
+# instead, which systemd turns into the same restart from the outside.
+rm -f "$HYN_VAR/post-update-systemctl"
+(
+  HYN_ROOT="$fake_update_root"
+  PATH="$fake_update_bin:$PATH"
+  HYN_IN_AGENT=1
+  is_root() { return 0; }
+  update_refresh_services >/dev/null 2>&1
+)
+falsy 'an update inside the agent does not restart the agent' \
+  'grep  "restart hyn-agent.service" "$HYN_VAR/post-update-systemctl"'
+truthy 'an update inside the agent still restarts the timers' \
+  'grep  "restart hyn-push.timer" "$HYN_VAR/post-update-systemctl"'
 contains 'package update reports installation progress' 'installing|' "$(<"$HYN_VAR/post-update-progress")"
 contains 'package update reports service restart progress' 'restarting|' "$(<"$HYN_VAR/post-update-progress")"
 contains 'package update reports verification progress' 'verifying|' "$(<"$HYN_VAR/post-update-progress")"
@@ -2056,6 +2135,53 @@ section 'a timer is on, or there is a reason'
   ! setup_timer_reason hyn-record.timer
 ) && ok || bad 'a timer that should be running was excused instead of flagged'
 
+# `hyn record` is the one job every installed machine runs unconditionally, so
+# it is where a timer that quietly stopped gets re-armed without anyone running
+# `hyn doctor --fix` by hand.
+(
+  source "$HYN_LIB/setup.sh"
+  is_root() { return 0; }
+  CFG[alert_enabled]=on CFG[report_enabled]=on CFG[cloud_enabled]=off
+  ENABLED=''
+  systemctl() {
+    case "$1 $2" in
+      'cat hyn-record.timer') return 0 ;;
+      'is-active hyn-record.timer') printf 'inactive\n'; return 3 ;;
+      'reset-failed hyn-record.timer') return 0 ;;
+      'enable --now') ENABLED=$3; return 0 ;;
+      cat*) return 1 ;;
+    esac
+    return 0
+  }
+  setup_self_heal
+  [[ $ENABLED == hyn-record.timer ]]
+) && ok || bad 'a timer that stopped on its own was not re-enabled'
+(
+  source "$HYN_LIB/setup.sh"
+  is_root() { return 0; }
+  CFG[alert_enabled]=on CFG[report_enabled]=on CFG[cloud_enabled]=off
+  CALLED=0
+  systemctl() {
+    case "$1 $2" in
+      'cat hyn-record.timer') return 0 ;;
+      'is-active hyn-record.timer') printf 'active\n'; return 0 ;;
+      'enable --now') CALLED=1; return 0 ;;
+      cat*) return 1 ;;
+    esac
+    return 0
+  }
+  setup_self_heal
+  ((CALLED == 0))
+) && ok || bad 'a healthy timer was touched when nothing had drifted'
+(
+  source "$HYN_LIB/setup.sh"
+  is_root() { return 1; }
+  CALLED=0
+  systemctl() { CALLED=1; return 0; }
+  setup_self_heal
+  ((CALLED == 0))
+) && ok || bad 'self-heal ran without root'
+
 # "Nowhere to send" must be a clean no-op, or the report unit goes red every
 # morning on a machine that is working perfectly.
 # One question decides whether anything can be delivered: is this machine paired.
@@ -2105,7 +2231,7 @@ contains 'a paired machine confirms the token' 'node token' "$_doc_paired"
 contains 'a paired machine checks the transport' 'transport'  "$_doc_paired"
 contains 'a paired machine reports the endpoint scheme' 'https' "$_doc_paired"
 contains 'a paired machine reports the queue budget' 'daily budget' "$_doc_paired"
-contains 'a paired machine is watched from outside' 'three missed heartbeats' "$_doc_paired"
+contains 'a paired machine is watched from outside' '3 minutes without a beat' "$_doc_paired"
 
 # ---------------------------------------------------------------------------
 section 'config migration'
@@ -2337,6 +2463,56 @@ falsy 'no nebula unit is ever acted on' \
   'code_only "$HYN_LIB/highway.sh" | grep -E  "systemctl[^|#]*(start|stop|restart|enable|disable)[^|#]*nebula"'
 
 # ---------------------------------------------------------------------------
+section 'one-line installer'
+# ---------------------------------------------------------------------------
+# The script the portal serves for `curl … | sudo bash`. It lives in the web
+# portal, which is not part of the npm tarball, so these checks only run from a
+# source checkout -- skipping is correct, silently passing would not be.
+_inst="$ROOT/web-portal/public/install.sh"
+if [[ -r $_inst ]]; then
+  _instsrc=$(<"$_inst")
+  truthy 'the installer is valid bash' 'bash -n "$_inst"'
+  # The one that matters most. `curl | bash` executes what has arrived, so a
+  # script that runs top-to-bottom performs half an install when the connection
+  # drops. Everything must be inside main(), invoked on the last line, so a
+  # truncated download does nothing at all.
+  truthy 'the installer only acts once fully downloaded' \
+    '[[ $(grep -v "^[[:space:]]*#" "$_inst" | grep -v "^[[:space:]]*$" | tail -1) == "main \"\$@\"" ]]'
+  truthy 'the installer defines main'   'grep  "^main() {" "$_inst"'
+  # It writes /etc and /usr and installs units, so it must refuse rather than
+  # half-run, and it must say the exact command to use instead.
+  truthy 'the installer requires root'  'grep  "EUID" "$_inst"'
+  contains 'the installer prints the sudo form it needs' 'sudo bash' "$_instsrc"
+  truthy 'the installer refuses a non-Linux machine' 'grep  "uname -s" "$_inst"'
+  # It is the npm delivery channel, not a second install mechanism: no curl of a
+  # tarball, no git clone, no writing units itself.
+  truthy 'the installer installs through npm' 'grep  "npm install -g" "$_inst"'
+  truthy 'the installer writes no units itself' \
+    '! grep -E  "systemd/system|\[Service\]" "$_inst"'
+  # It must never touch a Highway unit, exactly like every other file here.
+  falsy 'the installer names no Highway unit' \
+    'grep -E  "systemctl[^#]*(highway|hway|nebula|mosaic)" "$_inst"'
+  # Non-interactive by construction: this runs from a pipe with no terminal, so a
+  # package that wants to ask about a config file must not be able to hang it.
+  contains 'the installer never lets apt ask a question' 'DEBIAN_FRONTEND=noninteractive' "$_instsrc"
+  # It verifies rather than trusts. The postinstall cannot fail an install by
+  # design, so "npm exited 0" is not evidence that monitoring is running.
+  contains 'the installer verifies the resident agent' 'is-active hyn-agent.service' "$_instsrc"
+  contains 'the installer repairs a failed setup' 'doctor --fix' "$_instsrc"
+  # The command shown on the site and the script it fetches must agree. Drift
+  # here is a 404 in the one place a new user starts.
+  _installui="$ROOT/web-portal/components/product-sections.tsx"
+  if [[ -r $_installui ]]; then
+    truthy 'the portal offers the curl one-liner' \
+      'grep  "curl -fsSL https://www.hyn-view.in/install.sh | sudo bash" "$_installui"'
+    truthy 'the portal links the script it tells you to pipe' \
+      'grep  "/install.sh" "$_installui"'
+  fi
+else
+  printf '  skip  one-line installer (repository-only files not in this package)\n'
+fi
+
+# ---------------------------------------------------------------------------
 section 'zero-setup install'
 # ---------------------------------------------------------------------------
 # `npm install -g hyn-view` must be the whole installation. The postinstall
@@ -2386,6 +2562,17 @@ truthy 'a sampling interval is set' '[[ $(_default_of record_interval_min) =~ ^[
   [[ $out == *'hyn-report.timer'*'disabled'* ]] &&
   [[ $out == *'hyn-push.timer'*'disabled'* ]]
 ) && ok || bad 'a fresh install does not evaluate alerts until email is configured'
+# The resident agent is the one unit that is NOT gated on being paired. Gating it
+# would leave an unpaired box -- the one nobody logs into -- with nothing looking
+# for a release and nothing re-arming a drifted timer.
+(
+  source "$HYN_LIB/setup.sh"
+  systemctl() { return 0; }
+  CFG[cloud_enabled]=off
+  cloud_linked() { return 1; }
+  out=$(setup_apply_schedule "$ROOT/bin/hyn" 2>&1)
+  [[ $out == *'hyn-agent.service'*enabled* ]]
+) && ok || bad 'the resident agent is not enabled on an unpaired machine'
 # ...and a linked machine gets the report too, because `web` is a channel.
 (
   source "$HYN_LIB/setup.sh"
@@ -2501,6 +2688,7 @@ mkdir -p "$_unitdir"
 _push_svc=$(<"$_unitdir/hyn-push.service") || _push_svc=''
 _push_tmr=$(<"$_unitdir/hyn-push.timer") || _push_tmr=''
 _maint=$(<"$_unitdir/hyn-update.service") || _maint=''
+_agent=$(<"$_unitdir/hyn-agent.service") || _agent=''
 
 # HOME. systemd does not set it for a system service without User=, and the tool
 # runs under `set -u`, so its absence aborted every timer run. Asserted on the
@@ -2568,6 +2756,159 @@ for _u in "$_unitdir"/hyn-alerts.service "$_unitdir"/hyn-record.service \
   if [[ -r $_u && $(<"$_u") == *CPUWeight=20* ]]; then ok
   else bad "${_u##*/} no longer yields CPU to the node"; fi
 done
+
+# ---------------------------------------------------------------------------
+section 'resident agent'
+# ---------------------------------------------------------------------------
+# The unit that is not a one-shot. Its whole value is that it is always running,
+# so the properties that make that true are asserted rather than assumed.
+truthy 'the agent unit is written'          '[[ -n $_agent ]]'
+contains 'the agent unit runs the loop'     'ExecStart=/usr/bin/hyn agent' "$_agent"
+truthy 'the agent unit is long-running'     '[[ $_agent == *"Type=simple"* ]]'
+# Restart=always is what makes systemd, rather than us, responsible for keeping
+# the heartbeat alive -- including after the loop deliberately exits to pick up a
+# new version.
+contains 'the agent is restarted always'    'Restart=always' "$_agent"
+truthy 'the agent restarts promptly'        '[[ $_agent == *"RestartSec=5s"* ]]'
+# Without this, systemd abandons the unit after five restarts in ten seconds. A
+# heartbeat must never be permanently given up on because of a bad ten seconds.
+contains 'the agent restart rate is unlimited' 'StartLimitIntervalSec=0' "$_agent"
+# ...and in [Unit], where systemd actually reads it. In [Service] it is ignored
+# with a warning, which would silently restore the five-strikes behaviour. The
+# split is on a line that is exactly the section header, because the comment
+# above the key mentions [Service] too.
+truthy 'the restart rate limit is in the Unit section' \
+  '[[ ${_agent%%$'"'"'\n[Service]\n'"'"'*} == *StartLimitIntervalSec=0* ]]'
+contains 'the agent starts at boot'         'WantedBy=multi-user.target' "$_agent"
+contains 'the agent has HOME'               'Environment=HOME=' "$_agent"
+# Same reversal as every other unit: it installs its own updates, so a mount
+# namespace would stop it repairing the machine.
+truthy 'the agent is not sandboxed' \
+  '[[ $_agent != *ProtectSystem* && $_agent != *ReadWritePaths* && $_agent != *MemoryDenyWriteExecute* ]]'
+# A process that lives for months beside a relayer holding 1.5 GiB.
+truthy 'the agent yields to the node' \
+  '[[ $_agent == *CPUWeight=20* && $_agent == *IOWeight=20* && $_agent == *OOMScoreAdjust=500* && $_agent == *Nice=* ]]'
+contains 'the agent memory cap suits a sleeping bash loop' 'MemoryMax=128M' "$_agent"
+# A stop must not wait out a sleep; the loop traps TERM.
+contains 'the agent stops on SIGTERM' 'KillSignal=SIGTERM' "$_agent"
+# TimeoutStartSec belongs to a one-shot that must finish. A resident loop that is
+# still running after 180s is working, not wedged, and reaping it would be the
+# bug rather than the fix.
+truthy 'the agent is not reaped for still running' '[[ $_agent != *TimeoutStartSec* ]]'
+
+# The loop's own logic, driven directly.
+source "$HYN_LIB/agent.sh"
+CFG[heartbeat_sec]=24; agent_interval_v
+eq 'the default beat is 24s'        '24'   "$AGENT_INTERVAL"
+CFG[heartbeat_sec]=1; agent_interval_v
+eq 'a too-fast beat is clamped up'  '5'    "$AGENT_INTERVAL"
+CFG[heartbeat_sec]=99999; agent_interval_v
+eq 'a too-slow beat is clamped down' '3600' "$AGENT_INTERVAL"
+CFG[heartbeat_sec]='; rm -rf /'; agent_interval_v
+eq 'a junk interval falls back'     '24'   "$AGENT_INTERVAL"
+CFG[heartbeat_sec]=0; agent_interval_v
+eq 'zero would spin, so it falls back' '24' "$AGENT_INTERVAL"
+CFG[heartbeat_sec]=24
+
+# Liveness is measured, not assumed: this is the difference between a loop that
+# is running and a loop that is working, and the portal cannot tell a wedged
+# agent apart from a machine that has been switched off.
+_astamp=$(agent_stamp)
+printf '%s\n' "${EPOCHSECONDS:-0}" >"$_astamp"
+falsy  'a fresh beat stamp is not stale'   'agent_stamp_stale'
+printf '%s\n' "$((${EPOCHSECONDS:-0} - 3600))" >"$_astamp"
+truthy 'an hour-old beat stamp is stale'   'agent_stamp_stale'
+# 3 intervals of slack, never less than 120s: a slow beat on a busy box must not
+# be mistaken for a wedge and restarted out from under itself.
+printf '%s\n' "$((${EPOCHSECONDS:-0} - 60))" >"$_astamp"
+falsy  'a minute-old beat stamp is tolerated' 'agent_stamp_stale'
+printf 'not-a-timestamp\n' >"$_astamp"
+truthy 'an unreadable stamp counts as stale' 'agent_stamp_stale'
+rm -f "$_astamp"
+falsy  'a missing stamp is absent, not stale' 'agent_stamp_stale'
+
+# The hazard unique to a resident process: an update lands underneath it and it
+# keeps running last week's code for ever. It reads the version off disk and
+# exits, which is the upgrade.
+_agentroot="$TMP/agentroot"
+mkdir -p "$_agentroot/lib"
+printf 'HYN_VERSION="2.3.4"\n' >"$_agentroot/lib/core.sh"
+(
+  HYN_ROOT=$_agentroot
+  agent_disk_version_v && [[ $AGENT_DISK_VERSION == 2.3.4 ]]
+) && ok || bad 'the agent cannot read the version installed on disk'
+printf 'HYN_VERSION="not a version"\n' >"$_agentroot/lib/core.sh"
+(
+  HYN_ROOT=$_agentroot
+  ! agent_disk_version_v
+) && ok || bad 'the agent accepts a malformed on-disk version'
+(
+  HYN_ROOT=$TMP/does-not-exist
+  ! agent_disk_version_v
+) && ok || bad 'the agent invents a version when the package is mid-install'
+
+# One tick, end to end: it stamps, and it does not fall over on a machine with
+# no portal credential.
+rm -f "$_astamp"
+(
+  cloud_configured() { return 1; }
+  agent_run --once >/dev/null 2>&1
+)
+truthy 'one tick writes the liveness stamp' '[[ -r $_astamp ]]'
+
+# Self-heal, which is the other half: a loop that stopped beating gets restarted,
+# and one that is beating is left alone.
+_heal_log="$TMP/heal-systemctl"
+_fake_heal_systemctl() {
+  case "$*" in
+    'cat hyn-agent.service') return 0 ;;
+    'is-active hyn-agent.service') printf '%s\n' "$_heal_state"; [[ $_heal_state == active ]] ;;
+    *) printf '%s\n' "$*" >>"$_heal_log" ;;
+  esac
+  return 0
+}
+rm -f "$_heal_log"; _heal_state=inactive
+(
+  source "$HYN_LIB/setup.sh"
+  systemctl() { _fake_heal_systemctl "$@"; }
+  is_root() { return 0; }
+  _HAVE[systemctl]=1
+  setup_heal_agent
+)
+truthy 'a dead agent is re-enabled' 'grep  "enable --now hyn-agent.service" "$_heal_log"'
+rm -f "$_heal_log"; _heal_state=active
+printf '%s\n' "$((${EPOCHSECONDS:-0} - 3600))" >"$_astamp"
+(
+  source "$HYN_LIB/setup.sh"
+  systemctl() { _fake_heal_systemctl "$@"; }
+  is_root() { return 0; }
+  _HAVE[systemctl]=1
+  setup_heal_agent
+) >/dev/null 2>&1
+truthy 'an agent that stopped beating is restarted' 'grep  "restart hyn-agent.service" "$_heal_log"'
+rm -f "$_heal_log"
+printf '%s\n' "${EPOCHSECONDS:-0}" >"$_astamp"
+(
+  source "$HYN_LIB/setup.sh"
+  systemctl() { _fake_heal_systemctl "$@"; }
+  is_root() { return 0; }
+  _HAVE[systemctl]=1
+  setup_heal_agent
+)
+falsy 'a beating agent is left alone' '[[ -s $_heal_log ]]'
+# The loop must never restart the unit it is running inside: that is not a repair,
+# it is the agent killing itself once every maintenance pass.
+rm -f "$_heal_log"; _heal_state=inactive
+(
+  source "$HYN_LIB/setup.sh"
+  systemctl() { _fake_heal_systemctl "$@"; }
+  is_root() { return 0; }
+  _HAVE[systemctl]=1
+  HYN_IN_AGENT=1
+  setup_heal_agent
+)
+falsy 'the agent does not restart itself from inside' '[[ -s $_heal_log ]]'
+rm -f "$_astamp"
 
 # ---------------------------------------------------------------------------
 printf '\n'

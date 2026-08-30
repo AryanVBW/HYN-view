@@ -14,6 +14,10 @@ state = {
     "command_claimed": False,
     "config_override": {},
     "config_dropped": set(),
+    # The resident agent's beat: counted so a test can prove one was sent, and
+    # switchable so the pre-migration 404 fallback can be exercised.
+    "beats": 0,
+    "heartbeat_rpc": True,
 }
 
 
@@ -58,6 +62,15 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/command/clear":
             state["command_kind"] = None
             state["command_claimed"] = False
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
+        # Test-only lever: pretend to be a portal deployment that has not applied
+        # the heartbeat migration, so the agent's fallback path is exercised.
+        if self.path in ("/heartbeat/on", "/heartbeat/off"):
+            state["heartbeat_rpc"] = self.path.endswith("/on")
             self.send_response(200)
             self.send_header("Content-Length", "2")
             self.end_headers()
@@ -198,6 +211,26 @@ class Handler(BaseHTTPRequestHandler):
                 "id": "5f8c0000-0000-4000-8000-000000000003",
                 "created": True,
                 "fingerprint": event.get("fingerprint"),
+            }
+        elif function == "hyn_heartbeat":
+            # The resident agent's beat. Deliberately the cheapest branch here,
+            # mirroring the real RPC: a token check and a status, no config, no
+            # templates. `/heartbeat/off` makes it 404 so the agent's fallback to
+            # the settings pull can be exercised against a portal that predates
+            # this function.
+            body = json.loads(raw)
+            if body.get("p_node_token") != "b" * 64:
+                self._error(401, "invalid node token")
+                return
+            if not state.get("heartbeat_rpc", True):
+                self._error(404, "no such function")
+                return
+            state["beats"] = state.get("beats", 0) + 1
+            output = {
+                "status": "ok",
+                "node_id": "3f7a0000-0000-4000-8000-000000000001",
+                "node_status": state["node_status"],
+                "heartbeat_at": "2026-08-30T12:00:00Z",
             }
         elif function == "hyn_ingest":
             body = json.loads(raw)

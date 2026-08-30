@@ -964,6 +964,118 @@ begin
   raise notice 'PASS  a config pull records a durable machine heartbeat';
 end $$;
 
+-- The resident agent's beat. Cheap by construction: it must write the heartbeat
+-- and nothing else, because at one call every 24 seconds anything it does extra
+-- is multiplied across the whole fleet.
+do $$
+declare
+  r json;
+  before_pull timestamptz;
+  after_pull timestamptz;
+  before_seen timestamptz;
+  after_seen timestamptz;
+  beat timestamptz;
+begin
+  set local role postgres;
+  update public.nodes
+     set last_heartbeat_at = now() - interval '10 minutes',
+         last_config_pull_at = now() - interval '10 minutes',
+         last_seen_at = now() - interval '10 minutes'
+   where id = (select v from t where k = 'node_id')::uuid;
+  select last_config_pull_at, last_seen_at into before_pull, before_seen
+    from public.nodes where id = (select v from t where k = 'node_id')::uuid;
+  set local role anon;
+
+  r := public.hyn_heartbeat((select v from t where k = 'node_token'), '9.9.9');
+  if r->>'status' <> 'ok' then raise exception 'heartbeat was refused: %', r; end if;
+  if r->>'node_status' <> 'active' then
+    raise exception 'heartbeat did not report the node status: %', r;
+  end if;
+  -- The agent has no use for a config here and the portal should not pay to
+  -- build one. If these ever appear, the beat has become the expensive call it
+  -- was created to avoid.
+  if r::jsonb ? 'config' or r::jsonb ? 'alert_template_b64' then
+    raise exception 'the heartbeat returned settings it does not need: %', r;
+  end if;
+
+  set local role postgres;
+  select last_heartbeat_at, last_config_pull_at, last_seen_at
+    into beat, after_pull, after_seen
+    from public.nodes where id = (select v from t where k = 'node_id')::uuid;
+  if beat is null or beat < now() - interval '5 seconds' then
+    raise exception 'the heartbeat did not record a beat: %', beat;
+  end if;
+  -- last_seen_at means "last sent a reading" and last_config_pull_at means "last
+  -- fetched settings". A beat is neither, and portal views distinguish a machine
+  -- that is reachable from one that is actually reporting.
+  if after_pull <> before_pull then
+    raise exception 'the heartbeat pretended to be a settings pull';
+  end if;
+  if after_seen <> before_seen then
+    raise exception 'the heartbeat pretended to be a telemetry reading';
+  end if;
+  if (select agent_version from public.nodes
+       where id = (select v from t where k = 'node_id')::uuid) <> '9.9.9' then
+    raise exception 'the heartbeat did not record the reported agent version';
+  end if;
+  -- Put the paired version back. The admin overview picks its staleness rule from
+  -- agent_version, and a later test in this file depends on this node still being
+  -- on the pre-heartbeat 1.4.0 branch.
+  update public.nodes set agent_version = '1.4.0'
+   where id = (select v from t where k = 'node_id')::uuid;
+  set local role anon;
+  raise notice 'PASS  a heartbeat records liveness without touching telemetry or settings state';
+end $$;
+
+do $$
+declare ok boolean := false;
+begin
+  begin
+    perform public.hyn_heartbeat('not-a-real-token');
+  exception when others then ok := true;
+  end;
+  if not ok then raise exception 'the heartbeat accepted an unknown token'; end if;
+  raise notice 'PASS  the heartbeat rejects an unknown token';
+end $$;
+
+-- A timed pause must be able to end on a beat alone. On a machine whose only
+-- traffic is beats, waiting for the next settings pull would leave the pause in
+-- place for longer than the administrator asked for.
+do $$
+declare r json;
+begin
+  set local role postgres;
+  update public.nodes
+     set status = 'paused', paused_until = now() - interval '1 minute',
+         status_reason = 'maintenance window'
+   where id = (select v from t where k = 'node_id')::uuid;
+  set local role anon;
+  r := public.hyn_heartbeat((select v from t where k = 'node_token'));
+  if r->>'node_status' <> 'active' then
+    raise exception 'an expired pause did not resume on a heartbeat: %', r;
+  end if;
+  raise notice 'PASS  an expired pause resumes on a heartbeat, not only on a settings pull';
+end $$;
+
+do $$
+declare ok boolean := false;
+begin
+  set local role postgres;
+  update public.nodes set revoked = true
+   where id = (select v from t where k = 'node_id')::uuid;
+  set local role anon;
+  begin
+    perform public.hyn_heartbeat((select v from t where k = 'node_token'));
+  exception when others then ok := true;
+  end;
+  if not ok then raise exception 'a revoked node was still allowed to beat'; end if;
+  set local role postgres;
+  update public.nodes set revoked = false
+   where id = (select v from t where k = 'node_id')::uuid;
+  set local role anon;
+  raise notice 'PASS  a revoked node cannot beat';
+end $$;
+
 do $$
 declare r json;
 begin

@@ -309,6 +309,37 @@ st_calendar() {
   printf '*-*-* %s:07:00' "$hours"
 }
 
+# st_today_high_v -- best download recorded since local midnight, in ST_TODAY_HIGH,
+# with the time it happened in ST_TODAY_HIGH_TS. Distinct from st_baseline
+# (all-time, used only to judge "is the link busy"): this is what the simple
+# dashboard shows the operator, and "the fastest today" resets at midnight by
+# construction rather than needing a cron job to clear anything.
+#
+# %(%Y%m%d)T is a bash builtin strftime, not a fork -- printf already pays for
+# one clock read per call, so comparing 90-ish history rows against "today" costs
+# nothing beyond what st_history_read already did.
+ST_TODAY_HIGH=0 ST_TODAY_HIGH_TS=0
+st_today_high_v() {
+  # Forced: this is what the simple dashboard reads right after `s` runs a test
+  # in the background, and st_history_read's 20s throttle exists for the
+  # render loop's repeated reads, not for "did the number I just recorded show
+  # up yet".
+  st_history_read 1
+  ST_TODAY_HIGH=0 ST_TODAY_HIGH_TS=0
+  ((${#ST_H_TS[@]} == 0)) && return 0
+  local today i ts down
+  printf -v today '%(%Y%m%d)T' -1
+  for ((i = 0; i < ${#ST_H_TS[@]}; i++)); do
+    ts=${ST_H_TS[i]} down=${ST_H_DOWN[i]}
+    [[ $down =~ ^[0-9]+$ ]] || continue
+    ((down > 0)) || continue
+    local day; printf -v day '%(%Y%m%d)T' "$ts"
+    [[ $day == "$today" ]] || continue
+    if ((down > ST_TODAY_HIGH)); then ST_TODAY_HIGH=$down; ST_TODAY_HIGH_TS=$ts; fi
+  done
+  return 0
+}
+
 st_print() {
   local json=${1:-0}
   if ((json)); then

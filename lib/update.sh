@@ -203,6 +203,30 @@ update_refresh_services() {
       return 1
     fi
   done
+
+  # The resident agent last, and only when this process is not living inside it.
+  #
+  # A restart here replaces a loop that is still executing the previous release's
+  # code -- for a long-lived process that is not cosmetic, it is the only thing
+  # that makes an update take effect. It is safe because every unattended install
+  # runs in hyn-update.service, a separate cgroup, so restarting the agent cannot
+  # kill the npm install doing it. HYN_IN_AGENT is the guard for the one case that
+  # is not true: an operator running `hyn update --yes` inside a debugging
+  # `hyn agent`, where the loop exits by itself on the version change instead.
+  if [[ ${HYN_IN_AGENT:-0} != 1 ]] && systemctl is-enabled --quiet hyn-agent.service >/dev/null 2>&1; then
+    if ! systemctl restart hyn-agent.service >/dev/null 2>&1; then
+      UPD_LAST_ERR='could not restart hyn-agent.service'
+      return 1
+    fi
+    state=$(systemctl is-active hyn-agent.service 2>/dev/null)
+    # `activating` is a pass: Type=simple reports it for the instant between fork
+    # and the first loop iteration, and failing an otherwise good update on that
+    # race would be a self-inflicted rollback.
+    if [[ $state != active && $state != activating ]]; then
+      UPD_LAST_ERR="hyn-agent.service is $state after restart"
+      return 1
+    fi
+  fi
   return 0
 }
 
@@ -292,6 +316,14 @@ update_startup() {
            declare -F cloud_handoff_command >/dev/null 2>&1 &&
            cloud_handoff_command '' update; then
           UPD_STATE='installing'
+        elif [[ ${HYN_IN_AGENT:-0} == 1 ]]; then
+          # The resident loop never installs in its own cgroup. Its child would
+          # be killed the moment the loop restarts -- and the loop restarts
+          # *because of* the install, either from update_refresh_services or by
+          # exiting on the version change -- so a half-written /usr is the likely
+          # outcome. Without the maintenance unit it simply waits; hyn doctor
+          # already reports that unit missing as the fault it is.
+          UPD_STATE='available'
         else
           # Detached: a launch must not wait on a package install, and the
           # running process keeps using the code it already loaded either way.

@@ -60,6 +60,11 @@ boot() {
   ui_init
   collect_init
   panels_enabled
+  # default_view only decides the view nobody asked for explicitly: `hyn net`
+  # etc. below still wins over it. dash/simple are the only sane defaults --
+  # landing on a subcommand-only view (help, node) with no idea what a fresh
+  # operator wanted would look like a broken launch.
+  [[ ${CFG[default_view]} == simple ]] && VIEW=simple
   # Non-blocking: reads a cache, and only spawns a detached fetch when stale.
   update_startup
   return 0
@@ -194,6 +199,7 @@ handle_key() {
     q | Q) QUIT=1 ;;
     $'\003') QUIT=1 ;;
     1) VIEW=dash; fb_invalidate ;;
+    0) VIEW=simple; fb_invalidate ;;
     2) VIEW=net; fb_invalidate ;;
     3) VIEW=proc; fb_invalidate ;;
     4) VIEW=node; fb_invalidate ;;
@@ -229,10 +235,9 @@ handle_key() {
 render_help() {
   local w=$TERM_COLS h=$TERM_ROWS
   local -a P=()
-  header_line "$w"
-  fb_reset
-  fb_add "$HDR_OUT"
+  frame_open "$w"
   panel_open P "$w" 'KEYS' 'h to return'
+  panel_row P "$w" "$(kv '0' 'simple dashboard -- node, speed, temp, essentials only' 14)"
   panel_row P "$w" "$(kv '1 2 3 4' 'dashboard / network / processes / node' 14)"
   panel_row P "$w" "$(kv 't' "cycle theme (now: $THEME_NAME)" 14)"
   panel_row P "$w" "$(kv 'p' "visual profile (now: ${CFG[profile]}, graph ${CFG[graph]})" 14)"
@@ -269,9 +274,7 @@ render_help() {
   panel_close P3 "$w"
   fb_addmany "${P3[@]}"
 
-  while ((${#FB[@]} < h - 1)); do fb_add ''; done
-  footer_line "$w"
-  FB[h - 1]=$FTR_OUT
+  frame_close "$w" "$h"
   return 0
 }
 
@@ -318,6 +321,7 @@ run_tui() {
     fi
     sample_all
     case $VIEW in
+      simple) render_simple ;;
       net) render_net_full ;;
       proc) render_proc_full ;;
       node) render_node_full ;;
@@ -814,7 +818,7 @@ cmd_doctor() {
   # matters is the one made from outside it. That is the portal's watchdog now, not
   # a ping URL configured per machine.
   if notify_configured; then
-    _chk ok 'outage detection' 'the portal alerts the owner after three missed heartbeats'
+    _chk ok 'outage detection' "the portal alerts the owner after 3 minutes without a beat (${CFG[heartbeat_sec]}s cadence)"
   else
     _chk warn 'outage detection' 'nothing will report this host going offline until it is paired: sudo hyn link'
   fi
@@ -847,6 +851,36 @@ cmd_doctor() {
         _chk warn "$u" "$st -- expected to be running: sudo hyn doctor --fix"
       fi
     done
+    # The resident agent. Not a timer, so it is checked on two things a timer
+    # cannot fail at: whether it is running, and whether it is actually beating.
+    # A loop that is up and silent is the one failure the portal cannot tell
+    # apart from a machine that has been switched off.
+    if systemctl cat hyn-agent.service >/dev/null 2>&1; then
+      local ast hbi
+      # Read straight out of the config, so validate before it reaches bash
+      # arithmetic below. The resident loop clamps the same value for the same
+      # reason; doctor must not be the one place a typo produces an error.
+      hbi=${CFG[heartbeat_sec]:-24}
+      [[ $hbi =~ ^[1-9][0-9]{0,4}$ ]] || hbi=24
+      ast=$(systemctl is-active hyn-agent.service 2>/dev/null)
+      if [[ $ast == active ]]; then
+        _chk ok 'hyn-agent.service' "resident, beating every ${hbi}s"
+      else
+        _chk warn 'hyn-agent.service' "$ast -- no heartbeat is being sent: sudo hyn doctor --fix"
+      fi
+      if cloud_linked; then
+        cloud_heartbeat_age_v
+        if ((CLOUD_HEARTBEAT_AGE < 0)); then
+          _chk warn 'last heartbeat' 'never sent yet; the agent sends one within a minute of starting'
+        elif ((CLOUD_HEARTBEAT_AGE <= 3 * hbi)); then
+          _chk ok 'last heartbeat' "$(fmt_dur "$CLOUD_HEARTBEAT_AGE") ago"
+        else
+          _chk warn 'last heartbeat' "$(fmt_dur "$CLOUD_HEARTBEAT_AGE") ago -- the portal calls this machine quiet after 3 minutes"
+        fi
+      fi
+    else
+      _chk warn 'hyn-agent.service' 'not installed -- nothing is sending a heartbeat: sudo hyn doctor --fix'
+    fi
     # Not a timer and never enabled: it is started by name when the portal asks
     # for an update. Its absence is why an update request would be refused, so it
     # is worth naming here rather than leaving it to be discovered.
@@ -962,6 +996,9 @@ cmd_help() {
     '  link                  pair this server with the web portal (root)' \
     '  unlink                forget the portal credential (root)' \
     '  push                  send one reading to the portal now' \
+    '  heartbeat             send one liveness beat now' \
+    '  agent                 run the resident loop in the foreground (debugging;' \
+    '                        hyn-agent.service is what normally runs it)' \
     '  cloud status          portal URL, node id, and when the last push was' \
     '  config pull           fetch monitoring settings from the portal' \
     '' \
@@ -1023,6 +1060,16 @@ main() {
     unlink) cloud_unlink "$@" ;;
     push)
       if [[ ${1:-} == --scheduled ]]; then cloud_push 0 1; else cloud_push 0 0; fi ;;
+    agent)
+      # The resident loop, run by hyn-agent.service. Sourced here rather than at
+      # boot because it is the only caller and every other invocation would pay
+      # for it.
+      source "$HYN_LIB/agent.sh" || die 'cannot load the resident agent'
+      agent_run "$@" ;;
+    heartbeat | beat)
+      # One beat, for a human checking whether this box can reach the portal at
+      # all. The loop is what does this continuously.
+      cloud_heartbeat 0 ;;
     cloud)
       case ${1:-status} in
         status | '') cloud_status ;;
@@ -1044,6 +1091,12 @@ main() {
       # spawns a detached fetch when that cache is older than
       # update_check_hours, so this costs nothing on the runs in between.
       update_startup
+      # Same reasoning extends to the schedule itself: this is the one run
+      # guaranteed to happen everywhere, so it is where a timer that silently
+      # stopped gets noticed and re-armed instead of waiting for an operator to
+      # run `hyn doctor --fix` by hand. Root-only and a no-op when nothing has
+      # drifted, so it costs nothing on the runs where everything is fine.
+      is_root && { source "$HYN_LIB/setup.sh" 2>/dev/null && setup_self_heal; } || true
       ;;
     notify) cmd_notify "$@" ;;
     uninstall | remove)

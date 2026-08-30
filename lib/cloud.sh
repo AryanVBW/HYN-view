@@ -450,6 +450,86 @@ cloud_payload_v() {
 }
 
 # ---------------------------------------------------------------------------
+# heartbeat
+# ---------------------------------------------------------------------------
+# The cheapest thing the agent ever sends: proof that this machine is alive.
+#
+# It is deliberately NOT `hyn_fetch_config`. That call is what the one-minute
+# check-in uses, and it is expensive on the portal side -- it claims the
+# watchdog, base64-encodes two email templates and triggers queued-notification
+# dispatch. Running it every 24 seconds would multiply all of that by two and a
+# half for information the beat does not need. This RPC touches one column.
+#
+# Nothing here parses telemetry, and a failure is not an error condition worth
+# waking anyone over: the portal decides a machine is gone from the ABSENCE of
+# beats, so a beat that fails simply is not recorded. Recording the outcome
+# locally is still worth it -- `hyn doctor` and the resident loop both read it.
+CLOUD_HEARTBEAT_STATUS=''
+cloud_heartbeat_stamp() {
+  state_dir_v
+  printf '%s/cloud-last-heartbeat' "$STATE_DIR"
+}
+
+# Age in seconds of the last *successful* beat, or -1 when there has never been
+# one. Used by doctor and by the self-heal check that decides whether the
+# resident loop is actually beating rather than merely running.
+CLOUD_HEARTBEAT_AGE=-1
+cloud_heartbeat_age_v() {
+  local f ts=''
+  CLOUD_HEARTBEAT_AGE=-1
+  f=$(cloud_heartbeat_stamp)
+  [[ -r $f ]] || return 1
+  IFS=$'\t' read -r ts _ <"$f" 2>/dev/null
+  [[ $ts =~ ^[0-9]+$ ]] || return 1
+  CLOUD_HEARTBEAT_AGE=$((${EPOCHSECONDS:-0} - ts))
+  ((CLOUD_HEARTBEAT_AGE < 0)) && CLOUD_HEARTBEAT_AGE=0
+  return 0
+}
+
+cloud_heartbeat() {
+  local quiet=${1:-0} token body f
+  CLOUD_HEARTBEAT_STATUS=''
+  # Silent for the loop, explanatory for a person: `hyn heartbeat` exiting 1 with
+  # no output is the worst possible answer to "why is the portal not seeing this
+  # machine".
+  cloud_configured || {
+    CLOUD_LAST_ERR='not configured for the portal'
+    ((quiet)) || warn 'not configured for the portal; run: sudo hyn link'
+    return 1
+  }
+  cloud_linked || {
+    CLOUD_LAST_ERR='this node is not linked yet'
+    ((quiet)) || warn 'this machine is not paired, so there is nothing to beat to; run: sudo hyn link'
+    return 1
+  }
+  token=$(secret cloud_node_token)
+  body="{\"p_node_token\": \"$(_jstr "$token")\", \"p_agent_version\": \"$(_jstr "$HYN_VERSION")\"}"
+  f=$(cloud_heartbeat_stamp)
+  if _cloud_rpc hyn_heartbeat "$body"; then
+    json_field_v "$CLOUD_LAST_BODY" node_status && CLOUD_HEARTBEAT_STATUS=$JSON_FIELD
+    printf '%s\tok\t%s\n' "${EPOCHSECONDS:-0}" "${CLOUD_HEARTBEAT_STATUS:-active}" >"$f" 2>/dev/null
+    ((quiet)) || printf 'hyn: heartbeat accepted by %s%s\n' "$(cloud_url)" \
+      "$([[ -n $CLOUD_HEARTBEAT_STATUS && $CLOUD_HEARTBEAT_STATUS != active ]] && printf ' (node %s)' "$CLOUD_HEARTBEAT_STATUS")"
+    return 0
+  fi
+  # A portal that has not been taught this RPC yet (an older deployment, or a
+  # self-hoster who has not applied the migration) must not leave the machine
+  # with no heartbeat at all. Fall back to the config pull, which has always
+  # recorded one, and say so once rather than every 24 seconds.
+  case $CLOUD_LAST_ERR in
+    *'404'* | *'unknown agent action'* | *'does not exist'* | *'not find'*)
+      if cloud_config_pull 1; then
+        printf '%s\tok\tfallback\n' "${EPOCHSECONDS:-0}" >"$f" 2>/dev/null
+        ((quiet)) || printf 'hyn: heartbeat recorded through the settings pull (portal has no hyn_heartbeat yet)\n'
+        return 0
+      fi ;;
+  esac
+  printf '%s\tfail\t%s\n' "${EPOCHSECONDS:-0}" "${CLOUD_LAST_ERR:0:200}" >"$f" 2>/dev/null
+  ((quiet)) || warn "heartbeat failed: $CLOUD_LAST_ERR"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # push
 # ---------------------------------------------------------------------------
 _cloud_push_stamp() {
@@ -542,7 +622,12 @@ CLOUD_IN_MAINTENANCE=0
 cloud_command_report() {
   local status=$1 stage=$2 message=$3 target=${4:-} result=${5:-}
   local token body
-  [[ -n $CLOUD_COMMAND_ID ]] || return 1
+  # No command id means this run was not requested by the portal -- it is the
+  # agent installing its own update through the same maintenance unit. There is
+  # no row to report against, and that is a normal outcome, not a failure: the
+  # caller that warns when reporting fails would otherwise print a warning on
+  # every unattended update on every unpaired machine.
+  [[ -n $CLOUD_COMMAND_ID ]] || return 0
   # Match the database contract even when curl/npm returns a very long error.
   # A progress report must never fail merely because its diagnostic text was
   # larger than the bounded command row can accept.
@@ -645,10 +730,19 @@ cloud_run_pending() {
     update | sync) ;;
     *) warn "unknown pending maintenance action: ${action:-none}"; return 1 ;;
   esac
-  cloud_configured && cloud_linked || {
+  # Linkage is required to *report* on a portal command, not to install a
+  # package. A command with no id was queued by this machine for itself -- the
+  # auto-update path -- and refusing it because the box is unpaired is how the
+  # boxes least likely to have anyone logged in end up never receiving a fix.
+  #
+  # This is also why that path exists at all: a detached `npm install` started
+  # from a Type=oneshot unit is killed when the unit's main process exits, so an
+  # unattended update MUST run in this unit, which has its own cgroup, its own
+  # 15-minute timeout and node-sized memory.
+  if [[ -n $id ]] && ! { cloud_configured && cloud_linked; }; then
     warn 'this machine is not linked to the portal; nothing to run'
     return 1
-  }
+  fi
   CLOUD_COMMAND_ID=$id
   CLOUD_COMMAND_TARGET=''
   CLOUD_COMMAND_CLAIMED=1
@@ -753,6 +847,12 @@ cloud_command_execute() {
   if update_apply 1; then
     UPD_PROGRESS_HOOK=''
     CLOUD_COMMAND_UPDATED=1
+    # An unpaired machine has nowhere to send a verification reading, and the
+    # update is complete without one. Only a linked node continues.
+    if ! cloud_linked; then
+      ((quiet)) || printf 'hyn: updated to %s (not linked, so no reading was sent)\n' "$HYN_VERSION"
+      return 0
+    fi
     # Do not declare the portal operation complete until a full snapshot using
     # the newly installed version has been accepted. Otherwise the modal and
     # completion email can say "updated" while every chart and the fleet
@@ -1219,6 +1319,22 @@ cloud_status() {
     esac
   else
     printf 'last push never\n'
+  fi
+  # The beat is what the portal reads as proof of life, so it is worth its own
+  # line: a machine can be pushing telemetry on schedule and still look quiet if
+  # the resident agent stopped.
+  local hstamp hts hst herr
+  hstamp=$(cloud_heartbeat_stamp)
+  if [[ -r $hstamp ]]; then
+    IFS=$'\t' read -r hts hst herr <"$hstamp"
+    if [[ $hst == ok ]]; then
+      printf 'heartbeat %s ago, every %ss%s\n' "$(fmt_dur $((${EPOCHSECONDS:-0} - hts)))" \
+        "${CFG[heartbeat_sec]}" "$([[ -n $herr && $herr != active ]] && printf ' (node %s)' "$herr")"
+    else
+      printf 'heartbeat failed %s ago: %s\n' "$(fmt_dur $((${EPOCHSECONDS:-0} - hts)))" "$herr"
+    fi
+  else
+    printf 'heartbeat never\n'
   fi
   local cc
   cc=$(cloud_config_cache)

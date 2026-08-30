@@ -10,7 +10,7 @@
 # HYN_PROC / HYN_SYS exist so test/selfcheck.sh can point the readers at a
 # fixture tree and assert on known numbers. Never hardcode /proc below.
 
-HYN_VERSION="1.8.0"
+HYN_VERSION="1.9.0"
 HYN_AUTHOR='NEXUSV'
 HYN_AUTHOR_URL='https://www.hyn-view.in'
 HYN_COPYRIGHT='(c) 2026 NEXUSV TECHNOLOGIES PRIVATE LIMITED'
@@ -59,6 +59,11 @@ declare -A CFG=(
   # interval and row counts together; anything you set explicitly still wins.
   [profile]=best
   [theme]=hiway
+  # Which view opens with no subcommand and no explicit VIEW override: 'dash'
+  # (the full multi-panel view) or 'simple' (node status, speed, temp -- the
+  # premium glance view). `hyn net`/`hyn proc`/`hyn node` still win over this,
+  # same as they win over the dash default today.
+  [default_view]=dash
   [interval]=1.0
   [net_unit]=bits
   [graph]=braille
@@ -190,6 +195,12 @@ declare -A CFG=(
   [cloud_node_id]=''
   [cloud_push_min]=10
   [cloud_timeout]=20
+  # Seconds between liveness beats from the resident agent (hyn-agent.service).
+  # This is not the reading interval: a beat is one small POST that proves the
+  # machine is alive, and cloud_push_min still governs telemetry. 24s means the
+  # portal's three-minute quiet threshold is seven missed beats rather than
+  # three, so one dropped packet on a domestic link never reads as an outage.
+  [heartbeat_sec]=24
 
   # --- self update -----------------------------------------------------------
   # off     never look

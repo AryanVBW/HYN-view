@@ -124,6 +124,58 @@ TimeoutStartSec=900
 EOF
 }
 
+# The resident agent: the one unit that is not a one-shot.
+#
+# `Restart=always` is the whole point. Everything else in this file is scheduled
+# by a timer and cannot be "not running" for longer than its own interval, but a
+# heartbeat that stops is indistinguishable to the portal from a machine that
+# stopped -- so the supervisor has to be systemd, not a timer and not us.
+#
+# It keeps the same politeness limits as the collectors, because it runs beside a
+# relayer for months: the beat is one curl, so 128 MiB is generous for a bash
+# loop that parses nothing.
+_agent_service() {
+  local exec=$1
+  cat <<EOF
+[Unit]
+Description=hyn-view resident agent (heartbeat, self-update, self-repair)
+Documentation=https://github.com/AryanVBW/HYN-view
+After=network-online.target
+Wants=network-online.target
+# Nothing here can fix a machine that has no clock, and a beat stamped with 1970
+# reads as three days of silence on the dashboard.
+After=time-sync.target
+# systemd gives up on a restart loop by default (5 starts in 10s). A beat every
+# 24s must never be permanently abandoned because of a bad ten seconds, so the
+# rate limit is lifted rather than the restart made conditional. This key belongs
+# to [Unit], not [Service], however much it reads like a service property.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=$exec agent
+Environment=HOME=/root
+# Always. A crash, an OOM kill, a wedge cleared by self-heal, or a deliberate
+# exit after installing a new version all end the same way: the loop comes back.
+Restart=always
+RestartSec=5s
+# A stop must not wait out a sleep. The loop traps TERM and exits immediately;
+# this is the backstop if it ever cannot.
+TimeoutStopSec=30
+KillSignal=SIGTERM
+Nice=15
+IOSchedulingClass=idle
+CPUSchedulingPolicy=batch
+CPUWeight=20
+IOWeight=20
+MemoryMax=128M
+OOMScoreAdjust=500
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
 _generic_timer() {
   local desc=$1 spec=$2 unit=$3 jitter=${4:-60} accuracy=${5:-30s} extra=${6:-}
   cat <<EOF
@@ -157,6 +209,10 @@ setup_config_template() {
 # graph=/interval= line always wins. Toggle live with the p key.
 profile=${CFG[profile]}
 theme=${CFG[theme]}
+# dash (default, the full multi-panel dashboard) or simple (the premium
+# glance view: node status, speed now + today's high, cpu temp, essentials).
+# hyn net/proc/node still override this on launch.
+default_view=${CFG[default_view]}
 # refresh interval in seconds. 1.0 is comfortable; 2.0 or 3.0 is lighter still
 # on a box where you care about every last cycle.
 interval=${CFG[interval]}
@@ -309,6 +365,10 @@ cloud_portal_url=${CFG[cloud_portal_url]}
 # Minutes between full portal readings. The heartbeat and settings check stay at
 # one minute regardless. Also settable from the portal, which wins.
 cloud_push_min=${CFG[cloud_push_min]}
+# Seconds between liveness beats from the resident agent (hyn-agent.service).
+# One small POST that proves this machine is alive; telemetry still follows
+# cloud_push_min. Clamped to 5..3600. The portal cannot set this key.
+heartbeat_sec=${CFG[heartbeat_sec]}
 cloud_timeout=${CFG[cloud_timeout]}
 # Self-hosters only: a direct Supabase URL plus its PUBLIC anon key, used instead
 # of the hosted API above. Leave both empty for the normal hosted setup.
@@ -519,6 +579,10 @@ setup_timers() {
     "$(_generic_timer 'hyn-view web portal push' \
       "OnBootSec=20s"$'\n'"OnUnitActiveSec=1min" 'hyn-push.service' 0 1s)"
 
+  # The resident agent. Not a timer, and the only unit here that stays running:
+  # see _agent_service.
+  _write_unit "$HYN_UNIT_DIR/hyn-agent.service" "$(_agent_service "$exe")"
+
   # Started on demand by the check-in, never enabled. See _maintenance_service.
   _write_unit "$HYN_UNIT_DIR/hyn-update.service" \
     "$(_maintenance_service "$exe cloud run-command")"
@@ -537,7 +601,7 @@ setup_timers() {
   # information the operator needs, not litter for hyn to tidy.
   local u
   for u in "$SVC_NAME.service" hyn-record.service hyn-alerts.service \
-           hyn-report.service hyn-push.service hyn-update.service; do
+           hyn-report.service hyn-push.service hyn-agent.service hyn-update.service; do
     systemctl reset-failed "$u" >/dev/null 2>&1 || true
   done
   setup_apply_schedule "$exe"
@@ -581,6 +645,18 @@ setup_apply_schedule() {
   _toggle_timer hyn-report.timer "$(cfg_on report_enabled && printf 1 || printf 0)" || rc=1
   # The portal push: only once there is a credential to push with.
   _toggle_timer hyn-push.timer "$(cfg_on cloud_enabled && cloud_linked && printf 1 || printf 0)" || rc=1
+  # The resident agent: always, paired or not.
+  #
+  # It is tempting to gate this on being linked, since the heartbeat is the
+  # visible half of its job. That would be wrong: the loop is also the only thing
+  # on an unpaired machine that looks for a release or re-arms a drifted timer --
+  # hyn-push.timer is off without a token, so gating the agent the same way would
+  # leave exactly the boxes nobody logs into with no route in for a fix. It beats
+  # when a token appears and costs a sleeping bash process when there is not one.
+  #
+  # `enable --now` on an already-running service is a no-op, so a repeated
+  # `hyn setup` does not interrupt the beat.
+  _toggle_timer hyn-agent.service 1 || rc=1
   return "$rc"
 }
 
@@ -599,7 +675,90 @@ setup_timer_reason() {
   return 1
 }
 
+# Runs from `hyn record`, which is the one timer enabled unconditionally on
+# every installed machine (see its caller for why that makes it the right home
+# for a check that must run even on a box nobody has ever logged into).
+#
+# A timer that should be running and is not usually means a bad `npm install`
+# left units half-written, a reboot raced systemd before the timer was armed, or
+# an interrupted update left daemon-reload unrun -- none of which the operator
+# caused or can be expected to notice. `hyn doctor --fix` already repairs this;
+# the only thing missing was something that runs it without being asked. This
+# is the minimal version of that: re-enable just the one unit that drifted,
+# never a full `setup_run`, so a machine mid-onboarding is not reconfigured by a
+# background timer.
+#
+# ponytail: only the five hyn-* timers and hyn-agent.service are touched, matching
+# the systemctl verbs `test/selfcheck.sh` already enforces are aimed at nothing
+# else. If re-enabling fails twice in a row this stays silent rather than
+# escalating -- `hyn doctor` still reports it as a warning either way, so nothing
+# is hidden, only handled.
+setup_self_heal() {
+  have systemctl || return 0
+  is_root || return 0
+  local u want st
+  for u in hyn-record.timer hyn-alerts.timer hyn-report.timer hyn-push.timer hyn-speedtest.timer; do
+    systemctl cat "$u" >/dev/null 2>&1 || continue
+    case $u in
+      hyn-alerts.timer) want=$(cfg_on alert_enabled && printf 1 || printf 0) ;;
+      hyn-report.timer) want=$(cfg_on report_enabled && printf 1 || printf 0) ;;
+      hyn-push.timer) want=$(cfg_on cloud_enabled && cloud_linked && printf 1 || printf 0) ;;
+      *) want=1 ;;
+    esac
+    [[ $want == 1 ]] || continue
+    st=$(systemctl is-active "$u" 2>/dev/null)
+    [[ $st == active ]] && continue
+    systemctl reset-failed "$u" >/dev/null 2>&1 || true
+    systemctl enable --now "$u" >/dev/null 2>&1 || true
+  done
+  setup_heal_agent
+  return 0
+}
+
+# The resident agent needs a different check from a timer, and it is the reason
+# this function exists at all.
+#
+# `Restart=always` already covers the agent dying, so a dead loop is systemd's
+# problem and it solves it in five seconds. What systemd cannot see is a loop
+# that is *running and not beating*: a curl wedged on a half-open socket, a
+# filesystem that stopped accepting the stamp, a bug of ours. To the dashboard
+# that is identical to a machine that has been switched off, which is the single
+# worst thing this tool can get wrong. So progress is measured, not assumed, and
+# a loop that has stopped making it is restarted.
+#
+# Deliberately never called from inside the loop itself: agent_maintain sets
+# HYN_IN_AGENT so the agent cannot kill the process it is running in.
+setup_heal_agent() {
+  have systemctl || return 0
+  is_root || return 0
+  [[ ${HYN_IN_AGENT:-0} == 1 ]] && return 0
+  systemctl cat hyn-agent.service >/dev/null 2>&1 || return 0
+  local st
+  st=$(systemctl is-active hyn-agent.service 2>/dev/null)
+  if [[ $st != active ]]; then
+    systemctl reset-failed hyn-agent.service >/dev/null 2>&1 || true
+    systemctl enable --now hyn-agent.service >/dev/null 2>&1 || true
+    return 0
+  fi
+  # Running. Is it beating? agent_stamp_stale lives in the agent library, which
+  # nothing else sources, so load it on demand -- and if it cannot be loaded,
+  # leave the running service alone rather than guessing.
+  declare -F agent_stamp_stale >/dev/null 2>&1 || {
+    [[ -r $HYN_LIB/agent.sh ]] || return 0
+    # shellcheck source=/dev/null
+    source "$HYN_LIB/agent.sh" 2>/dev/null || return 0
+  }
+  if agent_stamp_stale; then
+    warn 'hyn-agent.service is running but has not beaten recently; restarting it'
+    systemctl restart hyn-agent.service >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
 _toggle_timer() {
+  # Named for its only caller until the resident agent arrived; the body is
+  # unit-generic, so it takes hyn-agent.service too rather than growing a
+  # near-identical twin.
   local unit=$1 want=${2:-0}
   if [[ $want == 1 ]]; then
     if systemctl enable --now "$unit" >/dev/null 2>&1; then
@@ -632,7 +791,8 @@ setup_uninstall() {
   printf 'hyn: removing system integration\n'
   if have systemctl; then
     local u
-    for u in "$SVC_NAME.timer" hyn-alerts.timer hyn-record.timer hyn-report.timer hyn-push.timer; do
+    for u in "$SVC_NAME.timer" hyn-alerts.timer hyn-record.timer hyn-report.timer hyn-push.timer \
+             hyn-agent.service; do
       systemctl disable --now "$u" >/dev/null 2>&1 && printf '  %-24s disabled\n' "$u"
     done
     rm -f "$SVC_PATH" "$TMR_PATH" \
@@ -640,6 +800,7 @@ setup_uninstall() {
       "$HYN_UNIT_DIR/hyn-record.service" "$HYN_UNIT_DIR/hyn-record.timer" \
       "$HYN_UNIT_DIR/hyn-report.service" "$HYN_UNIT_DIR/hyn-report.timer" \
       "$HYN_UNIT_DIR/hyn-push.service" "$HYN_UNIT_DIR/hyn-push.timer" \
+      "$HYN_UNIT_DIR/hyn-agent.service" \
       "$HYN_UNIT_DIR/hyn-update.service"
     systemctl daemon-reload
     printf '  units removed\n'
