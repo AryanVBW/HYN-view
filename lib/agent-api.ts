@@ -5,6 +5,10 @@ const AGENT_RPCS = new Set([
   "hyn_device_poll",
   "hyn_ingest",
   "hyn_fetch_config",
+  // The resident agent's liveness beat. Separate from hyn_fetch_config on
+  // purpose: it writes one column and has no after() work, which is what makes
+  // it affordable every 24 seconds on every node.
+  "hyn_heartbeat",
   "hyn_report_notification",
   "hyn_claim_node_command",
   "hyn_report_node_command",

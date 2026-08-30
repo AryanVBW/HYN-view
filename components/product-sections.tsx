@@ -11,6 +11,55 @@ const benchmarkRows = [
   ["cdn.example.dev", "404", "200", "12ms", "path"],
 ];
 
+export const INSTALL_COMMAND = "curl -fsSL https://www.hyn-view.in/install.sh | sudo bash";
+
+// The command is a selectable <code> first and a copy button second. Clipboard
+// access needs a secure context and a user gesture, and it is refused outright in
+// some embedded browsers -- so the button is an accelerator for something that
+// already works by hand, never the only way to get the text.
+function InstallCommand() {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(INSTALL_COMMAND);
+      setState("copied");
+    } catch {
+      setState("failed");
+    }
+    window.setTimeout(() => setState("idle"), 2400);
+  }
+
+  return (
+    <div className="terminal-panel p-5">
+      <div className="flex items-start justify-between gap-4">
+        <p className="font-mono text-xs uppercase text-foreground/50">install on the server</p>
+        <button
+          type="button"
+          onClick={copy}
+          aria-label={`Copy the install command: ${INSTALL_COMMAND}`}
+          className="border border-border px-3 py-1 font-mono text-xs uppercase text-foreground/60 transition-colors hover:border-primary hover:text-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+        >
+          {state === "copied" ? "copied" : state === "failed" ? "select it" : "copy"}
+        </button>
+      </div>
+      <code className="mt-4 block overflow-x-auto whitespace-pre font-mono text-sm text-foreground/90">
+        <span className="select-none text-foreground/40">$ </span>
+        {INSTALL_COMMAND}
+      </code>
+      {/* Announced rather than only coloured, so the outcome reaches a screen
+          reader; polite because it must not interrupt anything being read. */}
+      <p aria-live="polite" className="mt-3 h-4 font-mono text-xs text-primary">
+        {state === "copied"
+          ? "copied to clipboard"
+          : state === "failed"
+            ? "this browser blocked the clipboard — select the line above"
+            : ""}
+      </p>
+    </div>
+  );
+}
+
 export function ProductSections() {
   const [profile, setProfile] = useState<"best" | "performance">("best");
   const [rule, setRule] = useState("if status >= 500");
@@ -24,7 +73,7 @@ export function ProductSections() {
         </div>
         <div className="space-y-6 font-mono text-sm leading-7 text-foreground/60">
           <p>HYN-view is a network-first monitor for Ubuntu servers that run 24/7. It covers what htop and btop cover, but inverts the priority: throughput, packet errors, retransmits and latency come first, because on a server the network is usually the story.</p>
-          <p className="text-foreground/80">Pure bash on the box — no runtime, no daemon, no agent process. The web dashboard is optional: pair a server and it pushes a reading every five minutes, so you can check it from anywhere in the world.</p>
+          <p className="text-foreground/80">Pure bash on the box — no Node runtime, no compiled binary. One small resident bash process sends a heartbeat every 24 seconds and keeps itself updated; everything else runs from systemd timers. Pair a server and the dashboard shows it from anywhere in the world.</p>
         </div>
       </section>
 
@@ -96,19 +145,27 @@ export function ProductSections() {
       </section>
 
       <section id="install" className="container section-pad border-t border-border">
-        <div className="grid gap-10 lg:grid-cols-[1fr_1.2fr] lg:items-end">
+        <div className="grid gap-10 lg:grid-cols-[1fr_1.2fr] lg:items-start">
           <div>
             <p className="section-kicker">// install</p>
-            <h2 className="section-title">Start with one command.</h2>
-            <p className="mt-6 font-mono text-sm leading-7 text-foreground/60">Ubuntu 22.04 or 24.04. Pure bash, no runtime — npm is only the delivery channel. Nothing is installed but shell scripts.</p>
+            <h2 className="section-title">One command. Nothing to answer.</h2>
+            <p className="mt-6 font-mono text-sm leading-7 text-foreground/60">Ubuntu 22.04 or 24.04. Paste it, enter your sudo password, and walk away: it installs node if the box has none, installs the CLI, writes the config, and starts the resident agent that beats every 24 seconds and updates itself.</p>
+            <p className="mt-4 font-mono text-xs leading-6 text-foreground/40">Pure bash on the box — no runtime, no compiled binary. npm is only the delivery channel. Read the script before you run it: <a className="hover:text-primary" href="/install.sh">hyn-view.in/install.sh</a>.</p>
           </div>
-          <div className="terminal-panel p-5 font-mono text-sm">
-            <div className="text-foreground/50">$ <span className="text-foreground/80">npm install -g hyn-view</span></div>
-            <div className="mt-2 text-foreground/50">$ <span className="text-foreground/80">sudo hyn setup</span></div>
-            <div className="mt-2 text-foreground/50">$ <span className="text-foreground/80">hyn</span></div>
-            <div className="mt-4 text-primary">dashboard ready</div>
-            <div className="mt-4 text-foreground/50">optional, to watch it from anywhere:</div>
-            <div className="mt-2 text-foreground/50">$ <span className="text-foreground/80">sudo hyn link</span></div>
+          <div className="space-y-4">
+            <InstallCommand />
+            <div className="terminal-panel p-5 font-mono text-xs leading-6 text-foreground/50">
+              <p className="text-foreground/70">what it does</p>
+              <ul className="mt-3 space-y-1">
+                <li>1 · curl, CA certificates and node ≥ 18 if missing</li>
+                <li>2 · npm install -g hyn-view</li>
+                <li>3 · /etc/hyn-view/config, state dir, five systemd timers</li>
+                <li>4 · hyn-agent.service — 24s heartbeat, self-update, self-repair</li>
+                <li>5 · verifies the agent is running, and repairs it if not</li>
+              </ul>
+              <p className="mt-4 text-foreground/50">then, to watch it from anywhere:</p>
+              <p className="mt-1 text-foreground/80">$ sudo hyn link</p>
+            </div>
           </div>
         </div>
       </section>
