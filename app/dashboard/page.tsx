@@ -11,6 +11,12 @@ import { SpeedChart } from "@/components/dashboard/speed-chart";
 import { HealthPanel } from "@/components/dashboard/uptime-panel";
 import { ServerDetailsPanel } from "@/components/dashboard/server-details";
 import { EventLog } from "@/components/dashboard/event-log";
+import {
+  FilesystemsPanel,
+  NetworkDetailPanel,
+  PressurePanel,
+  ProcessesPanel,
+} from "@/components/dashboard/telemetry-detail";
 import { AgentUpdateControl } from "@/components/dashboard/agent-update-control";
 import { HeartbeatIndicator } from "@/components/dashboard/heartbeat-indicator";
 import { DemoDataButton } from "@/components/dashboard/demo-data-button";
@@ -228,8 +234,8 @@ export default async function DashboardPage({
               : `This machine missed three configured telemetry intervals (${configuredInterval} minutes each). `}
             HYN-view retries every minute; the charts show the last received values. A queued
             synchronization or update will run as soon as the machine checks in. On the server,
-            run <code>sudo hyn doctor</code> and{" "}
-            <code>systemctl status hyn-push.timer</code>.
+            run <code>sudo hyn doctor --fix</code>, which reinstalls the timers and sends a
+            reading immediately.
           </p>
         ) : null}
 
@@ -268,14 +274,30 @@ export default async function DashboardPage({
             <ThroughputCard latest={latest} />
           </div>
           <SpeedChart data={toSpeedSeries(speedtests)} />
+          {/* The counters that say whether the link itself is healthy, not just
+              how much went through it. Errors, drops, retransmits, socket states
+              and first-hop latency are the difference between "my connection is
+              bad" and "my provider's is". */}
+          <NetworkDetailPanel latest={latest} />
+        </section>
+
+        <section className="space-y-6">
+          <p className="section-kicker border-b border-border pb-3">// storage</p>
+          <FilesystemsPanel latest={latest} />
         </section>
 
         <section className="space-y-6">
           <p className="section-kicker border-b border-border pb-3">
             // pressure &amp; alerts
           </p>
+          <PressurePanel latest={latest} />
           <HealthPanel latest={latest} />
           <EventLog events={alerts} />
+        </section>
+
+        <section className="space-y-6">
+          <p className="section-kicker border-b border-border pb-3">// processes</p>
+          <ProcessesPanel latest={latest} />
         </section>
 
         <section className="space-y-6">

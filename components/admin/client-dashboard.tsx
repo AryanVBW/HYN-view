@@ -1,8 +1,15 @@
 import Link from "next/link";
 import { ArrowLeft, Bell, Server } from "lucide-react";
 import { CpuUsageChart } from "@/components/dashboard/cpu-usage-chart";
+import { HighwayPanel } from "@/components/dashboard/highway-panel";
 import { NetworkChart } from "@/components/dashboard/network-chart";
 import { StatCards } from "@/components/dashboard/stat-cards";
+import {
+  FilesystemsPanel,
+  NetworkDetailPanel,
+  PressurePanel,
+  ProcessesPanel,
+} from "@/components/dashboard/telemetry-detail";
 import { AdminClientActions } from "@/components/admin/client-actions";
 import { formatRelative, toCpuSeries, toNetSeries } from "@/lib/dashboard-data";
 import type { AdminClient, AdminNode, Metric } from "@/lib/types";
@@ -94,6 +101,15 @@ export function AdminClientDashboard({
                 <CpuUsageChart data={toCpuSeries(metrics)} />
                 <NetworkChart data={toNetSeries(metrics)} />
               </div>
+              {/* Same detail the client sees on their own dashboard. An
+                  administrator diagnosing a machine for someone who cannot reach
+                  it needs the filesystems, the link counters and the process
+                  list, not a summary that sends them back to asking for ssh. */}
+              <HighwayPanel latest={metrics[metrics.length - 1]} />
+              <NetworkDetailPanel latest={metrics[metrics.length - 1]} />
+              <FilesystemsPanel latest={metrics[metrics.length - 1]} />
+              <PressurePanel latest={metrics[metrics.length - 1]} />
+              <ProcessesPanel latest={metrics[metrics.length - 1]} />
             </>
           ) : (
             <div className="terminal-panel p-8 font-mono text-xs leading-6 text-muted-foreground">

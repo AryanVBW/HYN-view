@@ -96,7 +96,7 @@ async function sendHeartbeatTransition(check: HeartbeatCheck) {
   const detail = offline
     ? `No heartbeat has reached the portal for ${check.ageSeconds === null ? "an unknown interval" : `${check.ageSeconds} seconds`}. Charts still show the last received values.`
     : `The machine resumed its one-minute heartbeat at ${check.heartbeatAt ?? "the current check"}.`;
-  const content = `<p style="margin:0 0 16px;color:#dcecf2">${escapeHtml(detail)}</p><pre style="white-space:pre-wrap;border:1px solid #17333d;background:#05090c;padding:14px;color:#dcecf2">sudo hyn doctor\nsystemctl status hyn-push.timer</pre>`;
+  const content = `<p style="margin:0 0 16px;color:#dcecf2">${escapeHtml(detail)}</p><pre style="white-space:pre-wrap;border:1px solid #17333d;background:#05090c;padding:14px;color:#dcecf2">sudo hyn doctor --fix</pre>`;
   const html = renderManagedHynEmail({
     template: template?.html_template ?? "{{content}}",
     values: {
