@@ -1,24 +1,29 @@
 #!/usr/bin/env bash
 # hyn-view :: notification delivery
 #
-# One job: take a subject, a body and a severity, and get it to the operator.
-# Everything is a curl call, so there is no new dependency.
+# One job, and exactly one destination: take a subject, a body and a severity, and
+# queue it with the web portal.
 #
-# Channels: web | resend | brevo | smtp | telegram | ntfy | webhook | stdout
+# There is no provider configuration on this machine. No API key, no SMTP host, no
+# sender address, no recipient list, no ping URL. Those all used to be here -- six
+# channels' worth -- and every one of them was in the wrong place: an API key on a
+# relay node is a credential to rotate on N boxes, a recipient is a thing that
+# changes when someone leaves, and neither can be inspected or corrected by the
+# person actually looking at the dashboard. The portal owns the provider account,
+# the recipients, the schedules, the templates and the delivery log.
 #
-# SECRETS. API keys live in $HYN_ETC/secrets at mode 0600, never in
-# $HYN_ETC/config which is world-readable 0644. Two further rules are enforced
-# below and matter on any box with more than one login:
+# What is left on the box is the node token, in $HYN_ETC/secrets at mode 0600,
+# never in the world-readable config. Two rules still apply to it and matter on
+# any host with more than one login:
 #
-#   * secrets are never passed in argv. `curl -H "Authorization: Bearer sk_..."`
-#     puts the key in /proc/<pid>/cmdline, where every user on the machine can
-#     read it out of `ps`. They go through `curl --config -` on stdin instead.
-#   * the body goes to a 0600 temp file and is passed as -d @file, so message
-#     contents are not in argv either.
+#   * it is never passed in argv. A token in `curl -H "Authorization: ..."` lands
+#     in /proc/<pid>/cmdline where every local user can read it out of `ps`. It
+#     goes in a request body written to a 0600 temp file instead (see cloud.sh).
+#   * message bodies go the same way, so their contents are not in argv either.
 #
-# Anything interpolated into JSON goes through json_escape_v first. Journal
-# lines and unit names are attacker-influenced text, and an unescaped quote in
-# one of them would corrupt the request at best.
+# Anything interpolated into JSON goes through json_escape_v first. Journal lines
+# and unit names are attacker-influenced text, and an unescaped quote in one of
+# them would corrupt the request at best.
 
 NOTIFY_LAST_ERR=''
 # The HTTP status and response body of the last API call, kept so a failure can
@@ -75,38 +80,6 @@ redact() {
   printf '%s' "$s"
 }
 
-# ---------------------------------------------------------------------------
-# validation at the trust boundary
-# ---------------------------------------------------------------------------
-# Addresses arrive from a config file and from the setup wizard, and end up in
-# SMTP headers and JSON. A newline in an address is header injection.
-valid_email() {
-  local e=$1
-  [[ $e == *$'\n'* || $e == *$'\r'* ]] && return 1
-  [[ $e =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$ ]]
-}
-
-# Comma-separated recipient list -> validated, in VALID_TO. Invalid entries are
-# dropped with a warning rather than silently mangling the request.
-declare -a VALID_TO=()
-valid_email_list() {
-  local raw=$1 e
-  VALID_TO=()
-  local oIFS=$IFS
-  IFS=,
-  for e in $raw; do
-    e=${e//[[:space:]]/}
-    [[ -z $e ]] && continue
-    if valid_email "$e"; then VALID_TO+=("$e")
-    else IFS=$oIFS; warn "ignoring invalid recipient: $e"; IFS=,; fi
-  done
-  IFS=$oIFS
-  ((${#VALID_TO[@]} > 0))
-}
-
-# curl's config-file format needs backslashes and quotes escaped inside values,
-# and a key with a newline in it would inject an option. Keys are opaque tokens;
-# anything outside this charset is not one.
 valid_token() { [[ $1 =~ ^[A-Za-z0-9._~+/=:-]+$ ]]; }
 
 JSON_OUT=''
@@ -169,28 +142,26 @@ budget_consume() {
 }
 
 # ---------------------------------------------------------------------------
-# channels
+# the one channel
 # ---------------------------------------------------------------------------
+# Delivery is the portal's job, not this agent's.
+#
+# There used to be six local providers here -- Resend, Brevo, SMTP, Telegram, ntfy
+# and a generic webhook -- each with its own credential in /etc/hyn-view/secrets,
+# its own recipient and sender keys in the config, its own failure modes and its
+# own wizard page. That put a provider account, an API key and a mailing decision
+# on every monitored box, which is the wrong place for all three: the key is a
+# credential to rotate on N servers, the recipient is a thing that changes when
+# someone leaves, and none of it can be seen or fixed by the person watching the
+# dashboard.
+#
+# So the agent now hands an event to the portal and stops caring. The portal owns
+# the provider account, the recipients, the schedule, the templates and the
+# delivery log, and it is the only place any of that is configured. What the CLI
+# holds is the node token, which is what it needs to be allowed to speak at all.
 # Each returns 0 on success and sets NOTIFY_LAST_ERR on failure. Arguments are
 # always: <subject> <text-body> <html-body> <severity>
 
-# Split curl's combined output into body + status. Globals, so no subshell.
-_http_split() {
-  local out=$1 code
-  # -w appends the status on its own final line, so the last line is the code and
-  # everything before it is the body.
-  code=${out##*$'\n'}
-  if [[ $code =~ ^[0-9]{3}$ ]]; then
-    NOTIFY_LAST_CODE=$code
-    NOTIFY_LAST_BODY=${out%$'\n'*}
-  else
-    # No status line at all: curl failed before it got a response (DNS, TLS,
-    # timeout), so the whole thing is an error message.
-    NOTIFY_LAST_CODE=0
-    NOTIFY_LAST_BODY=$out
-  fi
-  return 0
-}
 
 # Pull the human sentence out of a JSON error body without jq. Deliberately
 # crude -- we want the message, not a parse tree.
@@ -219,281 +190,6 @@ _api_message_v() {
   return 0
 }
 
-_curl_json() {
-  # _curl_json <url> <auth-config-line> <json-body> [extra-header...]
-  local url=$1 authline=$2 body=$3
-  shift 3
-  local tmp rc out
-  tmp=$(mktemp "${TMPDIR:-/tmp}/hyn-notify.XXXXXX") || { NOTIFY_LAST_ERR='mktemp failed'; return 1; }
-  chmod 600 "$tmp" 2>/dev/null
-  printf '%s' "$body" >"$tmp"
-  # Deliberately NOT -f/--fail. --fail makes curl throw the response body away on
-  # any 4xx, and the body is the only place these APIs explain themselves. With
-  # -f a Resend rejection reads as a bare "403", which sends you off auditing a
-  # perfectly good API key while the server is already telling you the real
-  # reason ("the domain is not verified"). -w gives us the status instead.
-  #
-  # Auth still goes via --config on stdin so the key never appears in argv.
-  out=$(printf '%s\n' "$authline" |
-    curl -sS --max-time "${CFG[notify_timeout]:-15}" --config - \
-      -X POST "$url" \
-      -H 'Content-Type: application/json' \
-      "$@" \
-      -w $'\n%{http_code}' \
-      --data-binary "@$tmp" 2>&1)
-  rc=$?
-  rm -f "$tmp"
-  _http_split "$out"
-  if ((rc != 0)); then
-    NOTIFY_LAST_ERR=$(redact "curl exit $rc: ${NOTIFY_LAST_BODY:0:300}")
-    return 1
-  fi
-  if ((NOTIFY_LAST_CODE < 200 || NOTIFY_LAST_CODE >= 300)); then
-    _api_message_v "$NOTIFY_LAST_BODY"
-    NOTIFY_LAST_ERR=$(redact "HTTP $NOTIFY_LAST_CODE: $API_MSG")
-    return 1
-  fi
-  return 0
-}
-
-ch_resend() {
-  local subject=$1 text=$2 html=$3
-  local key from to
-  key=$(secret resend_api_key)
-  [[ -n $key ]] || { NOTIFY_LAST_ERR='resend_api_key not set in secrets'; return 1; }
-  valid_token "$key" || { NOTIFY_LAST_ERR='resend_api_key contains unexpected characters'; return 1; }
-  from=${CFG[notify_from]:-onboarding@resend.dev}
-  valid_email "$from" || { NOTIFY_LAST_ERR="invalid notify_from: $from"; return 1; }
-  valid_email_list "${CFG[notify_to]}" || { NOTIFY_LAST_ERR='no valid notify_to address'; return 1; }
-
-  local rcpt='' e
-  for e in "${VALID_TO[@]}"; do
-    json_escape_v "$e"
-    rcpt+="${rcpt:+,}\"$JSON_OUT\""
-  done
-  json_escape_v "$subject"; local s=$JSON_OUT
-  json_escape_v "$text"; local t=$JSON_OUT
-  json_escape_v "$html"; local h=$JSON_OUT
-  json_escape_v "${CFG[notify_from_name]:-hyn-view} <$from>"; local f=$JSON_OUT
-
-  local body
-  printf -v body '{"from":"%s","to":[%s],"subject":"%s","text":"%s","html":"%s"}' \
-    "$f" "$rcpt" "$s" "$t" "$h"
-  _curl_json 'https://api.resend.com/emails' "header = \"Authorization: Bearer $key\"" "$body" && return 0
-  _resend_explain "$from"
-  return 1
-}
-
-# Resend's 403 is the single most confusing failure in this whole tool: the key is
-# valid, the request is well formed, and it still refuses -- because a free
-# account with no verified domain may only send FROM onboarding@resend.dev and
-# only TO the address the account was registered with. Restate that as an
-# instruction, since "403" on its own tells the operator nothing.
-_resend_explain() {
-  local from=$1 dom=${1#*@} b=${NOTIFY_LAST_BODY,,}
-  case $NOTIFY_LAST_CODE in
-    403)
-      if [[ $b == *domain*not*verified* || $b == *"not verified"* ]]; then
-        NOTIFY_LAST_ERR+="
-  Resend will not send from @$dom until that domain is verified.
-  Quickest fix -- use Resend's shared sender:
-      sudo hyn config set notify_from onboarding@resend.dev
-  Or verify the domain (needed to mail anyone else): https://resend.com/domains"
-      elif [[ $b == *"own email"* || $b == *testing* ]]; then
-        NOTIFY_LAST_ERR+="
-  An unverified Resend account may only send to the address you signed up with.
-  Either set notify_to to that exact address:
-      sudo hyn config set notify_to <your-resend-account-email>
-  or verify a domain to mail anyone: https://resend.com/domains"
-      else
-        NOTIFY_LAST_ERR+="
-  A Resend 403 with a valid key is almost always the sender or recipient, not the
-  key. Current sender: $from. Free accounts must use onboarding@resend.dev and
-  may only mail their own account address until a domain is verified."
-      fi
-      ;;
-    401)
-      NOTIFY_LAST_ERR+="
-  Resend rejected the key itself. Check it starts with 're_', was copied whole,
-  and has Sending permission -- Resend keys can be scoped to one domain.
-  Re-enter it with: sudo hyn wizard"
-      ;;
-    422)
-      NOTIFY_LAST_ERR+="
-  Resend could not parse the request. Check notify_from is a plain address:
-      sudo hyn config get notify_from"
-      ;;
-    429)
-      NOTIFY_LAST_ERR+="
-  Resend rate limit: 2 requests/second, 100 emails/day, 3000/month on free.
-  hyn's own cap: sudo hyn config set notify_max_per_day <n>"
-      ;;
-  esac
-  return 0
-}
-
-ch_brevo() {
-  local subject=$1 text=$2 html=$3
-  local key from
-  key=$(secret brevo_api_key)
-  [[ -n $key ]] || { NOTIFY_LAST_ERR='brevo_api_key not set in secrets'; return 1; }
-  valid_token "$key" || { NOTIFY_LAST_ERR='brevo_api_key contains unexpected characters'; return 1; }
-  from=${CFG[notify_from]:-}
-  valid_email "$from" || { NOTIFY_LAST_ERR="brevo needs a valid notify_from (got: $from)"; return 1; }
-  valid_email_list "${CFG[notify_to]}" || { NOTIFY_LAST_ERR='no valid notify_to address'; return 1; }
-
-  local rcpt='' e
-  for e in "${VALID_TO[@]}"; do
-    json_escape_v "$e"
-    rcpt+="${rcpt:+,}{\"email\":\"$JSON_OUT\"}"
-  done
-  json_escape_v "$subject"; local s=$JSON_OUT
-  json_escape_v "$text"; local t=$JSON_OUT
-  json_escape_v "$html"; local h=$JSON_OUT
-  json_escape_v "$from"; local fe=$JSON_OUT
-  json_escape_v "${CFG[notify_from_name]:-hyn-view}"; local fn=$JSON_OUT
-
-  local body
-  printf -v body '{"sender":{"email":"%s","name":"%s"},"to":[%s],"subject":"%s","textContent":"%s","htmlContent":"%s"}' \
-    "$fe" "$fn" "$rcpt" "$s" "$t" "$h"
-  _curl_json 'https://api.brevo.com/v3/smtp/email' "header = \"api-key: $key\"" "$body"
-}
-
-# SMTP through curl. Works with any provider, including a Gmail app password,
-# and is the only channel that needs no third-party API account.
-ch_smtp() {
-  local subject=$1 text=$2 html=$3
-  local host port user pass from url tmp rc out
-  host=${CFG[smtp_host]:-}
-  port=${CFG[smtp_port]:-587}
-  user=$(secret smtp_user)
-  pass=$(secret smtp_pass)
-  from=${CFG[notify_from]:-$user}
-  [[ -n $host ]] || { NOTIFY_LAST_ERR='smtp_host not set'; return 1; }
-  valid_email "$from" || { NOTIFY_LAST_ERR="invalid notify_from: $from"; return 1; }
-  valid_email_list "${CFG[notify_to]}" || { NOTIFY_LAST_ERR='no valid notify_to address'; return 1; }
-  [[ $port =~ ^[0-9]+$ ]] || { NOTIFY_LAST_ERR="invalid smtp_port: $port"; return 1; }
-
-  # Subject and addresses are already newline-free (valid_email rejects them);
-  # strip anything else that could break out of a header line.
-  subject=${subject//[$'\n\r']/ }
-  local boundary="hyn-$$-${RANDOM}"
-  tmp=$(mktemp "${TMPDIR:-/tmp}/hyn-mail.XXXXXX") || { NOTIFY_LAST_ERR='mktemp failed'; return 1; }
-  chmod 600 "$tmp" 2>/dev/null
-  {
-    printf 'From: %s <%s>\r\n' "${CFG[notify_from_name]:-hyn-view}" "$from"
-    printf 'To: %s\r\n' "$(IFS=,; printf '%s' "${VALID_TO[*]}")"
-    printf 'Subject: %s\r\n' "$subject"
-    printf 'Date: %(%a, %d %b %Y %H:%M:%S %z)T\r\n' -1
-    printf 'MIME-Version: 1.0\r\n'
-    printf 'X-Mailer: hyn-view %s\r\n' "$HYN_VERSION"
-    printf 'Content-Type: multipart/alternative; boundary="%s"\r\n\r\n' "$boundary"
-    printf -- '--%s\r\n' "$boundary"
-    printf 'Content-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n' "$text"
-    printf -- '--%s\r\n' "$boundary"
-    printf 'Content-Type: text/html; charset=utf-8\r\n\r\n%s\r\n' "$html"
-    printf -- '--%s--\r\n' "$boundary"
-  } >"$tmp"
-
-  if [[ $port == 465 ]]; then url="smtps://$host:$port"; else url="smtp://$host:$port"; fi
-  local -a cfg=("url = \"$url\"")
-  [[ -n $user ]] && cfg+=("user = \"$user:$pass\"")
-  [[ $port != 465 ]] && cfg+=('ssl-reqd')
-  cfg+=("mail-from = \"$from\"")
-  for e in "${VALID_TO[@]}"; do cfg+=("mail-rcpt = \"$e\""); done
-  cfg+=("upload-file = \"$tmp\"")
-
-  out=$(printf '%s\n' "${cfg[@]}" | curl -sS --max-time "${CFG[notify_timeout]:-20}" --config - 2>&1)
-  rc=$?
-  rm -f "$tmp"
-  if ((rc != 0)); then
-    NOTIFY_LAST_ERR=$(redact "smtp curl exit $rc: ${out:0:300}")
-    return 1
-  fi
-  return 0
-}
-
-ch_telegram() {
-  local subject=$1 text=$2 _html=$3
-  local token chat out rc
-  token=$(secret telegram_token)
-  chat=${CFG[telegram_chat_id]:-}
-  [[ -n $token ]] || { NOTIFY_LAST_ERR='telegram_token not set in secrets'; return 1; }
-  [[ -n $chat ]] || { NOTIFY_LAST_ERR='telegram_chat_id not set'; return 1; }
-  valid_token "$token" || { NOTIFY_LAST_ERR='telegram_token contains unexpected characters'; return 1; }
-  # Telegram's URL carries the token, so the URL itself is a secret: it goes
-  # through --config, not argv.
-  # Same reason as _curl_json: no -f, or Telegram's "chat not found" / "bot was
-  # blocked by the user" explanation is discarded and all you see is 400.
-  out=$(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$token" |
-    curl -sS --max-time "${CFG[notify_timeout]:-15}" --config - \
-      -d "chat_id=$chat" \
-      -d disable_web_page_preview=true \
-      -w $'\n%{http_code}' \
-      --data-urlencode "text=$subject"$'\n\n'"$text" 2>&1)
-  rc=$?
-  _http_split "$out"
-  ((rc == 0)) || { NOTIFY_LAST_ERR=$(redact "telegram curl exit $rc: ${NOTIFY_LAST_BODY:0:200}"); return 1; }
-  if ((NOTIFY_LAST_CODE < 200 || NOTIFY_LAST_CODE >= 300)); then
-    _api_message_v "$NOTIFY_LAST_BODY"
-    NOTIFY_LAST_ERR=$(redact "telegram HTTP $NOTIFY_LAST_CODE: $API_MSG")
-    return 1
-  fi
-  return 0
-}
-
-# ntfy.sh: no account, no key, instant phone push. The best zero-friction option
-# for alerts, though the topic name is the only access control -- pick an
-# unguessable one.
-ch_ntfy() {
-  local subject=$1 text=$2 _html=$3 sev=$4
-  local topic server prio tags out rc
-  topic=${CFG[ntfy_topic]:-}
-  server=${CFG[ntfy_server]:-https://ntfy.sh}
-  [[ -n $topic ]] || { NOTIFY_LAST_ERR='ntfy_topic not set'; return 1; }
-  [[ $topic =~ ^[A-Za-z0-9_-]+$ ]] || { NOTIFY_LAST_ERR='ntfy_topic must be alphanumeric/_/-'; return 1; }
-  case $sev in
-    crit) prio=urgent; tags='rotating_light' ;;
-    warn) prio=high; tags='warning' ;;
-    ok) prio=default; tags='white_check_mark' ;;
-    *) prio=low; tags='bar_chart' ;;
-  esac
-  out=$(curl -sS --max-time "${CFG[notify_timeout]:-15}" \
-    -H "Title: $subject" -H "Priority: $prio" -H "Tags: $tags" \
-    -w $'\n%{http_code}' \
-    --data-binary "$text" "$server/$topic" 2>&1)
-  rc=$?
-  _http_split "$out"
-  ((rc == 0)) || { NOTIFY_LAST_ERR="ntfy curl exit $rc: ${NOTIFY_LAST_BODY:0:200}"; return 1; }
-  if ((NOTIFY_LAST_CODE < 200 || NOTIFY_LAST_CODE >= 300)); then
-    _api_message_v "$NOTIFY_LAST_BODY"
-    NOTIFY_LAST_ERR="ntfy HTTP $NOTIFY_LAST_CODE: $API_MSG"
-    return 1
-  fi
-  return 0
-}
-
-# Slack and Discord both accept a simple JSON post; sending both key names means
-# one implementation covers either without asking which it is.
-ch_webhook() {
-  local subject=$1 text=$2 _html=$3
-  local url
-  url=$(secret webhook_url)
-  [[ -n $url ]] || url=${CFG[webhook_url]:-}
-  [[ -n $url ]] || { NOTIFY_LAST_ERR='webhook_url not set'; return 1; }
-  [[ $url == https://* ]] || { NOTIFY_LAST_ERR='webhook_url must be https'; return 1; }
-  json_escape_v "$subject"$'\n'"$text"
-  local body
-  printf -v body '{"text":"%s","content":"%s"}' "$JSON_OUT" "$JSON_OUT"
-  _curl_json "$url" 'silent' "$body"
-}
-
-ch_stdout() {
-  # `printf --` is required: a format string starting with "--" is otherwise
-  # taken as an option and printf fails.
-  printf -- '--- %s ---\n%s\n' "$1" "$2"
-  return 0
-}
 
 ch_web() {
   local subject=$1 text=$2 html=$3 sev=$4
@@ -545,80 +241,60 @@ notify_apply_template() {
   return 0
 }
 
-# Where a channel delivers to, for the log. Never the credential -- only the
-# destination, and the webhook URL is reduced to its host because the path of a
-# Slack or Discord webhook IS the secret.
-_notify_target() {
-  local ch=$1 u
-  case $ch in
-    web) printf 'web portal' ;;
-    resend | brevo | smtp) printf '%s' "${CFG[notify_to]:-}" ;;
-    ntfy) printf '%s/%s' "${CFG[ntfy_server]:-}" "${CFG[ntfy_topic]:-}" ;;
-    telegram) printf 'chat %s' "${CFG[telegram_chat_id]:-}" ;;
-    webhook)
-      u=${CFG[webhook_url]:-}
-      u=${u#*://}
-      printf '%s' "${u%%/*}" ;;
-    *) printf '%s' "$ch" ;;
-  esac
+# Is there anywhere to deliver to at all?
+#
+# Exactly one question now: is this machine paired with the portal. There is no
+# local channel list to be empty, no provider to be half-configured, and no way
+# for the two to disagree.
+#
+# Kept distinct from "delivery failed" because the difference decides whether a
+# systemd unit goes red. Not being paired is a state, not a fault -- the report
+# timer runs from the moment the package is installed, which is before pairing is
+# possible, and must exit 0. A queue attempt that IS made and then fails is a real
+# failure worth surfacing in `systemctl status`.
+notify_configured() {
+  declare -F cloud_configured >/dev/null 2>&1 || return 1
+  cloud_configured && cloud_linked
 }
 
+# notify_send <severity> <subject> <text> [html]
+#
+# Queues one event with the portal and stops caring. The portal resolves the
+# recipient from the node's owner, applies the account's template, sends through
+# the deployment's provider account and records the outcome -- none of which this
+# process can see, and none of which it needs to.
 notify_send() {
   local sev=$1 subject=$2 text=$3 html=${4:-}
-  local chans ch ok=0 tried=0
-  chans=${CFG[notify_channels]:-}
-  [[ -n $chans ]] || { NOTIFY_LAST_ERR='no notify_channels configured (run: sudo hyn setup)'; return 1; }
 
+  if ! notify_configured; then
+    NOTIFY_LAST_ERR='this machine is not paired with the portal (sudo hyn link)'
+    return 1
+  fi
+
+  # A local backstop, still worth having: it is the portal's provider quota a
+  # flapping rule would burn, and the cheapest place to stop that is before the
+  # request goes out. The cap itself is set from the portal.
   if ! budget_check; then
     warn "daily notification cap (${CFG[notify_max_per_day]}) reached; suppressing: $subject"
     return 1
   fi
 
   [[ -z $html ]] && html="<pre style=\"font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace\">$(html_escape "$text")</pre>"
+  # The wrapper comes from the portal too, pulled on the last check-in.
   notify_apply_template "${NOTIFY_CATEGORY:-alert}" "$sev" "$subject" "$html"
   html=$HTML_OUT
 
-  local oIFS=$IFS
-  IFS=,
-  for ch in $chans; do
-    ch=${ch//[[:space:]]/}
-    [[ -z $ch ]] && continue
-    IFS=$oIFS
-    ((tried++))
-    NOTIFY_LAST_ERR=''
-    local chok=0
-    case $ch in
-      web) ch_web "$subject" "$text" "$html" "$sev" && chok=1 ;;
-      resend) ch_resend "$subject" "$text" "$html" "$sev" && chok=1 ;;
-      brevo) ch_brevo "$subject" "$text" "$html" "$sev" && chok=1 ;;
-      smtp) ch_smtp "$subject" "$text" "$html" "$sev" && chok=1 ;;
-      telegram) ch_telegram "$subject" "$text" "$html" "$sev" && chok=1 ;;
-      ntfy) ch_ntfy "$subject" "$text" "$html" "$sev" && chok=1 ;;
-      webhook) ch_webhook "$subject" "$text" "$html" "$sev" && chok=1 ;;
-      stdout) ch_stdout "$subject" "$text" "$html" "$sev" && chok=1 ;;
-      *) NOTIFY_LAST_ERR="unknown channel: $ch" ;;
-    esac
-    ((chok)) && ok=1
-    [[ -n $NOTIFY_LAST_ERR ]] && warn "notify[$ch]: $NOTIFY_LAST_ERR"
-    # Queue the outcome for the portal, so the dashboard can report how many
-    # notifications went out and why any failed. Guarded because notify.sh is
-    # usable without the cloud layer loaded, and a reporting problem must never
-    # stop an alert from being sent.
-    # Web delivery is only queued here. The portal records the actual Resend
-    # result after its durable worker runs; reporting it as sent now would make
-    # the dashboard lie during a provider failure.
-    if [[ $ch != web ]] && declare -F cloud_notify_record >/dev/null 2>&1; then
-      cloud_notify_record "$ch" "$(_notify_target "$ch")" "$sev" "$subject" \
-        "$( ((chok)) && printf 'sent' || printf 'failed')" \
-        "$NOTIFY_LAST_ERR" "${NOTIFY_CATEGORY:-alert}" || true
-    fi
-    IFS=,
-  done
-  IFS=$oIFS
-
-  ((tried == 0)) && { NOTIFY_LAST_ERR='no usable channel'; return 1; }
-  ((ok)) && budget_consume
-  ((ok == 1))
+  NOTIFY_LAST_ERR=''
+  if ch_web "$subject" "$text" "$html" "$sev"; then
+    budget_consume
+    return 0
+  fi
+  warn "notify: ${NOTIFY_LAST_ERR:-the portal rejected the event}"
+  # Deliberately not recorded as a delivery attempt here. The portal writes the
+  # notification log when its own worker has actually tried to send, so recording
+  # an outcome now would make the dashboard claim a message was handled during a
+  # provider failure.
+  return 1
 }
 
 HTML_OUT=''
@@ -637,30 +313,6 @@ html_escape() {
   s=${s//\"/"&quot;"}
   printf '%s' "$s"
 }
-
-# ---------------------------------------------------------------------------
-# heartbeat (dead man's switch)
-# ---------------------------------------------------------------------------
-# The honest answer to "tell me when the server goes down". Nothing running ON
-# the box can report that the box is off, so instead we check in on a schedule
-# and let an external service alert when the check-ins stop. healthchecks.io is
-# the reference implementation and is self-hostable; any URL that expects a
-# periodic GET works.
-heartbeat_ping() {
-  local url status=${1:-0}
-  url=$(secret heartbeat_url)
-  [[ -n $url ]] || url=${CFG[heartbeat_url]:-}
-  [[ -n $url ]] || return 0
-  [[ $url == https://* || $url == http://* ]] || { warn 'heartbeat_url must be http(s)'; return 1; }
-  # A non-zero status pings the /fail endpoint where the service supports it, so
-  # a box that is up but unhealthy still raises an alarm.
-  local target=$url
-  ((status != 0)) && target="${url%/}/fail"
-  printf 'url = "%s"\n' "$target" |
-    curl -fsS --max-time 10 --retry 2 --config - -o /dev/null 2>/dev/null
-  return $?
-}
-
 
 # ---------------------------------------------------------------------------
 # HTML email components

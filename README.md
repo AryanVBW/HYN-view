@@ -8,17 +8,52 @@ the headline, not the CPU. It also tracks a [Highway](https://highwayp2p.com)
 relay node (`hw-os`) if one is installed — strictly read-only.
 
 ```
-npm install -g hyn-view
-sudo hyn link       # pair, verify, and install the recurring monitor
-hyn                 # dashboard
+sudo npm install -g hyn-view   # installs, configures and schedules itself
+sudo hyn link                  # pair with the web portal (only if you want it)
+hyn                            # dashboard
 ```
 
-## First launch
+## There is no setup step
 
-Run `hyn` on a fresh install and it offers a guided setup before it draws
-anything. Eight steps, about two minutes, and every question has a default that
-is right for a 24/7 relay node — holding Enter through the whole thing produces a
-good configuration.
+`npm install -g hyn-view` is the installation. Its postinstall writes
+`/etc/hyn-view/config`, creates the state directory and installs and enables the
+systemd timers, so metric sampling and alert evaluation are running before you
+type anything. No questions, no wizard, no `sudo hyn setup`.
+
+That is a reversal. This used to be a deliberate manual step, on the reasoning
+that a postinstall writing systemd units does something the user did not ask for.
+Fair for a library; wrong for a monitoring agent whose whole value is being
+installed on a box nobody logs into. An operator who runs `npm install -g`, sees
+it succeed and walks away has every reason to believe monitoring is running — and
+it was not, and nothing said so.
+
+Four rules keep it honest:
+
+| Rule | Why |
+| --- | --- |
+| It can never fail the install | every path exits 0. A monitor that could not configure itself is degraded, not a broken package. |
+| Global installs as root only | `npm i hyn-view` in your project touches nothing. |
+| It never overwrites an existing config | a reinstall keeps your settings. |
+| `HYN_NO_POSTINSTALL=1` opts out | for image builders and CI. |
+
+It does not pair with the portal, because pairing needs a human with a browser,
+and it asks nothing, because there is no terminal to ask on. Every default is
+already the right answer for a 24/7 relay node, which is what makes doing this
+unattended defensible at all.
+
+**To change something, edit one file.** `/etc/hyn-view/config` is written with
+every key and a comment explaining it. `hyn config edit` opens it, `hyn config set
+<key> <value>` changes one line, and `hyn config show` prints the current value of
+everything. For a linked machine the portal's `/settings` page owns the managed
+subset — thresholds, severity, report time, push interval, update policy — and
+those changes arrive on the next check-in.
+
+## Guided setup, if you want it
+
+Nothing needs it, so nothing offers it. `hyn onboard` runs the guided setup on
+demand: eight steps, about two minutes, and every question has a default that is
+right for a 24/7 relay node — holding Enter through the whole thing produces the
+same configuration the install already wrote.
 
 ```
 Step 1 of 8  What we found          detected hardware, WAN link, filesystems, node
@@ -31,22 +66,20 @@ Step 7 of 8  Cloud reports and speed tests
 Step 8 of 8  Outage detection
 ```
 
-The first decision is how the CLI should update: notify before installing,
-install automatically, or manual only. It then shows what it detected before
-asking about display and monitoring preferences. No email-provider credential
-is requested. Nothing is written until you confirm the summary.
-
-Asked once. Declining is remembered, and the dashboard works fine without it
-(alerts and reports do not). Re-run any time:
+The first decision is how the CLI should update, defaulting to automatic. It then
+shows what it detected before asking about display and monitoring preferences. No
+email-provider credential is requested. Nothing is written until you confirm the
+summary.
 
 ```
-hyn onboard               full guided setup again
-sudo hyn wizard           just the notification part
-sudo hyn setup            just the config and timers, no questions
+hyn onboard               the full guided setup
+sudo hyn setup            re-apply the config and timers, no questions
+hyn config edit           open /etc/hyn-view/config
 hyn config set <k> <v>    one setting, scriptable
 ```
 
-Set `onboarding=off` to suppress the prompt entirely.
+Set `onboarding=on` if you would rather be offered the guided setup on first
+launch.
 
 ## Why it is not just another htop
 
@@ -144,6 +177,17 @@ more than a busy CPU, since a node that is not running earns nothing however coo
 it is. An agent older than the section says so and prints the upgrade command,
 rather than reporting a machine with no services.
 
+**Everything the agent sends is on the page.** Not a summary of it. Every
+filesystem with its type, size, used share and free headroom; the top processes
+by CPU and memory with pid and thread count; the link's negotiated speed and
+duplex, driver, MTU, local address, gateway and DNS, interface errors and drops,
+TCP retransmit share, socket state distribution, listen-queue drops and conntrack
+headroom; first-hop latency separately from internet latency; PSI for cpu, memory
+and io; per-core clock speeds with the governor and the hardware's floor and
+ceiling. The person watching the portal is the person who cannot reach the
+machine, so a dashboard that makes them ask for ssh has failed at its only job.
+An administrator sees the same panels inside the per-client view at `/admin`.
+
 **Real data only.** With no node linked it says so and tells you how to link
 one; with a node linked but no metrics yet it says that instead, because the fix
 is different. A missing sensor renders as `—` or as an explicit "no thermal
@@ -170,20 +214,38 @@ hyn cloud status       what was pulled, when, and the node's administrative stat
 
 Every scheduled `hyn push` performs that pull before collecting and sending its
 reading, so portal changes apply on the next check-in without a second timer.
-`hyn config pull` remains useful when an operator wants to apply a change
-immediately.
+**A pull that actually changes something also sends a reading immediately**, rather
+than waiting up to `cloud_push_min` — someone who edits a threshold and watches the
+page would otherwise reasonably conclude it had not worked.
 
 `/account` shows node settings and every delivery attempt with the reason any
 failed. Thresholds, CLI update policy and push interval are edited per server.
 The Email automation section controls immediate incident alerts, the daily
-health digest and the daily system-information message. Advanced operators may
-still use `sudo hyn wizard` for an additional local-only push channel.
+health digest and the daily system-information message. No customer configures a
+provider credential: the portal uses one deployment-level email key for every
+account, and the monitored machine holds none.
 
-A pulled setting is written to a cache that `cfg_load` reads **before**
-`/etc/hyn-view/config`, so a line set locally on the box still wins. That
-ordering is deliberate: central management that silently reverts an operator who
-edited a machine at 3am for a reason is worse than no central management, and a
-cache that outranked explicit local config would be impossible to debug.
+The set of settings the portal may manage is declared three times — in the agent,
+in the database as a `CHECK` constraint, and in the portal form — and a test
+compares all three, because drift there does not fail loudly. It presents as "I
+changed it in the portal and the server ignored me".
+
+A pulled setting is written to a cache that `cfg_load` applies **after**
+`/etc/hyn-view/config`, so the dashboard wins for the small set of keys it is
+allowed to manage — thresholds, severity, report time, push interval and update
+policy. Everything else is refused outright: endpoints, credentials, privacy
+options and the local-only settings are read from the root-owned files and the
+portal cannot reach them. That split is deliberate. Central management that
+cannot actually change a threshold is not management, and a portal that could
+rewrite `cloud_url` or `notify_access_details` would be a much larger trust
+boundary than a settings page needs.
+
+The cache is rewritten whole on every pull, never merged, so **clearing a field in
+the portal hands the setting back to the CLI default** instead of pinning it to
+whatever it was last set to. Central management that can take a setting but not
+give it back is a trap, and `cfg_load` reloads from the shipped defaults each time
+for the same reason — layering onto the previous result meant a withdrawn value
+survived for the life of the process, which on the dashboard is days.
 
 ### What the agent sends
 
@@ -351,11 +413,18 @@ Set any threshold to `0` to switch that rule off.
 **hyn cannot tell you the server went down.** If the box is off, so is hyn. Any
 tool claiming otherwise from inside the machine is lying to you.
 
-The real fix is a dead man's switch: this host checks in on a schedule and an
-outside service alerts *you* when the check-ins stop.
-[healthchecks.io](https://healthchecks.io) is free and self-hostable. The wizard
-asks for a ping URL, and the alert run pings the `/fail` endpoint when something
-is critical, so a box that is up but broken also trips it.
+So the check that matters is made from outside it, and the portal makes it. Pairing
+starts a watchdog for that node; when three one-minute heartbeats are missed the
+owner gets a `[HYN CRIT]` email, and another when they resume. Nothing to configure
+and nothing to install.
+
+That replaced a healthchecks.io ping URL entered on every machine. It was a second
+third-party account, configured per box, to detect exactly what the portal already
+sees — and it could only ever notice silence, which is what the portal watchdog
+notices too. One fewer account, one fewer thing to get wrong on the fifth server.
+
+An unpaired machine has no outage detection at all, and `hyn doctor` says so rather
+than implying otherwise.
 
 ## Daily report
 
@@ -394,28 +463,62 @@ The report needs history, so `hyn-record.timer` samples every 5 minutes into a
 TSV. It reports *change* as well as level: "disk at 71%" is not actionable,
 "disk at 71%, up 4 points in 24h, full in about 7 days" is.
 
-## Channels
+## Delivery
 
-| Channel | Free tier | Notes |
-| --- | --- | --- |
-| `resend` | 100/day, 3,000/month | Quickest to set up. Without a verified domain you send from `onboarding@resend.dev` **to your own Resend account address only** — fine for alerting yourself. |
-| `brevo` | 300/day | 3× the daily headroom; needs a verified sender. |
-| `smtp` | — | Any provider, including a Gmail app password. No third-party account. |
-| `ntfy` | free | No account at all. Instant phone push. The topic name is the only access control, so make it long. |
-| `telegram` | free | Bot token from @BotFather. |
-| `webhook` | free | Slack or Discord incoming webhook. |
+**There is one delivery path and no configuration for it on the server.**
 
-Configure several; all are attempted. Email for the daily report and push for
-3am alerts is a good pairing.
+```
+alert fires  ──►  hyn queues an event  ──►  portal resolves the recipient,
+                  (node token only)         applies the template, sends,
+                                            and records the outcome
+```
 
-API keys live in `/etc/hyn-view/secrets` at mode `0600`, never in the
-world-readable config. Two further rules are enforced in code: secrets are never
-passed in `argv` (where any user could read them out of `ps`) and message bodies
-go through a `0600` temp file for the same reason. Everything interpolated into
-JSON is escaped first because alert and service text can be attacker-influenced.
+The agent holds no provider account, no API key, no sender address, no recipient
+list and no ping URL. It queues an event with the hosted API using its node token
+and stops caring. The portal owns the provider account, the recipients, the
+schedules, the templates and the delivery log, and its Account page is the only
+place any of it is configured.
 
-`notify_max_per_day` (default 50) is a hard backstop so a flapping rule cannot
-burn a provider's quota and drop the one message that mattered.
+Six local channels used to live here — Resend, Brevo, SMTP, Telegram, ntfy and a
+generic webhook — each with its own credential in `/etc/hyn-view/secrets`, its own
+recipient and sender keys, its own failure modes and its own wizard page. Every one
+of them was in the wrong place:
+
+| What was on the box | Why that was wrong |
+| --- | --- |
+| A provider API key | a credential to rotate on every machine you own, sitting on the machine most exposed to the internet. |
+| A recipient address | it changes when someone leaves the team, and changing it meant ssh to N servers. |
+| A sender domain | verified once per provider, then re-entered per box and wrong on half of them. |
+| A healthchecks.io ping URL | a second third-party account, configured per machine, to detect the thing the portal already detects. |
+| The delivery outcome | the agent reported "sent" when it had handed the message to a provider, which is not the same as delivered. |
+
+None of that is knowable or fixable by the person actually looking at the
+dashboard, which is the person who cannot reach the machine. So it moved.
+
+What stays on the box is the node token, in `/etc/hyn-view/secrets` at mode `0600`,
+never in the world-readable config. It is never passed in `argv` — a token in a
+`curl -H` argument lands in `/proc/<pid>/cmdline` where any local user can read it
+out of `ps` — and message bodies go the same way. Everything interpolated into JSON
+is escaped first, because alert and service text can be attacker-influenced.
+
+`notify_max_per_day` (default 50) is kept as a local backstop: it is the portal's
+provider quota a flapping rule would burn, and the cheapest place to stop that is
+before the request goes out. The cap itself is set from the portal.
+
+**What you configure, and where.** Two files, one of them not on the server:
+
+| Setting | Where |
+| --- | --- |
+| Recipient, timezone, send times, which message types | portal → Account |
+| Email templates for alerts, digests and system info | portal → Email templates (admin) |
+| Thresholds, severity, report time, push interval, update policy | portal → Account, or `/etc/hyn-view/config` |
+| Display, theme, panels, refresh rate, node tracking | `/etc/hyn-view/config` only |
+| Endpoints, the node token, privacy opt-ins | `/etc/hyn-view/config` and `secrets` only — the portal cannot touch these |
+
+```
+hyn notify status     what delivery is configured, and whether this box can reach it
+hyn notify test       queue one test event with the portal
+```
 
 ## Updates
 
@@ -440,8 +543,39 @@ HYN service restart, verification, and final synchronization progress. A
 successful update restarts and verifies every enabled HYN timer, then immediately
 sends fresh telemetry instead of waiting for the configured reporting interval.
 If a machine is offline, the command safely waits for it to check in; run
-`sudo hyn doctor` and `sudo systemctl restart hyn-push.timer` on the server to
-recover a stopped check-in timer.
+`sudo hyn doctor --fix` on the server, which rewrites the units, re-enables the
+timers and pushes a reading immediately.
+
+**The agent has full write access, and that is a deliberate reversal.** These
+units used to run under `ProtectSystem=strict` with `ReadWritePaths` limited to
+one state directory. It read well and it was wrong: `npm install -g` writes under
+`/usr`, `hyn setup` rewrites `/etc`, and node's JIT needs writable-executable
+pages, so the agent could not install its own updates, could not rewrite its own
+units and could not repair itself. On an unattended box a monitor that cannot fix
+itself is worse than one with a wide mount namespace.
+
+What replaced it is the part that was actually protecting the node, which was
+never the mount namespace:
+
+| Setting | Why |
+| --- | --- |
+| `CPUWeight=20`, `IOWeight=20`, `Nice=15`, idle I/O | the node always wins a contended scheduler. Monitoring must never be why a validator misses a block. |
+| `MemoryMax=256M` | bash needs ~12 MiB. A relayer holding 1.5 GiB must never feel this process. |
+| `OOMScoreAdjust=500` | if the kernel has to choose a victim, it chooses hyn. |
+| `TimeoutStartSec` on every unit | a wedged collector is reaped, not accumulated. |
+
+**It cannot stop another service, and that is enforced in code, not by a
+sandbox.** Stopping a unit takes a `systemctl` call; no mount namespace ever
+prevented one. So the guarantee lives in `test/selfcheck.sh`, which reads every
+source file and fails the build if a state-changing `systemctl` verb — `start`,
+`stop`, `restart`, `enable`, `disable`, `mask`, `reset-failed` and the rest — is
+aimed at anything other than one of hyn's own six units. `hyn` clears the failed
+latch on its own services by name and never with a glob: another failed unit on
+the same box is information the operator needs, not litter for a monitor to tidy.
+
+The install runs in its own unit for a plainer reason: a check-in that fires every
+sixty seconds must not be the process holding an `npm install` open, and a 256 MiB
+cap that is right for bash is too tight for node.
 
 **Network detail that matters on a server.** Throughput and packet rates, but
 also interface errors and drops, TCP retransmits as a share of segments sent,
@@ -459,10 +593,11 @@ automatically when the link is already busy, and scheduled with a randomised
 delay so a fleet of operators running the same installer don't all test at once.
 
 **It tells you when something breaks.** Alerting runs from a systemd timer, not
-from the dashboard, so it works whether or not anyone is looking. Email via
-Resend, Brevo or plain SMTP; push via ntfy or Telegram; or a Slack/Discord
-webhook. Plus one daily report covering performance, throughput, storage trend,
-connection details and node status.
+from the dashboard, so it works whether or not anyone is looking. The message goes
+to the portal, which owns the provider account and the recipient — so there is no
+API key on the monitored box and no per-machine mailing list. Plus one daily report
+covering performance, throughput, storage trend, connection details and node
+status.
 
 ## Views
 
@@ -497,7 +632,7 @@ hyn history [N] [--json]  recorded results
 
 hyn alerts check | list | test | state | log
 hyn report [--send]       daily report: print it, or email it
-hyn notify status | test  delivery configuration, or send a test message
+hyn notify status | test  portal delivery state, or queue a test message
 hyn record                sample metrics once
 
 sudo hyn link             pair with the web portal (device-code flow)
@@ -511,16 +646,39 @@ hyn about                 author, licence, version
 hyn theme list | set <name> | preview <name>
 hyn config show | get <k> | set <k> <v> | path | edit
 hyn doctor                what works on this machine, and what does not
-sudo hyn setup            guided setup: config, secrets, timers, notifications
-sudo hyn wizard           re-run just the notification setup
+sudo hyn doctor --fix     rewrite the units, re-enable the timers, push now
+sudo hyn setup            re-apply config, secrets and timers (no questions)
 sudo hyn uninstall        remove units (add --purge to drop config and history)
 ```
 
-Five systemd timers are installed for optional local alerts/reports, local
-metric history, guarded throughput tests, and portal sync. Portal sync checks
+Five systemd timers are installed by the postinstall. One rule decides whether
+each is running: **a timer is enabled if its job can ever do something useful.**
+
+| Timer | On when |
+| --- | --- |
+| `hyn-record` | always — the report's trend lines come from it |
+| `hyn-speedtest` | always |
+| `hyn-alerts` | `alert_enabled` (default on) |
+| `hyn-report` | `report_enabled` (default on) |
+| `hyn-push` | the machine is paired |
+
+Only the push is conditional, because without a node token every run is a
+guaranteed failure and an enabled push timer on an unpaired box would write one to
+the journal every sixty seconds. Nothing is gated on having somewhere to *send*:
+every job treats "no delivery channel" as a no-op and exits 0, so the report timer
+runs from the moment you install and prints a line saying where it would have sent
+to. `hyn doctor` states the reason for any timer that is off and does not count it
+as a warning — a correctly installed machine should not look broken. Portal sync checks
 configuration every minute and collects only when the dashboard-selected push
-interval is due. All run as hardened one-shots; there is no permanent Node.js
+interval is due. All five are one-shots that yield to the node — low CPU and I/O
+weight, `MemoryMax=256M`, `OOMScoreAdjust=500` — with full filesystem write
+access so the agent can update and repair itself. There is no permanent Node.js
 process and an npm update refreshes the units automatically.
+
+A sixth unit, `hyn-update.service`, is installed but never enabled. It has no
+timer and no `[Install]` section: it exists only to be started by name when an
+update is due, so a sixty-second check-in is never the process holding an `npm
+install` open. See "Updates".
 
 `hyn snapshot --json` is the integration point. It emits one object with the
 network counters, latency map, speed test result, and node health, so it can be
@@ -534,16 +692,36 @@ and its traffic, the qdisc on the WAN interface, congestion control, error and
 warning counts from the last hour of journal, and the installed version against
 the currently published one.
 
+**Unit discovery is by name pattern, and the default list is
+`highway*,hway*,hw-*,nebula*,mosaic*`.** `hway*` is not redundant. Highway
+Relayer OS names its units `hway-relayer.service`, `hway-monitor.service`,
+`hway-otel-agent.service` and so on — `highway*` needs an "i" and `hw-*` needs the
+hyphen straight after "hw", so without `hway*` the only units that matched on a
+production relay node were the Nebula ones. The panel reported "ok, 3 units
+active" while the relayer itself was untracked and `hway-logrotate.service` sat in
+`failed`. Add your own patterns to `highway_units` if your node names units
+differently.
+
+The node process is identified from the relayer unit's own `MainPID` rather than
+by scanning `/proc` for a command name. `/proc/<pid>/comm` is capped at 15
+characters by the kernel, so `hway-relayer-supervise` appears as
+`hway-relayer-su`; matching on fixed names picked up a 10 MiB sidecar and reported
+its memory for a process actually holding 1.5 GiB.
+
 **It never changes anything.** No `systemctl start/stop/restart/enable`, no
 writes under `/etc/highway`, `/var/lib/highway` or `/opt/highway`, no `tc` or
-`nft` subcommand other than `show`/`list`. The test suite greps the source to
-enforce this, so it cannot regress quietly.
+`nft` subcommand other than `show`/`list`. The test suite greps every source file
+to enforce this, so it cannot regress quietly. That check is the *only* thing
+enforcing it — the units have full filesystem write access — which is why it
+covers every file rather than just `highway.sh`.
 
 The node binary is **not executed** to read its version. Running a validator's
 own binary next to a live instance to ask a question is not something a monitor
 should do, so the version is read from on-disk files, systemd unit metadata, and
-the journal instead. If none of those answer, the panel says so. Set
-`highway_version_probe=exec` to opt into running `highway --version`.
+the journal instead — `/opt/hway-agent/current/VERSION` first, because scraping a
+version out of unit metadata found `v0.3.1` on a box whose agent was `v0.1.95`.
+If none of those answer, the panel says so. Set `highway_version_probe=exec` to
+opt into running `highway --version`.
 
 Turn the whole thing off with `highway_track=off`.
 
@@ -571,13 +749,12 @@ Keys worth knowing:
 | `speedtest_provider` | `auto` | prefers Ookla `speedtest`, then `speedtest-cli`, then `curl` |
 | `highway_track` | `on` | node panel |
 | `profile` | `best` | `best` or `performance` |
-| `notify_channels` | *(empty before linking)* | a new portal link defaults this to `web`; explicit local channels are preserved |
 | `notify_access_details` | `off` | set `on` only to include run-as/session usernames, session source IPs and the worst rejected-login IP in notifications |
 | `alert_min_severity` | `warn` | `crit`, `warn` or `info` |
 | `alert_repeat_hours` | `6` | reminder interval while still firing |
 | `report_at` | `08:00` | server local time |
 | `auto_update` | `install` | `off`, `check` or `install`; linked installs stay synchronized by default |
-| `onboarding` | `on` | offer guided setup on first interactive launch |
+| `onboarding` | `off` | the install configures itself, so nothing is offered; `on` restores the first-launch prompt |
 | `cloud_enabled` | `off` | set by `hyn link`; gates the portal push timer |
 | `cloud_api_url` | `https://www.hyn-view.in/api/agent/v1` | hosted agent API; no customer key required |
 | `cloud_url` | *(empty)* | optional direct-Supabase URL for self-hosters |
@@ -593,7 +770,8 @@ colours, resolved at load into whatever the terminal supports (truecolor, 256,
 
 ## Requirements
 
-Ubuntu 22.04 or 24.04 (anything with Linux `/proc` and bash 4.3+ will work).
+Ubuntu 22.04 or 24.04, including Highway Relayer OS, which is 24.04 underneath
+(anything with Linux `/proc` and bash 4.3+ will work).
 Snap mounts are excluded automatically: they are read-only squashfs and therefore
 permanently 100% full, so a box with twenty snaps would otherwise show twenty
 filesystems and fire twenty disk-full alerts that could never clear.

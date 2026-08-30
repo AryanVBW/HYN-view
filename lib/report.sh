@@ -924,8 +924,19 @@ report_run() {
   local v
   v=$(_verdict)
   subject="[hyn] $HOSTNAME_S daily report — ${v%% —*}"
+  # Nowhere to send is not a failure. The report timer is enabled from the moment
+  # the package is installed, which is before there is any way to deliver, and a
+  # unit that goes red every morning for a machine that is working perfectly
+  # teaches an operator to ignore `systemctl status`.
+  if ! notify_configured; then
+    printf 'hyn: the daily report was not sent: no delivery channel is configured.\n'
+    printf '     link this machine to the portal (sudo hyn link), which sets up managed\n'
+    printf '     email, or configure a local channel with: sudo hyn wizard\n'
+    printf '     `hyn report` prints it here in the meantime.\n'
+    return 0
+  fi
   if NOTIFY_CATEGORY=report notify_send info "$subject" "$(report_text "$hours")" "$(report_html "$hours")"; then
-    printf 'hyn: daily report sent to %s\n' "${CFG[notify_to]}"
+    printf 'hyn: daily report queued with the portal for delivery\n'
     return 0
   fi
   printf 'hyn: could not send the daily report: %s\n' "${NOTIFY_LAST_ERR:-unknown error}" >&2

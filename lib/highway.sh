@@ -71,8 +71,14 @@ hw_version() {
   _HW_VER_TRIED=1
   local f v line
 
-  for f in /var/lib/highway/version /var/lib/highway/VERSION /etc/highway/version \
-           /opt/highway/VERSION /var/lib/hw-os/version; do
+  # On-disk version files, cheapest and safest. Ordered most specific first: the
+  # relayer OS keeps the running agent's version at
+  # /opt/hway-agent/current/VERSION, and reading it is the difference between
+  # reporting v0.1.95 (correct) and scraping "v0.3.1" out of an unrelated unit's
+  # metadata further down this function.
+  for f in /opt/hway-agent/current/VERSION /opt/hway-agent/VERSION \
+           /var/lib/highway/version /var/lib/highway/VERSION /etc/highway/version \
+           /opt/highway/VERSION /var/lib/hw-os/version /etc/hway/version; do
     [[ -r $f ]] || continue
     readval v "$f" || continue
     v=${v//[[:space:]]/}
@@ -205,7 +211,6 @@ hw_units() {
 
   HW_UNITS=() HW_STATE=() HW_SUB=() HW_RESTARTS=() HW_MEM=() HW_SINCE=()
   HW_ACTIVE=0 HW_FAILED=0
-  local newpid=0
   local unit rest
   while read -r unit rest; do
     case $unit in
@@ -226,21 +231,25 @@ hw_units() {
         NRestarts) HW_RESTARTS[$u]=$v ;;
         MemoryCurrent) HW_MEM[$u]=$v ;;
         ExecMainStartTimestampMonotonic) HW_SINCE[$u]=$v ;;
-        MainPID) [[ $v =~ ^[0-9]+$ ]] && ((v > 0)) && ((newpid == 0)) && newpid=$v ;;
       esac
     done < <(systemctl show -p ActiveState -p SubState -p NRestarts -p MemoryCurrent \
-      -p ExecMainStartTimestampMonotonic -p MainPID "$u" 2>/dev/null)
+      -p ExecMainStartTimestampMonotonic "$u" 2>/dev/null)
     case ${HW_STATE[$u]:-} in
       active) ((HW_ACTIVE++)) ;;
       failed) ((HW_FAILED++)) ;;
     esac
   done
-  # Adopt systemd's pid when it differs: after a restart the old pid is gone and
-  # the CPU baseline that went with it is meaningless.
-  if ((newpid > 0 && newpid != HW_PID)); then
-    HW_PID=$newpid
-    _HW_PREV=()
-  fi
+  # Which of those units is the node itself is a ranked decision, not "whichever
+  # one systemd happened to list first". That heuristic is what reported a
+  # 3.8 MiB shell as the node process on a real relayer: `systemctl list-units`
+  # is alphabetical, so hway-monitor.service was seen before hway-relayer.service
+  # and its MainPID won. See hw_main_pid.
+  local prevpid=$HW_PID
+  HW_PID=0
+  hw_main_pid || HW_PID=$prevpid
+  # A different pid means the CPU baseline that went with the old one is
+  # meaningless -- after a restart it would read as a huge burst.
+  ((HW_PID != prevpid)) && _HW_PREV=()
   return 0
 }
 
@@ -251,29 +260,72 @@ hw_units() {
 # may be started by hand, or by a unit outside our patterns).
 declare -A _HW_PREV=()
 _HW_SCAN_LAST=0
+# The node's own service knows its main pid. Tried before any /proc walk.
+#
+# Read-only: `systemctl show` cannot change a unit's state. The unit names are
+# ranked so the relayer wins over its sidecars -- on a real relay node
+# hway-monitor, hway-otel-agent and nebula-guard are all active too, and
+# reporting a 10 MiB sidecar as "the node process" is worse than reporting
+# nothing.
+HW_NODE_UNIT=''
+hw_main_pid() {
+  HW_NODE_UNIT=''
+  ((HW_UNIT_COUNT > 0)) || return 1
+  have systemctl || return 1
+  local rank u pid
+  for rank in 'hway-relayer.service' 'highway.service' 'hw-os.service' \
+              'hway-node.service' 'hway-monitor.service'; do
+    for u in "${HW_UNITS[@]}"; do
+      [[ $u == "$rank" ]] || continue
+      [[ ${HW_STATE[$u]:-} == active ]] || continue
+      pid=$(systemctl show -p MainPID --value "$u" 2>/dev/null) || pid=''
+      [[ $pid =~ ^[0-9]+$ ]] && ((pid > 1)) || continue
+      [[ -r $HYN_PROC/$pid/stat ]] || continue
+      HW_PID=$pid
+      HW_NODE_UNIT=$u
+      return 0
+    done
+  done
+  return 1
+}
+
 hw_process() {
   local ms=$1 d pid comm line rest tail total dt now=${EPOCHSECONDS:-0}
   local -a f=()
-  # Validate the pid we think we have before trusting it.
   if ((HW_PID > 0)) && [[ ! -r $HYN_PROC/$HW_PID/stat ]]; then
     HW_PID=0
     _HW_PREV=()
   fi
   if ((HW_PID == 0)); then
-    # Scanning every /proc entry is the expensive path, so rate-limit it. A node
-    # that is genuinely down should not cost a full process walk every second.
-    ((_HW_SCAN_LAST > 0 && now - _HW_SCAN_LAST < 10)) && { HW_RSS=0 HW_CPU=0 HW_THR=0 HW_FDS=0 HW_UPTIME=0; return 1; }
-    _HW_SCAN_LAST=$now
-    for d in "$HYN_PROC"/[0-9]*; do
-      readval comm "$d/comm" || continue
-      [[ $comm == highway || $comm == hw-os ]] || continue
-      HW_PID=${d##*/}
-      break
-    done
+    # Ask systemd first. The unit that runs the node knows its own main pid
+    # exactly, which is both cheaper than walking /proc and correct in a case a
+    # comm scan gets wrong: /proc/<pid>/comm is capped at 15 characters by the
+    # kernel, so hway-relayer-supervise appears as "hway-relayer-su", and a scan
+    # matching the old fixed names picked up nebula-guard instead -- reporting
+    # 11 MiB of RSS for a process actually holding 1.5 GiB.
+    hw_main_pid
+    if ((HW_PID == 0)); then
+      # Scanning every /proc entry is the expensive path, so rate-limit it. A node
+      # that is genuinely down should not cost a full process walk every second.
+      ((_HW_SCAN_LAST > 0 && now - _HW_SCAN_LAST < 10)) && { HW_RSS=0 HW_CPU=0 HW_THR=0 HW_FDS=0 HW_UPTIME=0; return 1; }
+      _HW_SCAN_LAST=$now
+      for d in "$HYN_PROC"/[0-9]*; do
+        readval comm "$d/comm" || continue
+        # Prefix matches, for the 15-character cap above.
+        case $comm in
+          highway* | hw-os* | hway-relayer* | hway-node*) ;;
+          *) continue ;;
+        esac
+        HW_PID=${d##*/}
+        break
+      done
+    fi
   fi
   ((HW_PID == 0)) && { HW_RSS=0 HW_CPU=0 HW_THR=0 HW_FDS=0 HW_UPTIME=0; return 1; }
 
-  read -r line <"$HYN_PROC/$HW_PID/stat" 2>/dev/null || { HW_PID=0; return 1; }
+  # 2>/dev/null first: see the note in proc_sample. The node restarting between
+  # the pid lookup and this read is exactly the case worth handling quietly.
+  read -r line 2>/dev/null <"$HYN_PROC/$HW_PID/stat" || { HW_PID=0; return 1; }
   # Escaped parens: extglob makes an unescaped "*(" an extglob group.
   rest=${line#*\(}
   tail=${rest##*\)}

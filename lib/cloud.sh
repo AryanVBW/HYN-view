@@ -509,7 +509,6 @@ cloud_ingest_collected() {
     CLOUD_INGESTED=1
     printf '%s\tok\n' "${EPOCHSECONDS:-0}" >"$f" 2>/dev/null
     ((quiet)) || printf 'hyn: pushed to %s\n' "$(cloud_url)"
-    cloud_notify_flush 1
     return 0
   fi
   case $CLOUD_LAST_ERR in
@@ -536,6 +535,9 @@ CLOUD_COMMAND_SYNCED=0
 CLOUD_COMMAND_ID=''
 CLOUD_COMMAND_TARGET=''
 CLOUD_INGESTED=0
+# Set only by cloud_run_pending, so cloud_command_execute knows it is already the
+# unsandboxed unit and must not hand the command onwards.
+CLOUD_IN_MAINTENANCE=0
 
 cloud_command_report() {
   local status=$1 stage=$2 message=$3 target=${4:-} result=${5:-}
@@ -564,6 +566,100 @@ cloud_update_progress() {
   cloud_command_report running "$stage" "$message" "$CLOUD_COMMAND_TARGET" ''
 }
 
+cloud_pending_file() {
+  state_dir_v
+  printf '%s/pending-command' "$STATE_DIR"
+}
+
+# Can this process actually write what an install needs?
+#
+# The managed units now have full filesystem access, so on a correctly installed
+# box this is true everywhere. It is still asked, because it is the difference
+# between "delegating for good reasons" and "cannot do this at all" -- a genuinely
+# read-only root, or a non-root invocation, has to be reported as such rather
+# than silently queued for ever.
+cloud_can_install() {
+  is_root || return 1
+  [[ -w $HYN_UNIT_DIR ]] || return 1
+  return 0
+}
+
+# Should this process delegate the install to hyn-update.service instead of
+# doing it here?
+#
+# Yes when the caller is the scheduled check-in, for two reasons that survive the
+# units having full write access: the check-in fires every sixty seconds and must
+# not be the process holding an npm install open, and its MemoryMax is sized for
+# bash rather than for node. No when an operator is watching a terminal -- they
+# asked for the install and should see it happen.
+cloud_should_handoff() {
+  ((CLOUD_IN_MAINTENANCE)) && return 1
+  have systemctl || return 1
+  systemctl cat hyn-update.service >/dev/null 2>&1 || return 1
+  # An interactive invocation runs in place so its output is not swallowed by
+  # the journal of a unit the operator did not ask about.
+  [[ -t 1 ]] && return 1
+  return 0
+}
+
+# Hand a claimed command to hyn-update.service. --no-block so a 60s npm install
+# does not hold the minute check-in; the 20-minute database lease keeps the row
+# claimed meanwhile.
+#
+# ponytail: one pending slot, last write wins. A second command arriving during
+# an install overwrites the file rather than queueing. The database only ever has
+# one active command per node per kind, and a lost claim is re-claimed on the
+# next check-in once its lease expires, so a queue would be state to keep
+# consistent for no behaviour change.
+cloud_handoff_command() {
+  local id=$1 action=$2 f
+  have systemctl || return 1
+  systemctl cat hyn-update.service >/dev/null 2>&1 || return 1
+  state_dir_v
+  [[ -d $STATE_DIR ]] || mkdir -p "$STATE_DIR" 2>/dev/null || return 1
+  f=$(cloud_pending_file)
+  printf '%s\t%s\n' "$id" "$action" >"$f.tmp" 2>/dev/null || return 1
+  mv -f "$f.tmp" "$f" 2>/dev/null || return 1
+  if ! systemctl start --no-block hyn-update.service >/dev/null 2>&1; then
+    rm -f -- "$f"
+    return 1
+  fi
+  return 0
+}
+
+# Runs whatever hyn-update.service was started for. Entry point for
+# `hyn cloud run-command`.
+cloud_run_pending() {
+  local quiet=${1:-0} f id='' action=''
+  f=$(cloud_pending_file)
+  if [[ ! -r $f ]]; then
+    ((quiet)) || printf 'hyn: no maintenance command is pending\n'
+    return 0
+  fi
+  IFS=$'\t' read -r id action <"$f"
+  # Consumed before it runs, not after: a command that crashes the installer
+  # must not be retried in a loop by every subsequent start of this unit. The
+  # portal lease re-offers it if it really was lost.
+  rm -f -- "$f"
+  case $action in
+    update | sync) ;;
+    *) warn "unknown pending maintenance action: ${action:-none}"; return 1 ;;
+  esac
+  cloud_configured && cloud_linked || {
+    warn 'this machine is not linked to the portal; nothing to run'
+    return 1
+  }
+  CLOUD_COMMAND_ID=$id
+  CLOUD_COMMAND_TARGET=''
+  CLOUD_COMMAND_CLAIMED=1
+  # Already the maintenance unit. Without this, a machine whose root really is
+  # read-only would hand the command to hyn-update.service, which would find it
+  # still cannot install and hand it straight back -- a restart loop on a unit
+  # that runs as root.
+  CLOUD_IN_MAINTENANCE=1
+  cloud_command_execute "$action" "$quiet"
+}
+
 # Claim at most one command per check-in. Update commands are idempotent: a
 # lease-expired command may be reclaimed after a crash, and installing the same
 # npm release twice still converges on the same package and systemd units.
@@ -574,6 +670,9 @@ cloud_command_poll() {
   CLOUD_COMMAND_SYNCED=0
   CLOUD_COMMAND_ID=''
   CLOUD_COMMAND_TARGET=''
+  # This path is only ever reached from a check-in, never from the maintenance
+  # unit, so a handoff is allowed from here.
+  CLOUD_IN_MAINTENANCE=0
 
   token=$(secret cloud_node_token)
   body="{\"p_node_token\": \"$(_jstr "$token")\"}"
@@ -592,6 +691,14 @@ cloud_command_poll() {
 
   CLOUD_COMMAND_CLAIMED=1
   CLOUD_COMMAND_ID=$id
+  cloud_command_execute "$action" "$quiet"
+}
+
+# The command body itself, reached either straight from the check-in or from
+# hyn-update.service after a handoff.
+cloud_command_execute() {
+  local action=$1 quiet=${2:-0}
+
   if [[ $action == sync ]]; then
     cloud_command_report running collecting 'Collecting a complete system snapshot' '' '' || true
     cloud_collect_full
@@ -607,6 +714,26 @@ cloud_command_poll() {
       'Synchronization completed and the portal accepted the current reading' '' "$HYN_VERSION" || true
     CLOUD_COMMAND_SYNCED=1
     return 0
+  fi
+
+  # A scheduled check-in delegates the install; an operator at a terminal does
+  # it here. Either way the portal is told which happened, so a command never
+  # sits at "accepted" with nothing to read.
+  if cloud_should_handoff; then
+    if cloud_handoff_command "$CLOUD_COMMAND_ID" update; then
+      cloud_command_report running installing \
+        'Handed the update to the hyn-view maintenance service' '' '' || true
+      ((quiet)) || printf 'hyn: update handed to hyn-update.service\n'
+      return 0
+    fi
+    ((quiet)) || warn 'could not start hyn-update.service; installing here instead'
+  fi
+  if ! cloud_can_install; then
+    cloud_command_report failed failed \
+      "this machine cannot install packages: $HYN_UNIT_DIR is not writable$(is_root || printf ' and this is not running as root'). Run \`sudo hyn doctor --fix\` on the server, then request the update again" \
+      '' "$HYN_VERSION" || true
+    ((quiet)) || warn "cannot install from here: $HYN_UNIT_DIR is not writable"
+    return 1
   fi
 
   if ! cloud_command_report running checking 'Checking the npm registry for the newest hyn-view release' '' ''; then
@@ -670,21 +797,41 @@ cloud_push() {
   # new values affect this same cycle. Only the narrow portal allowlist wins;
   # endpoints, credentials, privacy choices and all other local settings remain
   # controlled by the root-owned files.
+  #
+  # This same RPC is what records the durable heartbeat, so one flaky response
+  # is worth a second attempt: the portal calls a machine quiet after three
+  # missed minutes, and a single dropped packet should not spend one of them.
+  local pulled=0
+  CLOUD_CONFIG_CHANGED=0
   if cloud_config_pull 1; then
-    cfg_load
-    # A portal command is explicit and therefore takes priority over the
-    # detached automatic updater. With no command, a policy change to
-    # auto_update still takes effect in this same check-in.
-    cloud_command_poll 1 || true
-    # Sync performs its own complete collection and ingest. Do not immediately
-    # send a duplicate snapshot from the ordinary scheduled path.
-    ((CLOUD_COMMAND_SYNCED)) && return 0
-    ((CLOUD_COMMAND_CLAIMED)) || update_startup
+    pulled=1
+  else
+    sleep 2
+    cloud_config_pull 1 && pulled=1
   fi
+  ((pulled)) && cfg_load
+
+  # Polled whether or not the settings fetch succeeded. A queued update is an
+  # explicit request from the operator; making it wait on an unrelated RPC is
+  # how a machine ends up sitting at "waiting for the machine to check in" while
+  # it is in fact checking in every minute.
+  cloud_command_poll 1 || true
+  # Sync (and a completed in-process update) performs its own complete
+  # collection and ingest. Do not immediately send a duplicate snapshot from the
+  # ordinary scheduled path.
+  ((CLOUD_COMMAND_SYNCED)) && return 0
+  # A portal command is explicit and therefore takes priority over the detached
+  # automatic updater. With no command, a policy change to auto_update still
+  # takes effect in this same check-in.
+  ((CLOUD_COMMAND_CLAIMED)) || update_startup
 
   # The timer wakes every minute so a dashboard change is picked up quickly.
-  # Expensive collection and ingestion still happen only at cloud_push_min.
-  if ((respect_interval && CLOUD_COMMAND_UPDATED == 0)); then
+  # Expensive collection and ingestion still happen only at cloud_push_min --
+  # unless something happened this cycle that the portal should see now: a
+  # completed update, or a settings change whose effect is only visible in a
+  # reading. Waiting up to cloud_push_min to show the result of an action someone
+  # just took is indistinguishable from the action not working.
+  if ((respect_interval && CLOUD_COMMAND_UPDATED == 0 && CLOUD_CONFIG_CHANGED == 0)); then
     local prior_ts='' prior_status='' prior_error='' interval=${CFG[cloud_push_min]:-10}
     [[ $interval =~ ^[1-9][0-9]*$ ]] || interval=10
     local prior_stamp
@@ -827,12 +974,8 @@ cloud_link() {
   secret_set cloud_node_token "$node_token" || die 'could not write the node token to secrets'
   config_set cloud_node_id "$node_id" || return 1
   config_set cloud_enabled on || return 1
-  # The portal is the managed delivery plane. Fresh installs need no local
-  # provider setup, while an operator's explicit smtp/resend/webhook choice is
-  # never overwritten.
-  if [[ -z ${CFG[notify_channels]:-} ]]; then
-    config_set notify_channels web || return 1
-  fi
+  # Nothing to switch on: being linked IS having delivery. There is no local
+  # channel list to seed and no provider to configure.
 
   printf '\n'
   printf '  Linked. This node is "%s" (%s).\n' "${node_name:-$HOSTNAME_S}" "$node_id"
@@ -913,6 +1056,10 @@ cloud_template_write() {
 }
 
 CLOUD_NODE_STATUS=''
+# Set by cloud_config_pull: 1 when the pulled settings differed from the cached
+# ones. cloud_push reads it to send a reading in the same cycle, so a change made
+# in the portal is visible on the portal.
+CLOUD_CONFIG_CHANGED=0
 cloud_config_pull() {
   local quiet=${1:-0}
   cloud_configured || { ((quiet)) || warn 'not configured; run: sudo hyn link'; return 1; }
@@ -1008,84 +1155,31 @@ cloud_config_pull() {
     printf '# Written by `hyn config pull`. Do not edit: it is overwritten.\n'
     printf '# Edit these settings in the web portal instead.\n'
     ((${#lines[@]})) && printf '%s\n' "${lines[@]}"
-  } >"$tmp" && mv -f "$tmp" "$f" || { warn "cannot write $f"; return 1; }
+  } >"$tmp" || { warn "cannot write $f"; return 1; }
 
+  # Did anything actually change? The answer decides whether this check-in also
+  # sends a reading. Without it, a threshold edited in the portal is accepted
+  # within a minute but its effect -- a rule that now fires, a chart that now has
+  # a different band -- is invisible until the next full push, up to
+  # cloud_push_min later. Someone who changes a setting and watches the page
+  # reasonably concludes it did not work.
+  CLOUD_CONFIG_CHANGED=0
+  if [[ ! -r $f ]] || ! cmp -s "$tmp" "$f"; then
+    CLOUD_CONFIG_CHANGED=1
+  fi
+  mv -f "$tmp" "$f" || { warn "cannot write $f"; return 1; }
+
+  # The whole file is rewritten every pull rather than merged, so a setting the
+  # portal stops sending goes back to the agent's own default instead of being
+  # pinned to whatever it was last set to. Central management should be able to
+  # release a setting as well as take it.
   if ((quiet == 0)); then
-    printf 'hyn: pulled %d setting(s) from the portal\n' "${#lines[@]}"
+    printf 'hyn: pulled %d setting(s) from the portal%s\n' "${#lines[@]}" \
+      "$( ((CLOUD_CONFIG_CHANGED)) && printf ' (changed)' || printf ' (no change)')"
     [[ -n $status && $status != active ]] &&
       printf 'hyn: this node is %s%s\n' "$status" "${reason:+ ($reason)}"
   fi
   return 0
-}
-
-# ---------------------------------------------------------------------------
-# report notification deliveries
-# ---------------------------------------------------------------------------
-# The portal shows how many alerts went out and which failed, which it can only
-# know if the box tells it. Appended locally by the notify layer, drained here.
-cloud_notify_queue() {
-  state_dir_v
-  printf '%s/cloud-notify-queue' "$STATE_DIR"
-}
-
-# cloud_notify_record <kind> <target> <severity> <subject> <status> <error> <category>
-# Appends one delivery attempt as a JSON object, one per line. Called from the
-# notify path, so it must never fail loudly enough to break sending an alert.
-cloud_notify_record() {
-  cloud_linked || return 0
-  local q ts
-  q=$(cloud_notify_queue)
-  printf -v ts '%(%Y-%m-%dT%H:%M:%S%z)T' -1
-  {
-    printf '{"ts": "%s"' "$ts"
-    printf ', "kind": "%s"' "$(_jstr "${1:-unknown}")"
-    printf ', "target": "%s"' "$(_jstr "${2:-}")"
-    printf ', "severity": "%s"' "$(_jstr "${3:-info}")"
-    printf ', "subject": "%s"' "$(_jstr "${4:-}")"
-    printf ', "status": "%s"' "$(_jstr "${5:-failed}")"
-    printf ', "error": "%s"' "$(_jstr "${6:-}")"
-    printf ', "category": "%s"}\n' "$(_jstr "${7:-other}")"
-  } >>"$q" 2>/dev/null || true
-  return 0
-}
-
-cloud_notify_flush() {
-  local quiet=${1:-0} q
-  q=$(cloud_notify_queue)
-  [[ -s $q ]] || return 0
-  cloud_configured && cloud_linked || return 1
-
-  # Rotate first: if the POST fails we put the file back, but a delivery that
-  # arrives twice is better than one that vanishes because a new alert was
-  # appended mid-flight.
-  local work="$q.sending"
-  mv -f "$q" "$work" 2>/dev/null || return 1
-
-  local events='' line first=1
-  while IFS= read -r line; do
-    [[ -n $line ]] || continue
-    ((first)) || events+=', '
-    first=0
-    events+=$line
-  done <"$work"
-
-  [[ -n $events ]] || { rm -f "$work"; return 0; }
-
-  local token body
-  token=$(secret cloud_node_token)
-  body="{\"p_node_token\": \"$(_jstr "$token")\", \"p_events\": [$events]}"
-  if _cloud_rpc hyn_report_notification "$body"; then
-    rm -f "$work"
-    ((quiet)) || printf 'hyn: reported notification deliveries\n'
-    return 0
-  fi
-  # Put them back at the front of the queue for the next run.
-  if [[ -s $q ]]; then
-    cat "$q" >>"$work" 2>/dev/null
-  fi
-  mv -f "$work" "$q" 2>/dev/null
-  ((quiet)) || warn "could not report deliveries: $CLOUD_LAST_ERR"
-  return 1
 }
 
 cloud_unlink() {
@@ -1135,10 +1229,22 @@ cloud_status() {
   else
     printf 'config   none pulled yet (run: hyn config pull)\n'
   fi
-  local q
-  q=$(cloud_notify_queue)
-  if [[ -s $q ]]; then
-    printf 'queued   %s notification(s) waiting to be reported\n' "$(wc -l <"$q" | tr -d ' ')"
+  # The two things that decide whether a portal "Update machine" request can
+  # ever succeed, stated here so diagnosing one does not need `systemctl cat`.
+  if have systemctl; then
+    if systemctl cat hyn-update.service >/dev/null 2>&1; then
+      printf 'updater  hyn-update.service installed (started on demand)\n'
+    else
+      printf 'updater  MISSING — portal updates cannot install: sudo hyn doctor --fix\n'
+    fi
+  fi
+  local pf
+  pf=$(cloud_pending_file)
+  if [[ -r $pf ]]; then
+    local pid='' pact=''
+    IFS=$'\t' read -r pid pact <"$pf"
+    printf 'pending  %s handed to hyn-update.service%s\n' \
+      "${pact:-unknown}" "${pid:+ (command ${pid:0:8})}"
   fi
   return 0
 }

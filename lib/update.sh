@@ -21,6 +21,19 @@
 
 UPD_LATEST='' UPD_AVAILABLE=0 UPD_CHECKED=0 UPD_STATE='' UPD_LAST_ERR=''
 UPD_REGISTRY='https://registry.npmjs.org'
+
+# The registry must be reached over TLS: this document decides which package
+# version a root process is about to install, so a plaintext answer is an
+# invitation to install someone else's build. Loopback is the one exception, for
+# the same reason lib/cloud.sh makes it -- a request that never leaves the machine
+# cannot be intercepted on the wire, and it is how test/update-workflow.sh drives
+# the real checker against a mock registry.
+_upd_proto() {
+  case $UPD_REGISTRY in
+    http://127.0.0.1* | http://localhost* | 'http://[::1]'*) printf '=http' ;;
+    *) printf '=https' ;;
+  esac
+}
 UPD_PROGRESS_HOOK=''
 
 # A portal-triggered update installs through the same path as an unattended
@@ -31,6 +44,33 @@ update_emit_progress() {
   if [[ -n $UPD_PROGRESS_HOOK ]] && declare -F "$UPD_PROGRESS_HOOK" >/dev/null 2>&1; then
     "$UPD_PROGRESS_HOOK" "$stage" "$message" || true
   fi
+}
+
+# dist-tags.latest out of the abbreviated registry document, into UPD_PARSED.
+#
+# Taking a JSON parser dependency for one field would be absurd for a tool whose
+# selling point is having none, but the hand-rolled version has to be more careful
+# than it first looks. The obvious `${body#*\"latest\":\"}` assumes the registry
+# emits no space after the colon. That is true of npm today and is not a promise
+# anyone made: the day it serialises `"latest": "1.9.0"` instead, every installed
+# agent stops seeing releases, for ever, and the fix cannot be delivered because
+# delivering it needs the thing that broke. So whitespace is skipped explicitly.
+UPD_PARSED=''
+_upd_parse_latest() {
+  local body=$1 m
+  UPD_PARSED=''
+  [[ $body == *'"latest"'* ]] || return 1
+  m=${body#*\"latest\"}
+  while [[ $m == [[:space:]]* ]]; do m=${m#?}; done
+  [[ $m == :* ]] || return 1
+  m=${m#:}
+  while [[ $m == [[:space:]]* ]]; do m=${m#?}; done
+  [[ $m == \"* ]] || return 1
+  m=${m#\"}
+  m=${m%%\"*}
+  [[ $m =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$ ]] || { UPD_PARSED=$m; return 1; }
+  UPD_PARSED=$m
+  return 0
 }
 
 update_cache_file() {
@@ -73,18 +113,12 @@ update_check_async() {
   printf '%s\n%s\n' "$now" "$UPD_LATEST" >"$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f"
   {
     local body ver
-    body=$(curl -fsSL --max-time 8 --proto '=https' \
+    body=$(curl -fsSL --max-time 8 --proto "$(_upd_proto)" \
       -H 'Accept: application/vnd.npm.install-v1+json' \
       "$UPD_REGISTRY/$HYN_PKG" 2>/dev/null) || body=''
-    # Pull dist-tags.latest out of a flat, machine-generated document. Taking a
-    # JSON parser dependency for one field would be absurd for a tool whose
-    # entire selling point is having none.
-    if [[ $body == *'"latest"'* ]]; then
-      ver=${body#*\"latest\":\"}
-      ver=${ver%%\"*}
-      if [[ $ver =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$ ]]; then
-        printf '%s\n%s\n' "${EPOCHSECONDS:-0}" "$ver" >"$f.tmp2" && mv -f "$f.tmp2" "$f"
-      fi
+    if _upd_parse_latest "$body"; then
+      ver=$UPD_PARSED
+      printf '%s\n%s\n' "${EPOCHSECONDS:-0}" "$ver" >"$f.tmp2" && mv -f "$f.tmp2" "$f"
     fi
   } &
   _UPD_PID=$!
@@ -100,25 +134,23 @@ update_check_now() {
     return 1
   }
   local body ver f
-  body=$(curl -fsSL --max-time 12 --proto '=https' \
+  body=$(curl -fsSL --max-time 12 --proto "$(_upd_proto)" \
     -H 'Accept: application/vnd.npm.install-v1+json' \
     "$UPD_REGISTRY/$HYN_PKG" 2>/dev/null) || {
     UPD_LAST_ERR="could not reach $UPD_REGISTRY"
     warn "$UPD_LAST_ERR"
     return 1
   }
-  [[ $body == *'"latest"'* ]] || {
-    UPD_LAST_ERR='unexpected registry response'
+  if ! _upd_parse_latest "$body"; then
+    if [[ -n $UPD_PARSED ]]; then
+      UPD_LAST_ERR="bad version from registry: ${UPD_PARSED:0:40}"
+    else
+      UPD_LAST_ERR='unexpected registry response'
+    fi
     warn "$UPD_LAST_ERR"
     return 1
-  }
-  ver=${body#*\"latest\":\"}
-  ver=${ver%%\"*}
-  [[ $ver =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$ ]] || {
-    UPD_LAST_ERR="bad version from registry: $ver"
-    warn "$UPD_LAST_ERR"
-    return 1
-  }
+  fi
+  ver=$UPD_PARSED
   UPD_LATEST=$ver
   UPD_CHECKED=${EPOCHSECONDS:-0}
   UPD_AVAILABLE=0
@@ -253,10 +285,19 @@ update_startup() {
     install)
       update_read
       if ((UPD_AVAILABLE)); then
-        # Detached: a launch must not wait on a package install, and the running
-        # process keeps using the code it already loaded either way.
-        { update_apply 0 >/dev/null 2>&1; } &
-        UPD_STATE='installing'
+        # From a scheduled unit, hand the install to hyn-update.service: that
+        # unit has the memory headroom node needs and the long timeout an npm
+        # install needs, and delegating keeps the sixty-second check-in short.
+        if declare -F cloud_should_handoff >/dev/null 2>&1 && cloud_should_handoff &&
+           declare -F cloud_handoff_command >/dev/null 2>&1 &&
+           cloud_handoff_command '' update; then
+          UPD_STATE='installing'
+        else
+          # Detached: a launch must not wait on a package install, and the
+          # running process keeps using the code it already loaded either way.
+          { update_apply 0 >/dev/null 2>&1; } &
+          UPD_STATE='installing'
+        fi
       fi
       update_check_async
       ;;

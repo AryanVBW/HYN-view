@@ -11,34 +11,52 @@
 # This never touches anything belonging to Highway.
 
 SVC_NAME='hyn-speedtest'
-SVC_PATH="/etc/systemd/system/$SVC_NAME.service"
-TMR_PATH="/etc/systemd/system/$SVC_NAME.timer"
+SVC_PATH="$HYN_UNIT_DIR/$SVC_NAME.service"
+TMR_PATH="$HYN_UNIT_DIR/$SVC_NAME.timer"
 
-# Shared hardening for every timer unit. These are monitoring one-shots: they
-# read /proc, write one state directory, and talk to one API. Everything else
-# root can normally do is taken away.
+# What the managed units are allowed to do, and what they are held back from.
+#
+# hyn has FULL WRITE ACCESS to the filesystem. That is deliberate and it is a
+# reversal: these units used to run under ProtectSystem=strict with
+# ReadWritePaths limited to one state directory, which read well in a README and
+# in practice meant the agent could not install its own updates, could not
+# rewrite its own units, and could not repair itself -- every one of those needs
+# /usr and /etc. A monitor that cannot fix itself on an unattended box is worse
+# than one with a wide mount namespace.
+#
+# What is kept is the part that actually protects the node, which was never the
+# mount namespace:
+#
+#   * CPUWeight/IOWeight far below the default 100, plus Nice and idle I/O, so
+#     the relayer always wins a contended scheduler. Monitoring must never be
+#     the reason a validator misses a block.
+#   * MemoryMax caps the agent well below anything that could pressure a relayer
+#     holding ~1.5 GiB, and OOMScoreAdjust makes the kernel choose hyn first if
+#     it ever has to choose. Bash needs ~12 MiB; 256 MiB is already generous.
+#   * TimeoutStartSec on every unit, so a wedged collector is reaped instead of
+#     accumulating.
+#
+# None of the dropped options ever prevented hyn from stopping another service.
+# Stopping a unit takes a systemctl call, which is a property of the code, not of
+# a sandbox -- so that guarantee lives in the code and in test/selfcheck.sh,
+# which greps every source file for a systemctl verb aimed at anything that is
+# not hyn's own unit. That check is the real protection and it cannot regress
+# quietly.
 _unit_hardening() {
   cat <<EOF
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=$HYN_VAR
-PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-RestrictSUIDSGID=yes
-RestrictRealtime=yes
-RestrictNamespaces=yes
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-NoNewPrivileges=yes
+# Full filesystem write access: the agent installs its own updates and rewrites
+# its own units. See the comment above _unit_hardening in lib/setup.sh.
+# Always yield to the node. These are the limits that matter on a relay box.
+CPUWeight=20
+IOWeight=20
+MemoryMax=256M
+OOMScoreAdjust=500
 EOF
 }
 
-# generic_unit <description> <exec> <extra-service-lines>
+# generic_unit <description> <exec> <extra-service-lines> <timeout-seconds>
 _generic_service() {
-  local desc=$1 exec=$2 extra=${3:-}
+  local desc=$1 exec=$2 extra=${3:-} timeout=${4:-180}
   cat <<EOF
 [Unit]
 Description=$desc
@@ -49,10 +67,15 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=$exec
+# HOME is not set by systemd for a system service without User=, and this tool
+# runs under `set -u`. lib/core.sh now defaults it, but it is stated here too so
+# a unit written by this release keeps working if the package is ever rolled back
+# to a build without that fix.
+Environment=HOME=/root
 Nice=15
 IOSchedulingClass=idle
 CPUSchedulingPolicy=batch
-TimeoutStartSec=180
+TimeoutStartSec=$timeout
 $(_unit_hardening)
 $extra
 
@@ -61,8 +84,48 @@ WantedBy=multi-user.target
 EOF
 }
 
+# The maintenance unit: a package install, `hyn setup`, and a verification push.
+#
+# Since every unit now has full write access this no longer exists to escape a
+# sandbox. It stays a separate unit for a different reason that is just as real:
+# a check-in that fires every sixty seconds must not be the process holding an
+# npm install open for a minute, and MemoryMax=256M is correct for a bash
+# collector but too tight for node. So the install gets its own unit, its own
+# memory limit and its own long timeout, and the check-in hands off and returns.
+#
+# No [Install] section on purpose. It is started by name, never enabled.
+_maintenance_service() {
+  local exec=$1
+  cat <<EOF
+[Unit]
+Description=hyn-view portal maintenance command
+Documentation=https://github.com/AryanVBW/HYN-view
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$exec
+Environment=HOME=/root
+# Politeness, not restriction: npm may run for a minute and must not do it at
+# the expense of the node.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+CPUWeight=30
+IOWeight=30
+# node needs considerably more than the collector's 256M.
+MemoryMax=1G
+OOMScoreAdjust=500
+# npm install, then hyn setup, then a verification push. Generous, because a
+# slow registry is normal; bounded, because a wedged update must not hold the
+# unit for ever.
+TimeoutStartSec=900
+EOF
+}
+
 _generic_timer() {
-  local desc=$1 spec=$2 unit=$3 jitter=${4:-60} extra=${5:-}
+  local desc=$1 spec=$2 unit=$3 jitter=${4:-60} accuracy=${5:-30s} extra=${6:-}
   cat <<EOF
 [Unit]
 Description=$desc
@@ -71,7 +134,7 @@ Documentation=https://github.com/AryanVBW/HYN-view
 [Timer]
 $spec
 RandomizedDelaySec=$jitter
-AccuracySec=30s
+AccuracySec=$accuracy
 Persistent=true
 Unit=$unit
 $extra
@@ -115,6 +178,14 @@ ascii=${CFG[ascii]}
 panels=${CFG[panels]}
 proc_rows=${CFG[proc_rows]}
 proc_sort=${CFG[proc_sort]}
+# Mount points kept out of the disk panel and out of disk alerts. Snap mounts are
+# read-only squashfs and therefore permanently 100% full, so a box with twenty
+# snaps would otherwise show twenty filesystems and fire twenty disk-full alerts
+# that could never clear.
+hide_mount=${CFG[hide_mount]}
+# Keep more history for the network graph than the visible width, so widening the
+# terminal does not blank the plot.
+net_history_detail=${CFG[net_history_detail]}
 
 # --- network -----------------------------------------------------------------
 # auto follows the default route, which is almost always what you want
@@ -159,22 +230,20 @@ highway_units=${CFG[highway_units]}
 highway_version_probe=${CFG[highway_version_probe]}
 
 # --- notifications -----------------------------------------------------------
-# Comma separated, tried in order, all of them are attempted:
-#   resend | brevo | smtp | telegram | ntfy | webhook | stdout
-# API keys and tokens do NOT go here. They live in $HYN_ETC/secrets (mode 0600).
-# Run \`sudo hyn setup\` for the guided version of all of this.
-notify_channels=${CFG[notify_channels]}
-notify_to=${CFG[notify_to]}
-notify_from=${CFG[notify_from]}
-notify_from_name=${CFG[notify_from_name]}
-# Hard backstop against a flapping condition burning a provider's daily quota.
+# There is nothing to configure here. Recipients, the provider account, the
+# schedule and the message templates all live in the web portal; pair this machine
+# with \`sudo hyn link\` and set them on its Account page. No API key, sender
+# address or mailing list is stored on this server.
+#
+# Hard backstop against a flapping condition burning the portal's provider quota.
+# Also settable from the portal.
 notify_max_per_day=${CFG[notify_max_per_day]}
 notify_timeout=${CFG[notify_timeout]}
-smtp_host=${CFG[smtp_host]}
-smtp_port=${CFG[smtp_port]}
-telegram_chat_id=${CFG[telegram_chat_id]}
-ntfy_topic=${CFG[ntfy_topic]}
-ntfy_server=${CFG[ntfy_server]}
+# off (default). Set on only to include run-as/session usernames, session source
+# IP addresses and the worst rejected-login address in notifications. That is
+# identity-bearing data: make sure you have a lawful basis before enabling it.
+# The portal cannot set this key; it is local-only on purpose.
+notify_access_details=${CFG[notify_access_details]}
 
 # --- alerting ----------------------------------------------------------------
 alert_enabled=${CFG[alert_enabled]}
@@ -222,7 +291,98 @@ metrics_keep_days=${CFG[metrics_keep_days]}
 # off | check (tell before installing) | install (managed default)
 auto_update=${CFG[auto_update]}
 update_check_hours=${CFG[update_check_hours]}
+
+# --- first run ---------------------------------------------------------------
+# The install configures itself, so nothing is offered on first launch. Set on to
+# be asked instead; \`hyn onboard\` runs the guided setup at any time.
+onboarding=${CFG[onboarding]}
+
+# --- web portal --------------------------------------------------------------
+# cloud_enabled and cloud_node_id are written by \`sudo hyn link\`. The node token
+# itself is the real credential and lives in $HYN_ETC/secrets at 0600, never here.
+cloud_enabled=${CFG[cloud_enabled]}
+cloud_node_id=${CFG[cloud_node_id]}
+# The hosted agent API. Normal installs never change this.
+cloud_api_url=${CFG[cloud_api_url]}
+# Where \`hyn link\` tells you to open a browser. The agent never contacts it.
+cloud_portal_url=${CFG[cloud_portal_url]}
+# Minutes between full portal readings. The heartbeat and settings check stay at
+# one minute regardless. Also settable from the portal, which wins.
+cloud_push_min=${CFG[cloud_push_min]}
+cloud_timeout=${CFG[cloud_timeout]}
+# Self-hosters only: a direct Supabase URL plus its PUBLIC anon key, used instead
+# of the hosted API above. Leave both empty for the normal hosted setup.
+cloud_url=${CFG[cloud_url]}
+cloud_anon_key=${CFG[cloud_anon_key]}
 EOF
+}
+
+# Values that were shipped as defaults, written verbatim into every config file
+# by `hyn setup`, and later found to be wrong. Changing the default in core.sh
+# does nothing for a box that already has one of these on disk, and on an
+# unattended fleet that is every box.
+#
+# Only an EXACT match on a known-bad shipped default is replaced. A value the
+# operator actually chose does not look like one of these, so it is kept -- the
+# config file stays authoritative, which is the same reason the portal is not
+# allowed to write these keys either.
+#
+# Format: key<TAB>stale-value<TAB>corrected-value
+_setup_migrations() {
+  cat <<'EOF'
+highway_units	highway*,hw-*,nebula*,mosaic*	highway*,hway*,hw-*,nebula*,mosaic*
+EOF
+}
+
+# Applies the table above to $HYN_ETC/config in place, and strips settings that
+# no longer exist. Reports what it changed, because a monitoring tool silently
+# editing its own configuration is worse than the stale value.
+setup_migrate_config() {
+  local f="$HYN_ETC/config" key stale new line changed=0 tmp
+  [[ -f $f && -w $f ]] || return 0
+
+  # Retired keys first: the six local email providers and the ping URL are gone,
+  # and their lines are dead weight that would otherwise produce a note on every
+  # launch. Dropped rather than commented out, because a commented-out recipient
+  # address is still a recipient address sitting on the box.
+  local -a keep=()
+  local dropped=0
+  while IFS= read -r line || [[ -n $line ]]; do
+    key=${line%%=*}
+    key=${key//[[:space:]]/}
+    if [[ $line == *=* ]] && _cfg_retired "$key"; then
+      dropped=$((dropped + 1))
+      continue
+    fi
+    keep+=("$line")
+  done <"$f"
+  if ((dropped > 0)); then
+    tmp="$f.mig.$$"
+    printf '%s\n' "${keep[@]}" >"$tmp" || { rm -f -- "$tmp"; warn "could not rewrite $f"; return 1; }
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$f" || { rm -f -- "$tmp"; warn "could not replace $f"; return 1; }
+    printf '  %-34s removed %d retired email setting(s); delivery is the portal'"'"'s\n' \
+      "$f" "$dropped"
+  fi
+  while IFS=$'\t' read -r key stale new; do
+    [[ -n $key ]] || continue
+    grep -qxF "$key=$stale" "$f" 2>/dev/null || continue
+    tmp="$f.mig.$$"
+    while IFS= read -r line || [[ -n $line ]]; do
+      if [[ $line == "$key=$stale" ]]; then
+        printf '%s=%s\n' "$key" "$new"
+      else
+        printf '%s\n' "$line"
+      fi
+    done <"$f" >"$tmp" || { rm -f -- "$tmp"; warn "could not rewrite $f"; return 1; }
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$f" || { rm -f -- "$tmp"; warn "could not replace $f"; return 1; }
+    printf '  %-34s %s -> %s\n' "$key" "$stale" "$new"
+    CFG[$key]=$new
+    changed=1
+  done < <(_setup_migrations)
+  ((changed)) && printf '  %-34s corrected outdated shipped defaults\n' "$f"
+  return 0
 }
 
 setup_run() {
@@ -236,7 +396,6 @@ setup_run() {
     esac
   done
   is_root || die 'setup needs root: sudo hyn setup'
-
   local exe="$HYN_ROOT/bin/hyn"
   [[ -x $exe ]] || die "cannot find my own executable at $exe"
 
@@ -249,6 +408,7 @@ setup_run() {
 
   if [[ -f $HYN_ETC/config ]]; then
     printf '  %-34s kept (already present)\n' "$HYN_ETC/config"
+    setup_migrate_config
   else
     setup_config_template >"$HYN_ETC/config.tmp" && mv -f "$HYN_ETC/config.tmp" "$HYN_ETC/config" \
       || die "cannot write $HYN_ETC/config"
@@ -282,16 +442,13 @@ setup_run() {
     setup_timers "$exe" || integration_ok=0
   fi
 
-  # The wizard runs last, so a failure in it leaves a working install behind.
+  # There is no notification setup left to run. `--wizard` is accepted so an old
+  # script or unit file does not break, and says where the settings went.
   if ((wizard)) && [[ -t 0 && -t 1 ]]; then
-    source "$HYN_LIB/wizard.sh" 2>/dev/null || warn 'could not load the setup wizard'
-    if declare -F wizard_run >/dev/null; then
-      wizard_run || warn 'wizard did not complete; run `sudo hyn setup` again to finish'
-      setup_apply_schedule "$exe" || integration_ok=0
-    fi
-  elif ((wizard)); then
-    printf '\nhyn: not a terminal, so the guided setup was skipped.\n'
-    printf '     run `sudo hyn setup` from a shell to configure notifications.\n'
+    printf '\nhyn: nothing to configure interactively.\n'
+    printf '     delivery is the portal'"'"'s: pair with `sudo hyn link`, then set the\n'
+    printf '     recipient and schedule on its Account page.\n'
+    printf '     for local display and threshold options: hyn onboard\n'
   fi
 
   if ((integration_ok == 0)); then
@@ -323,39 +480,66 @@ setup_timers() {
     "OnCalendar=$cal" "$SVC_NAME.service" 900)"
 
   # Alerts: the one that actually has to be reliable.
-  _write_unit /etc/systemd/system/hyn-alerts.service \
+  _write_unit "$HYN_UNIT_DIR/hyn-alerts.service" \
     "$(_generic_service 'hyn-view alert evaluation' "$exe alerts check --quiet")"
-  _write_unit /etc/systemd/system/hyn-alerts.timer \
+  _write_unit "$HYN_UNIT_DIR/hyn-alerts.timer" \
     "$(_generic_timer 'hyn-view alert evaluation' \
       "OnBootSec=3min"$'\n'"OnUnitActiveSec=${CFG[alert_interval_min]}min" 'hyn-alerts.service' 20)"
 
   # Metric recording for the daily report.
-  _write_unit /etc/systemd/system/hyn-record.service \
+  _write_unit "$HYN_UNIT_DIR/hyn-record.service" \
     "$(_generic_service 'hyn-view metric sampling' "$exe record")"
-  _write_unit /etc/systemd/system/hyn-record.timer \
+  _write_unit "$HYN_UNIT_DIR/hyn-record.timer" \
     "$(_generic_timer 'hyn-view metric sampling' \
       "OnBootSec=2min"$'\n'"OnUnitActiveSec=${CFG[record_interval_min]}min" 'hyn-record.service' 20)"
 
   # Daily report.
-  _write_unit /etc/systemd/system/hyn-report.service \
+  _write_unit "$HYN_UNIT_DIR/hyn-report.service" \
     "$(_generic_service 'hyn-view daily report' "$exe report --send")"
-  _write_unit /etc/systemd/system/hyn-report.timer \
+  _write_unit "$HYN_UNIT_DIR/hyn-report.timer" \
     "$(_generic_timer 'hyn-view daily report' \
       "OnCalendar=*-*-* ${CFG[report_at]}:00" 'hyn-report.service' 300)"
 
   # Wake every minute to pull account settings quickly. `hyn push --scheduled`
   # performs the full telemetry collection only when cloud_push_min is due, so
   # the managed ten-minute default does not run expensive probes every minute.
-  _write_unit /etc/systemd/system/hyn-push.service \
-    "$(_generic_service 'hyn-view web portal push' "$exe push --scheduled")"
-  _write_unit /etc/systemd/system/hyn-push.timer \
+  #
+  # Timeout is 120s, not the shared 180s: the portal calls a node quiet after
+  # three missed minutes, so one run allowed to hang for the full 180s would
+  # trip that warning by itself. 120s leaves a whole spare interval.
+  _write_unit "$HYN_UNIT_DIR/hyn-push.service" \
+    "$(_generic_service 'hyn-view web portal push' "$exe push --scheduled" '' 120)"
+  # No jitter and 1s accuracy on this one. Jitter exists to stop a fleet
+  # hammering an endpoint at the same second, which is worth 15 minutes of slack
+  # on a daily report and is actively harmful on a 60s heartbeat with a 180s
+  # budget: 15s of jitter plus 30s of timer coalescing turned a "one minute"
+  # check-in into up to 105s, and two of those read as a dead machine. The
+  # per-node cost is one small HTTPS POST, so spreading it buys nothing.
+  _write_unit "$HYN_UNIT_DIR/hyn-push.timer" \
     "$(_generic_timer 'hyn-view web portal push' \
-      "OnBootSec=1min"$'\n'"OnUnitActiveSec=1min" 'hyn-push.service' 15)"
+      "OnBootSec=20s"$'\n'"OnUnitActiveSec=1min" 'hyn-push.service' 0 1s)"
+
+  # Started on demand by the check-in, never enabled. See _maintenance_service.
+  _write_unit "$HYN_UNIT_DIR/hyn-update.service" \
+    "$(_maintenance_service "$exe cloud run-command")"
 
   systemctl daemon-reload || {
     warn 'systemd daemon reload failed'
     return 1
   }
+  # Clear the failed latch on our own units before re-enabling them. A unit that
+  # died repeatedly stays in `failed` after the cause is fixed, and on a box where
+  # every hyn service had been failing for a day that latch is the difference
+  # between "repaired" and "repaired and still shown as broken".
+  #
+  # Named one by one, never with a glob: another failed unit on the same box is
+  # somebody else's to reset, and hway-logrotate.service sitting in `failed` is
+  # information the operator needs, not litter for hyn to tidy.
+  local u
+  for u in "$SVC_NAME.service" hyn-record.service hyn-alerts.service \
+           hyn-report.service hyn-push.service hyn-update.service; do
+    systemctl reset-failed "$u" >/dev/null 2>&1 || true
+  done
   setup_apply_schedule "$exe"
 }
 
@@ -367,21 +551,52 @@ _write_unit() {
   return 0
 }
 
-# Enables or disables each timer according to config. Called again after the
-# wizard so answering "no daily report" actually stops the timer.
+# Enables or disables each timer according to config.
+#
+# One rule, applied to all five: a timer is enabled if its job can ever do
+# something useful. Nothing is gated on a *delivery destination* any more, because
+# every job now treats "nowhere to send" as a no-op and exits 0 (see
+# notify_configured). That removes the state that was impossible to explain --
+# a correctly installed machine showing two disabled timers and a doctor full of
+# warnings, with nothing actually wrong.
+#
+# The one genuine exception is the portal push. Without a node token every run is
+# a guaranteed failure, so an enabled push timer on an unpaired machine would
+# write a failure to the journal every sixty seconds. That is not a monitor
+# reporting a problem, it is a monitor being the problem.
 setup_apply_schedule() {
   have systemctl || return 0
   local rc=0
   systemctl daemon-reload || return 1
+  # Sampling and measurement: always. The portal's charts and the daily report's
+  # trend lines are drawn from these, so a machine that is monitored but not
+  # sampled shows an operator nothing.
   _toggle_timer "$SVC_NAME.timer" 1 || rc=1
   _toggle_timer hyn-record.timer 1 || rc=1
-  _toggle_timer hyn-alerts.timer "$(cfg_on alert_enabled && [[ -n ${CFG[notify_channels]} ]] && printf 1 || printf 0)" || rc=1
-  _toggle_timer hyn-report.timer "$(cfg_on report_enabled && [[ -n ${CFG[notify_channels]} ]] && printf 1 || printf 0)" || rc=1
-  # Only if the node is actually paired. An enabled push timer on an unlinked
-  # node would fail every few minutes and fill the journal with noise that looks
-  # like a bug rather than an unfinished setup step.
+  # Alert evaluation: data collection, not delivery. Every push payload carries
+  # the currently firing rules and the portal's event log is built from them.
+  _toggle_timer hyn-alerts.timer "$(cfg_on alert_enabled && printf 1 || printf 0)" || rc=1
+  # The daily report: on unless switched off. With no channel it prints a line
+  # saying so and exits 0; linking gives it the managed `web` channel.
+  _toggle_timer hyn-report.timer "$(cfg_on report_enabled && printf 1 || printf 0)" || rc=1
+  # The portal push: only once there is a credential to push with.
   _toggle_timer hyn-push.timer "$(cfg_on cloud_enabled && cloud_linked && printf 1 || printf 0)" || rc=1
   return "$rc"
+}
+
+# Why a timer is not running, in the words an operator needs. Empty output means
+# "it should be running", which is what `hyn doctor` treats as a problem.
+setup_timer_reason() {
+  case ${1:-} in
+    hyn-alerts.timer)
+      cfg_on alert_enabled || { printf 'alert_enabled=off in %s/config\n' "$HYN_ETC"; return 0; } ;;
+    hyn-report.timer)
+      cfg_on report_enabled || { printf 'report_enabled=off in %s/config\n' "$HYN_ETC"; return 0; } ;;
+    hyn-push.timer)
+      cfg_on cloud_enabled || { printf 'not paired with the portal yet: sudo hyn link\n'; return 0; }
+      cloud_linked || { printf 'no node token; pair again with: sudo hyn link\n'; return 0; } ;;
+  esac
+  return 1
 }
 
 _toggle_timer() {
@@ -421,10 +636,11 @@ setup_uninstall() {
       systemctl disable --now "$u" >/dev/null 2>&1 && printf '  %-24s disabled\n' "$u"
     done
     rm -f "$SVC_PATH" "$TMR_PATH" \
-      /etc/systemd/system/hyn-alerts.service /etc/systemd/system/hyn-alerts.timer \
-      /etc/systemd/system/hyn-record.service /etc/systemd/system/hyn-record.timer \
-      /etc/systemd/system/hyn-report.service /etc/systemd/system/hyn-report.timer \
-      /etc/systemd/system/hyn-push.service /etc/systemd/system/hyn-push.timer
+      "$HYN_UNIT_DIR/hyn-alerts.service" "$HYN_UNIT_DIR/hyn-alerts.timer" \
+      "$HYN_UNIT_DIR/hyn-record.service" "$HYN_UNIT_DIR/hyn-record.timer" \
+      "$HYN_UNIT_DIR/hyn-report.service" "$HYN_UNIT_DIR/hyn-report.timer" \
+      "$HYN_UNIT_DIR/hyn-push.service" "$HYN_UNIT_DIR/hyn-push.timer" \
+      "$HYN_UNIT_DIR/hyn-update.service"
     systemctl daemon-reload
     printf '  units removed\n'
   fi

@@ -10,7 +10,7 @@
 # HYN_PROC / HYN_SYS exist so test/selfcheck.sh can point the readers at a
 # fixture tree and assert on known numbers. Never hardcode /proc below.
 
-HYN_VERSION="1.7.0"
+HYN_VERSION="1.8.0"
 HYN_AUTHOR='NEXUSV'
 HYN_AUTHOR_URL='https://www.hyn-view.in'
 HYN_COPYRIGHT='(c) 2026 NEXUSV TECHNOLOGIES PRIVATE LIMITED'
@@ -27,7 +27,25 @@ HYN_PKG='hyn-view'
 : "${HYN_SYS:=/sys}"
 : "${HYN_ETC:=/etc/hyn-view}"
 : "${HYN_VAR:=/var/lib/hyn-view}"
+# Where the managed units are written, and the path whose writability tells the
+# agent whether it is running inside its own sandbox (see cloud_can_install).
+# Overridable for the same reason HYN_PROC is: so the tests can exercise the real
+# code against a directory they own.
+: "${HYN_UNIT_DIR:=/etc/systemd/system}"
 : "${HYN_RUN:=${XDG_RUNTIME_DIR:-/tmp}/hyn-view-$UID}"
+
+# systemd does not set HOME for a system service unless User= is set, and this
+# tool runs under `set -u`. Every `${XDG_*_HOME:-$HOME/...}` expansion below
+# therefore aborted the process outright: on a live relay node that was 890
+# consecutive timer failures, every hyn unit in `failed`, and a dashboard
+# correctly reporting a machine that had gone quiet.
+#
+# Resolved once, here, rather than at each of the five use sites -- the next one
+# added would otherwise reintroduce it. `~` is the fix rather than a hardcoded
+# /root because with HOME unset bash expands it from the password database, so a
+# non-root user still gets their own home, and it costs no fork.
+[[ -n ${HOME:-} ]] || HOME=~
+export HOME
 
 # ---------------------------------------------------------------------------
 # config
@@ -87,28 +105,36 @@ declare -A CFG=(
   [highway_track]=on
   [highway_update_check]=on
   [highway_version_probe]=off
-  [highway_units]='highway*,hw-*,nebula*,mosaic*'
+  # `hway*` is not redundant with `highway*` or `hw-*`, and leaving it out was a
+  # real blind spot: Highway Relayer OS names its units hway-relayer.service,
+  # hway-monitor.service, hway-otel-agent.service and so on. `highway*` needs an
+  # "i" and `hw-*` needs the hyphen straight after "hw", so on a production relay
+  # node the only units that matched were the nebula ones -- hyn reported "ok, 3
+  # units active" while hway-logrotate.service sat in `failed` and the relayer
+  # itself was not being watched at all.
+  [highway_units]='highway*,hway*,hw-*,nebula*,mosaic*'
 
   # --- notification delivery -------------------------------------------------
-  # Empty until `sudo hyn setup` configures it; nothing is sent by default.
-  [notify_channels]=''
-  [notify_to]=''
-  [notify_from]='onboarding@resend.dev'
-  [notify_from_name]='hyn-view'
-  # Account names, active-session origins and rejected-login source addresses
-  # can be useful for incident response, but are identity-bearing data. Keep
-  # notifications aggregate-only unless the operator explicitly opts in from
-  # a local config file; cloud-pulled configuration cannot enable this key.
+  # There is nothing to configure here, and that is the point.
+  #
+  # Delivery belongs to the portal. Recipients, the provider account, the
+  # schedule, the message templates and the delivery log all live there, and the
+  # only thing this machine holds is the node token that lets it queue an event.
+  # A provider API key, a sender address and a mailing-list decision are three
+  # things that should not be sitting on a relay node: the key is a credential to
+  # rotate on every box, the recipient changes when someone leaves the team, and
+  # neither can be seen or corrected by the person actually watching the
+  # dashboard.
+  #
+  # Account names, active-session origins and rejected-login source addresses can
+  # be useful for incident response, but are identity-bearing. Notifications stay
+  # aggregate-only unless the operator opts in from a local root-owned file; the
+  # portal is not allowed to set this key.
   [notify_access_details]=off
+  # A local backstop before the request goes out: it is the portal's provider
+  # quota a flapping rule would burn. Settable from the portal.
   [notify_max_per_day]=50
   [notify_timeout]=15
-  [smtp_host]=''
-  [smtp_port]=587
-  [telegram_chat_id]=''
-  [ntfy_topic]=''
-  [ntfy_server]='https://ntfy.sh'
-  [webhook_url]=''
-  [heartbeat_url]=''
 
   # --- alerting --------------------------------------------------------------
   [alert_enabled]=on
@@ -175,16 +201,49 @@ declare -A CFG=(
   # the account page or local root-owned configuration.
   [auto_update]=install
   [update_check_hours]=12
-  # Offer the guided setup on the first interactive launch. Asked once; a
-  # decline is remembered.
-  [onboarding]=on
+  # Off, because `npm install -g hyn-view` now finishes its own setup: the config
+  # file, the state directory and the timers are in place before the operator
+  # ever runs `hyn`. A wizard that offers to configure what is already configured
+  # is a prompt with no useful answer. `hyn onboard` still runs it on demand for
+  # anyone who wants to walk the options, and setting onboarding=on restores the
+  # first-run offer.
+  [onboarding]=off
   [color_depth]=auto
   [ascii]=off
 )
 
+# The shipped defaults, captured before any file is read.
+#
+# cfg_load needs these because it has to be able to *remove* a setting, not only
+# add one. Without a pristine copy it could only ever layer values on top of
+# whatever CFG already held, so a threshold cleared in the portal stayed at its
+# last pulled value for the life of the process -- the portal could take control
+# of a setting but never give it back. On the dashboard, which runs for days, that
+# meant a withdrawn setting never reverted at all.
+declare -A CFG_DEFAULT=()
+for _k in "${!CFG[@]}"; do CFG_DEFAULT[$_k]=${CFG[$_k]}; done
+unset _k
+
 # Keys a config file is allowed to set. Anything else is reported, not applied,
 # so a typo shows up instead of silently doing nothing.
 _cfg_allowed() { [[ -v CFG[$1] ]]; }
+
+# Keys that used to exist and no longer do.
+#
+# Every one of these was written into /etc/hyn-view/config by an earlier version
+# of this tool, so on an upgraded machine they are all still on disk. Treating them
+# as typos would print nine "unknown config key" warnings on every launch for
+# settings the tool itself put there, which is the fastest way to teach an operator
+# that this output can be ignored. They are recognised, ignored, and explained once
+# -- and `sudo hyn setup` removes them from the file so the note stops for good.
+_cfg_retired() {
+  case ${1:-} in
+    notify_channels | notify_to | notify_from | notify_from_name | \
+      smtp_host | smtp_port | telegram_chat_id | ntfy_topic | ntfy_server | \
+      webhook_url | heartbeat_url) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 # The portal is a much narrower trust boundary than a root-owned local config.
 # Keep this list in step with the fields in the portal's NodeSettings form and
@@ -256,6 +315,11 @@ cfg_load() {
   local f tmp k
   declare -A tmp=()
   declare -A portal_tmp=()
+  # Start from the shipped defaults every time. cfg_load is called again after a
+  # portal pull, and layering onto the previous result would make a withdrawn
+  # setting permanent -- see CFG_DEFAULT.
+  for k in "${!CFG_DEFAULT[@]}"; do CFG[$k]=${CFG_DEFAULT[$k]}; done
+  CFG_EXPLICIT=()
   # Read operator-controlled files first. A validated portal cache then
   # overrides only the small `_cfg_cloud_allowed` set. Standard installations
   # write defaults for every local key, so putting the cache first would make
@@ -281,15 +345,22 @@ cfg_load() {
       fi
     done
   fi
+  local retired=0
   for k in "${!tmp[@]}"; do
     if _cfg_allowed "$k"; then
       CFG[$k]=${tmp[$k]}
       # Remembered so profile_apply knows not to overwrite a deliberate choice.
       CFG_EXPLICIT[$k]=1
+    elif _cfg_retired "$k"; then
+      # Left behind by an older release. Counted, not listed one by one.
+      retired=$((retired + 1))
     else
       CFG_WARNINGS+=("unknown config key: $k")
     fi
   done
+  ((retired > 0)) && CFG_WARNINGS+=(
+    "$retired local email/notification setting(s) in the config are no longer used: delivery moved to the web portal. Remove them with: sudo hyn setup"
+  )
   profile_apply
 }
 declare -a CFG_WARNINGS=()

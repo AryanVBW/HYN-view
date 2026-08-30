@@ -745,9 +745,12 @@ alerts_run() {
   alerts_evaluate
   alerts_notify 0
   alerts_state_save
-  # Health-aware heartbeat: a box that is up but critical still trips the
-  # external dead man's switch.
-  if ((AL_CRIT > 0)); then heartbeat_ping 1; else heartbeat_ping 0; fi
+  # No local dead man's switch to ping any more. Nothing running on this box can
+  # report that this box is off, so the check that matters is the one made from
+  # outside: the portal starts a watchdog per node and mails the owner when three
+  # one-minute heartbeats are missed, then again when they resume. That is the
+  # same guarantee the healthchecks.io ping URL used to buy, without a second
+  # third-party account configured per machine.
   ((quiet)) && return 0
   if ((AL_FIRING == 0)); then
     printf 'hyn: no alerts firing (%d rules evaluated)\n' "${#_AL_SEEN[@]}"

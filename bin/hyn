@@ -627,59 +627,54 @@ cmd_notify() {
   [[ -n ${1:-} ]] && shift || true
   case $sub in
     test)
-      [[ -n ${CFG[notify_channels]} ]] || die 'no notify_channels configured. Run: sudo hyn setup'
+      # Queues one event with the portal exactly as an alert would. The portal
+      # decides who receives it; this machine cannot and does not know.
+      notify_configured || die 'this machine is not paired with the portal. Run: sudo hyn link'
       local body
       body="Test message from hyn-view on $HOSTNAME_S.
 
   distro    ${DISTRO:-unknown}
   kernel    ${KERNEL:-unknown}
-  channels  ${CFG[notify_channels]}
-  to        ${CFG[notify_to]:-n/a}
+  node      ${CFG[cloud_node_id]:-unknown}
 
 Nothing is wrong; you asked for a test."
       if NOTIFY_CATEGORY=test notify_send info "[hyn] Test from $HOSTNAME_S" "$body"; then
-        printf 'hyn: sent via %s\n' "${CFG[notify_channels]}"
+        printf 'hyn: queued with the portal. It resolves the recipient and sends.\n'
+        printf '     delivery, including any failure, is recorded on the Account page.\n'
       else
-        printf 'hyn: failed: %s\n' "${NOTIFY_LAST_ERR:-unknown error}" >&2
+        printf 'hyn: could not queue it: %s\n' "${NOTIFY_LAST_ERR:-unknown error}" >&2
         return 1
       fi
       ;;
     status)
       secrets_load
-      printf 'channels        %s\n' "${CFG[notify_channels]:-(none configured)}"
-      printf 'recipients      %s\n' "${CFG[notify_to]:-(none)}"
-      printf 'from            %s\n' "${CFG[notify_from]:-(none)}"
-      # The most common cause of a support question about this tool. Say it here,
-      # before the operator spends an evening on a 403 that is not about the key.
-      if [[ ${CFG[notify_channels]} == *resend* ]]; then
-        local _rf=${CFG[notify_from]:-} _rd=${CFG[notify_from]#*@}
-        if [[ -n $_rf && $_rd != 'resend.dev' ]]; then
-          printf '                %sResend will reject this sender with 403 unless @%s is verified%s\n' \
-            "${C[warn]}" "$_rd" "${C[reset]}"
-          printf '                %sverify at https://resend.com/domains, or: hyn config set notify_from onboarding@resend.dev%s\n' \
-            "${C[dim]}" "${C[reset]}"
-        elif [[ $_rf == *resend.dev* ]]; then
-          printf '                %susing Resend'"'"'s shared sender: delivery is limited to your own account address%s\n' \
-            "${C[dim]}" "${C[reset]}"
-        fi
+      # There is deliberately almost nothing to show. Everything that used to be
+      # listed here -- provider, API key, recipient, sender -- is now the portal's,
+      # and printing a local copy of it would be printing a guess.
+      if notify_configured; then
+        printf 'delivery        web portal (%s)\n' "$(cloud_url)"
+        printf 'node            %s\n' "${CFG[cloud_node_id]:-unknown}"
+        printf 'recipient       set on the portal Account page for this machine\n'
+        printf 'provider        the portal deployment'"'"'s account; no key on this server\n'
+      else
+        printf 'delivery        none -- this machine is not paired\n'
+        printf '                pair it with: sudo hyn link\n'
       fi
       printf 'min severity    %s\n' "${CFG[alert_min_severity]}"
       printf 'check interval  every %s min\n' "${CFG[alert_interval_min]}"
       printf 'repeat          every %s h while still firing\n' "${CFG[alert_repeat_hours]}"
       printf 'daily report    %s\n' "$(cfg_on report_enabled && printf 'at %s' "${CFG[report_at]}" || printf 'disabled')"
       budget_check || true
-      printf 'sent today      %s of max %s\n' "$NOTIFY_SENT_TODAY" "${CFG[notify_max_per_day]}"
-      # Report only WHETHER a credential is present, never any part of its value.
-      local k
-      for k in resend_api_key brevo_api_key smtp_user smtp_pass telegram_token webhook_url heartbeat_url; do
-        printf '%-15s %s\n' "$k" "$(has_secret "$k" && printf 'set' || printf '-')"
-      done
+      printf 'queued today    %s of max %s\n' "$NOTIFY_SENT_TODAY" "${CFG[notify_max_per_day]}"
+      # The only credential this machine holds, reported as present or absent and
+      # never by value.
+      if has_secret cloud_node_token; then
+        printf 'node token      present in %s (0600)\n' "$(secrets_path)"
+      else
+        printf 'node token      absent -- nothing can be sent\n'
+      fi
       ;;
-    heartbeat)
-      if heartbeat_ping 0; then printf 'hyn: heartbeat delivered\n'
-      else printf 'hyn: heartbeat failed or no heartbeat_url set\n' >&2; return 1; fi
-      ;;
-    *) die 'usage: hyn notify [status|test|heartbeat]' ;;
+    *) die 'usage: hyn notify [status|test]' ;;
   esac
   return 0
 }
@@ -714,7 +709,13 @@ cmd_config() {
 }
 
 cmd_doctor() {
-  local ok=0 warn=0
+  local ok=0 warn=0 fix=0 a
+  for a in "$@"; do
+    case $a in
+      --fix | --repair) fix=1 ;;
+      *) die "doctor: unknown option $a" ;;
+    esac
+  done
   _chk() {
     local state=$1 label=$2 detail=${3:-}
     local mark
@@ -749,31 +750,56 @@ cmd_doctor() {
   sd=$(state_dir)
   if mkdir -p "$sd" 2>/dev/null && [[ -w $sd ]]; then _chk ok 'state dir' "$sd"; else _chk fail 'state dir' "$sd not writable"; fi
 
-  printf '\n%sNotifications%s\n' "${C[bold]}" "${C[reset]}"
-  secrets_load
-  if [[ -z ${CFG[notify_channels]} ]]; then
-    _chk warn 'channels' 'none configured -- run: sudo hyn setup'
+  # How this machine receives future fixes. On a box nobody logs into, this is the
+  # only route in, so a policy that never installs is worth saying out loud rather
+  # than leaving in a config file to be discovered later.
+  case ${CFG[auto_update]} in
+    install) _chk ok 'update policy' 'install — fixes arrive by themselves' ;;
+    check)
+      _chk warn 'update policy' 'check — this machine will NOT install fixes by itself'
+      printf '       %swithout shell access that is permanent. Set it on the portal Account\n' "${C[dim]}"
+      printf '       page, or: sudo hyn config set auto_update install%s\n' "${C[reset]}" ;;
+    off)
+      _chk warn 'update policy' 'off — no update will ever be applied or even looked for'
+      printf '       %ssudo hyn config set auto_update install%s\n' "${C[dim]}" "${C[reset]}" ;;
+    *) _chk fail 'update policy' "unrecognised value: ${CFG[auto_update]}" ;;
+  esac
+  update_read
+  if ((UPD_CHECKED > 0)); then
+    _chk ok 'registry check' "last looked $(fmt_dur $((${EPOCHSECONDS:-0} - UPD_CHECKED))) ago${UPD_LATEST:+, latest $UPD_LATEST}"
   else
-    _chk ok 'channels' "${CFG[notify_channels]}"
-    local ch need_to=0
-    local oIFS=$IFS
-    IFS=,
-    for ch in ${CFG[notify_channels]}; do
-      case $ch in
-        web) IFS=$oIFS; if cloud_configured && cloud_linked; then _chk ok 'web channel' 'portal-managed email'; else _chk fail 'web channel' 'link this machine to the portal'; fi; IFS=, ;;
-        resend) IFS=$oIFS; need_to=1; if has_secret resend_api_key; then _chk ok 'resend key' 'set'; else _chk fail 'resend key' 'missing from secrets'; fi; IFS=, ;;
-        brevo) IFS=$oIFS; need_to=1; if has_secret brevo_api_key; then _chk ok 'brevo key' 'set'; else _chk fail 'brevo key' 'missing from secrets'; fi; IFS=, ;;
-        smtp) IFS=$oIFS; need_to=1; if [[ -n ${CFG[smtp_host]} ]]; then _chk ok 'smtp host' "${CFG[smtp_host]}:${CFG[smtp_port]}"; else _chk fail 'smtp host' 'not set'; fi; IFS=, ;;
-        telegram) IFS=$oIFS; if has_secret telegram_token && [[ -n ${CFG[telegram_chat_id]} ]]; then _chk ok 'telegram' "chat ${CFG[telegram_chat_id]}"; else _chk fail 'telegram' 'token or chat id missing'; fi; IFS=, ;;
-        ntfy) IFS=$oIFS; if [[ -n ${CFG[ntfy_topic]} ]]; then _chk ok 'ntfy' "${CFG[ntfy_server]}/${CFG[ntfy_topic]}"; else _chk fail 'ntfy' 'ntfy_topic not set'; fi; IFS=, ;;
-        webhook) IFS=$oIFS; if has_secret webhook_url; then _chk ok 'webhook' 'set'; else _chk fail 'webhook' 'webhook_url missing'; fi; IFS=, ;;
-      esac
-    done
-    IFS=$oIFS
-    if ((need_to)); then
-      if valid_email_list "${CFG[notify_to]}" 2>/dev/null; then _chk ok 'recipients' "${VALID_TO[*]}"
-      else _chk fail 'recipients' 'notify_to is empty or invalid'; fi
+    _chk warn 'registry check' 'never — the record timer performs it, so this should fill in within minutes'
+  fi
+
+  printf '\n%sDelivery%s\n' "${C[bold]}" "${C[reset]}"
+  secrets_load
+  # One path, so one check. Everything this section used to verify -- six provider
+  # credentials, a sender domain, an SMTP port, a recipient list -- is now the
+  # portal's, and a local copy of it could only ever be a stale guess.
+  if notify_configured; then
+    _chk ok 'delivery' "web portal ($(cloud_url))"
+    _chk ok 'recipient' 'resolved by the portal from this node'"'"'s owner'
+    if has_secret cloud_node_token; then
+      _chk ok 'node token' "present in $(secrets_path)"
+    else
+      _chk fail 'node token' 'missing; pair again with: sudo hyn link'
     fi
+    if have curl; then _chk ok 'transport' 'curl present'; else _chk fail 'transport' 'curl is required to reach the portal'; fi
+    case $(cloud_url) in
+      https://*) _chk ok 'endpoint' 'https' ;;
+      http://127.0.0.1* | http://localhost*) _chk warn 'endpoint' 'loopback (test endpoint)' ;;
+      *) _chk fail 'endpoint' 'not https -- the agent refuses to send a token in clear text' ;;
+    esac
+    budget_check || true
+    if ((NOTIFY_SENT_TODAY < ${CFG[notify_max_per_day]})); then
+      _chk ok 'daily budget' "$NOTIFY_SENT_TODAY of ${CFG[notify_max_per_day]} queued"
+    else
+      _chk warn 'daily budget' "$NOTIFY_SENT_TODAY of ${CFG[notify_max_per_day]} -- further messages are suppressed today"
+    fi
+  else
+    # Not a fault. An unpaired machine is a working local monitor that cannot mail
+    # anyone, and saying so is different from saying something is broken.
+    _chk ok 'delivery' 'none yet -- pair this machine to enable email: sudo hyn link'
   fi
   local sf="$HYN_ETC/secrets"
   if [[ -f $sf ]]; then
@@ -784,27 +810,51 @@ cmd_doctor() {
   else
     _chk warn 'secrets file' "$sf does not exist yet"
   fi
-  if has_secret heartbeat_url || [[ -n ${CFG[heartbeat_url]} ]]; then
-    _chk ok 'heartbeat' 'configured -- an outage will be reported by the external service'
+  # Nothing running on this box can report that this box is off, so the check that
+  # matters is the one made from outside it. That is the portal's watchdog now, not
+  # a ping URL configured per machine.
+  if notify_configured; then
+    _chk ok 'outage detection' 'the portal alerts the owner after three missed heartbeats'
   else
-    _chk warn 'heartbeat' 'not set: nothing will tell you if this host goes offline'
+    _chk warn 'outage detection' 'nothing will report this host going offline until it is paired: sudo hyn link'
   fi
 
   printf '\n%sTimers%s\n' "${C[bold]}" "${C[reset]}"
   if have systemctl; then
-    local u
+    # An intentionally-off timer is not a warning. Reporting one as "warn" is how
+    # a correctly installed machine ends up looking broken, which is worse than
+    # saying nothing: it teaches the operator that this output does not mean
+    # anything. So each stopped timer is asked why, and only an unexplained one
+    # counts against the tally.
+    source "$HYN_LIB/setup.sh" 2>/dev/null || true
+    local u st nxt why
     for u in hyn-speedtest.timer hyn-record.timer hyn-alerts.timer hyn-report.timer hyn-push.timer; do
-      if systemctl cat "$u" >/dev/null 2>&1; then
-        local st
-        st=$(systemctl is-active "$u" 2>/dev/null)
-        local nxt
+      if ! systemctl cat "$u" >/dev/null 2>&1; then
+        _chk warn "$u" 'not installed -- run: sudo hyn doctor --fix'
+        continue
+      fi
+      st=$(systemctl is-active "$u" 2>/dev/null)
+      if [[ $st == active ]]; then
         nxt=$(systemctl show -p NextElapseUSecRealtime --value "$u" 2>/dev/null)
-        if [[ $st == active ]]; then _chk ok "$u" "active${nxt:+, next $nxt}"
-        else _chk warn "$u" "$st"; fi
+        _chk ok "$u" "active${nxt:+, next $nxt}"
+        continue
+      fi
+      why=''
+      declare -F setup_timer_reason >/dev/null && why=$(setup_timer_reason "$u")
+      if [[ -n $why ]]; then
+        _chk ok "$u" "off by design -- $why"
       else
-        _chk warn "$u" 'not installed -- run: sudo hyn setup'
+        _chk warn "$u" "$st -- expected to be running: sudo hyn doctor --fix"
       fi
     done
+    # Not a timer and never enabled: it is started by name when the portal asks
+    # for an update. Its absence is why an update request would be refused, so it
+    # is worth naming here rather than leaving it to be discovered.
+    if systemctl cat hyn-update.service >/dev/null 2>&1; then
+      _chk ok 'hyn-update.service' 'installed (on demand, not scheduled)'
+    else
+      _chk warn 'hyn-update.service' 'missing -- portal updates cannot install: sudo hyn doctor --fix'
+    fi
   else
     _chk warn 'systemd' 'not present, nothing is scheduled'
   fi
@@ -837,7 +887,7 @@ cmd_doctor() {
   if have systemctl && systemctl list-unit-files 'hyn-speedtest.timer' --no-legend --plain 2>/dev/null | grep -q hyn; then
     _chk ok 'timer' "$(systemctl is-active hyn-speedtest.timer 2>/dev/null)"
   else
-    _chk warn 'timer' 'not installed -- run: sudo hyn setup'
+    _chk warn 'timer' 'not installed -- run: sudo hyn doctor --fix'
   fi
 
   if ((${#CFG_WARNINGS[@]} > 0)); then
@@ -846,6 +896,23 @@ cmd_doctor() {
     for m in "${CFG_WARNINGS[@]}"; do printf '  - %s\n' "$m"; done
   fi
   printf '\n%d ok, %d to look at\n' "$ok" "$warn"
+
+  # The portal tells an operator to run this command when a machine goes quiet,
+  # which is only useful if it can also put it right. Rewriting the units and
+  # reapplying the schedule is the fix for every stopped-timer cause there is:
+  # units from an older release, a timer disabled before the machine was linked,
+  # or an interrupted update.
+  if ((fix)); then
+    printf '\n%sRepair%s\n' "${C[bold]}" "${C[reset]}"
+    is_root || die 'repair needs root: sudo hyn doctor --fix'
+    have systemctl || { warn 'no systemd on this machine, so there is nothing to repair'; return 0; }
+    source "$HYN_LIB/setup.sh" || die 'cannot load setup helpers'
+    setup_run --no-wizard || return 1
+    if cfg_on cloud_enabled && cloud_linked; then
+      printf '\nhyn: sending a reading now to confirm the portal is receiving it\n'
+      cloud_push 0 0 || return 1
+    fi
+  fi
   return 0
 }
 
@@ -886,10 +953,10 @@ cmd_help() {
     '' \
     '  alerts check          evaluate every rule now (what the timer runs)' \
     '  alerts list           every rule, its value, and whether it is firing' \
-    '  alerts test           send a test alert through the real channels' \
+    '  alerts test           queue a test alert with the portal' \
     '  alerts state | log    firing state, or what has fired recently' \
     '  report [--send]       daily report: print it, or email it' \
-    '  notify status | test  delivery configuration, or send a test message' \
+    '  notify status | test  portal delivery state, or queue a test message' \
     '  record                sample metrics once (what the record timer runs)' \
     '' \
     '  link                  pair this server with the web portal (root)' \
@@ -904,9 +971,9 @@ cmd_help() {
     '  theme list | set <name> | current | preview <name>' \
     '  config show | get <k> | set <k> <v> | path | edit' \
     '  doctor                check the environment end to end' \
+    '  doctor --fix          reinstall the units and timers, then push (root)' \
     '  onboard               full guided setup: mode, theme, alerts, reports' \
-    '  setup                 install config, secrets and the timers (root)' \
-    '  wizard                re-run just the notification setup' \
+    '  setup                 re-apply config and timers, no questions (root)' \
     '  uninstall             remove units and links (--purge drops data too)' \
     '  version | help' \
     '' \
@@ -947,8 +1014,7 @@ main() {
       source "$HYN_LIB/setup.sh" || die 'cannot load setup helpers'
       setup_run "$@" ;;
     wizard | configure)
-      source "$HYN_LIB/wizard.sh" || die 'cannot load the setup wizard'
-      wizard_run "$@" ;;
+      die 'there is no local notification setup any more: recipients, provider and schedule live in the portal. Pair with `sudo hyn link`, then use its Account page. For local display and threshold options run `hyn onboard`.' ;;
     onboard | onboarding | firstrun)
       source "$HYN_LIB/wizard.sh" || die 'cannot load the setup wizard'
       onboard_run "$@" ;;
@@ -962,13 +1028,23 @@ main() {
         status | '') cloud_status ;;
         push) cloud_push 0 0 ;;
         pull | config) cloud_config_pull 0 ;;
-        report | flush) cloud_notify_flush 0 ;;
+        run-command | command) cloud_run_pending 0 ;;
         link) shift; cloud_link "$@" ;;
         unlink) shift; cloud_unlink "$@" ;;
         *) die "unknown cloud subcommand: $1 (try 'hyn cloud status')" ;;
       esac ;;
     report) cmd_report "$@" ;;
-    record) record_sample ;;
+    record)
+      record_sample
+      # The record timer is the only one enabled unconditionally, paired or not,
+      # so it is the only place an update check is guaranteed to happen on every
+      # installed machine. Without this an unpaired box -- one nobody logs into and
+      # nobody linked -- would never look for a release again, and there is no
+      # second mechanism to reach it. The check itself reads a cache and only
+      # spawns a detached fetch when that cache is older than
+      # update_check_hours, so this costs nothing on the runs in between.
+      update_startup
+      ;;
     notify) cmd_notify "$@" ;;
     uninstall | remove)
       source "$HYN_LIB/setup.sh" || die 'cannot load setup helpers'

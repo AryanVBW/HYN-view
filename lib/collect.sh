@@ -577,7 +577,12 @@ proc_sample() {
 
   for d in "$HYN_PROC"/[0-9]*; do
     pid=${d##*/}
-    read -r line <"$d/stat" 2>/dev/null || continue
+    # 2>/dev/null BEFORE the input redirection, deliberately. Redirections are
+    # applied left to right, so with the file first bash reports a failed open on
+    # the *original* stderr before fd 2 has been replaced -- and a process that
+    # exits between the glob and this read is completely normal, so every
+    # snapshot on a busy box printed "/proc/<pid>/stat: No such file".
+    read -r line 2>/dev/null <"$d/stat" || continue
     ((PROC_TOTAL++))
     # comm sits between the first '(' and the LAST ')', and may contain both
     # spaces and parens -- "(sd-pam)" and "((sd-pam))" are real process names.
