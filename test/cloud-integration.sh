@@ -27,6 +27,7 @@ eq() { if [[ $2 == "$3" ]]; then ok; else bad "$1: expected [$2] got [$3]"; fi; 
 contains() { if [[ $3 == *"$2"* ]]; then ok; else bad "$1: [${3:0:200}] lacks [$2]"; fi; }
 missing() { if [[ $3 != *"$2"* ]]; then ok; else bad "$1: [${3:0:200}] must not contain [$2]"; fi; }
 truthy() { if eval "$2" >/dev/null 2>&1; then ok; else bad "$1: expected success from: $2"; fi; }
+falsy() { if eval "$2" >/dev/null 2>&1; then bad "$1: expected failure from: $2"; else ok; fi; }
 
 command -v python3 >/dev/null || { printf 'cloud-integration: python3 not found, skipping\n'; exit 0; }
 
@@ -55,7 +56,17 @@ done
 # ---------------------------------------------------------------------------
 export HYN_ETC="$TMP/etc" HYN_VAR="$TMP/var"
 export HYN_PROC="$TMP/proc" HYN_SYS="$TMP/sys"
-mkdir -p "$HYN_ETC" "$HYN_VAR" "$HYN_PROC" "$HYN_SYS"
+# Same reason as test/selfcheck.sh: cfg_load reads the invoking user's own
+# ~/.config/hyn-view/config, and a real one there would change what this suite
+# thinks the agent decided.
+export HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/xdg" XDG_STATE_HOME="$TMP/xdgstate"
+export HYN_CONFIG=''
+# A directory the test owns, standing in for /etc/systemd/system. Its writability
+# is what cloud_can_install probes, so this is also how the test switches between
+# "run by hand as root" and "run from inside the hardened timer".
+export HYN_UNIT_DIR="$TMP/units"
+mkdir -p "$HYN_ETC" "$HYN_VAR" "$HYN_PROC" "$HYN_SYS" "$HYN_UNIT_DIR" \
+         "$HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
 export HYN_LIB="$ROOT/lib" HYN_ROOT="$ROOT"
 export TERM=dumb
 
@@ -166,11 +177,12 @@ eq 'node token is stored'  "$(printf 'b%.0s' {1..64})" "$(secret cloud_node_toke
 eq 'node id is stored'     '3f7a0000-0000-4000-8000-000000000001' "${CFG[cloud_node_id]}"
 eq 'cloud is enabled'      'on' "${CFG[cloud_enabled]}"
 eq 'dashboard controls the update policy' 'install' "${CFG[auto_update]}"
-eq 'a linked machine defaults to the portal web channel' 'web' "${CFG[notify_channels]}"
-truthy 'secrets file is 0600' '[[ $(stat -f "%Lp" "$HYN_ETC/secrets" 2>/dev/null || stat -c "%a" "$HYN_ETC/secrets") == 600 ]]'
+# There is no channel to seed: being linked IS having delivery.
+falsy 'no local channel list exists to configure' '[[ -v CFG[notify_channels] ]]'
+truthy 'secrets file is 0600' '[[ $(stat -c "%a" "$HYN_ETC/secrets" 2>/dev/null || stat -f "%Lp" "$HYN_ETC/secrets") == 600 ]]'
 
 NOTIFY_CATEGORY=alert
-truthy 'the default web channel queues an alert with the portal' \
+truthy 'a linked machine can queue an alert with the portal' \
   'notify_send warn "[hyn] web-01 disk warning" "Disk / is at 86%" "<p>Disk / is at 86%</p>"'
 NOTIFY_CATEGORY=''
 
@@ -200,6 +212,66 @@ sync_rc=$?
 after_sync_ingest=$(grep -c hyn_ingest "$REQLOG")
 eq 'portal sync command completes during a scheduled check-in' 0 "$sync_rc"
 eq 'portal sync bypasses the telemetry interval exactly once' "$((before_sync_ingest + 1))" "$after_sync_ingest"
+
+# ---------------------------------------------------------------------------
+# an update requested by the scheduled check-in
+# ---------------------------------------------------------------------------
+# The units have full write access now, so this is no longer about escaping a
+# sandbox. The check-in still delegates, for two reasons that outlive the
+# sandbox: it fires every sixty seconds and must not be the process holding an
+# npm install open, and its MemoryMax is sized for bash rather than for node. The
+# claim must be reported as progressing and the maintenance unit must finish that
+# very same command, or a portal "Update machine" request sits at "accepted" on a
+# machine that is checking in perfectly well.
+truthy 'a writable unit directory can install' 'cloud_can_install'
+declare -a SYSTEMCTL_CALLS=()
+systemctl() { SYSTEMCTL_CALLS+=("$*"); return 0; }
+_HAVE[systemctl]=1
+HYN_VERSION=1.7.0
+curl -sS "http://127.0.0.1:$PORT/command/queue" >/dev/null
+before_handoff_ingest=$(grep -c hyn_ingest "$REQLOG")
+printf '%s\tok\n' "${EPOCHSECONDS:-0}" >"$(_cloud_push_stamp)"
+cloud_push 1 1
+eq 'a delegated update sends no telemetry of its own' \
+  "$before_handoff_ingest" "$(grep -c hyn_ingest "$REQLOG")"
+contains 'the update is handed to the maintenance unit' \
+  'start --no-block hyn-update.service' "${SYSTEMCTL_CALLS[*]}"
+truthy 'the claimed command is left for the maintenance unit' '[[ -r $(cloud_pending_file) ]]'
+status_out=$(cloud_status)
+contains 'cloud status names the pending handoff' 'update handed to hyn-update.service' "$status_out"
+contains 'the portal is told the update was handed off' \
+  'Handed the update to the hyn-view maintenance service' "$(<"$REQLOG")"
+eq 'the check-in does not install in place' '1.7.0' "$HYN_VERSION"
+
+# The maintenance unit runs it for real, in this process.
+before_pending_ingest=$(grep -c hyn_ingest "$REQLOG")
+cloud_run_pending 1
+pending_rc=$?
+eq 'the maintenance unit finishes the handed-off update' 0 "$pending_rc"
+eq 'the maintenance unit installs the new version' '1.8.0' "$HYN_VERSION"
+eq 'the maintenance unit synchronizes one fresh reading' \
+  "$((before_pending_ingest + 1))" "$(grep -c hyn_ingest "$REQLOG")"
+truthy 'the pending command is consumed exactly once' '! [[ -e $(cloud_pending_file) ]]'
+cloud_run_pending 1 >/dev/null
+eq 'a second maintenance run finds nothing pending' 0 $?
+
+# The maintenance unit must never hand a command back to itself. On a machine
+# whose root really is read-only that would be a restart loop on a unit running
+# as root, so it reports a failure that names the obstacle instead.
+chmod 500 "$HYN_UNIT_DIR"
+truthy 'a read-only unit directory is detected' '! cloud_can_install'
+printf '4f8b0000-0000-4000-8000-000000000002\tupdate\n' >"$(cloud_pending_file)"
+curl -sS "http://127.0.0.1:$PORT/command/queue" >/dev/null
+loop_calls_before=${#SYSTEMCTL_CALLS[@]}
+cloud_run_pending 1 >/dev/null 2>&1
+loop_rc=$?
+chmod 700 "$HYN_UNIT_DIR"
+eq 'the maintenance unit refuses an install it cannot do' 1 "$loop_rc"
+eq 'the maintenance unit does not restart itself' "$loop_calls_before" "${#SYSTEMCTL_CALLS[@]}"
+contains 'the refusal names the actual obstacle' \
+  "$HYN_UNIT_DIR is not writable" "$(<"$REQLOG")"
+unset -f systemctl
+unset '_HAVE[systemctl]'
 
 # The anon key is public and belongs in the config; the token never does.
 cfgtext=$(<"$HYN_ETC/config")
@@ -341,6 +413,39 @@ x=0
 truthy 'rejected remote arithmetic never executes' '[[ ! -e $HYN_VAR/cloud-rce-marker ]]'
 
 truthy 'legacy central channel cache is deleted' '[[ ! -e $chcache ]]'
+
+# A settings change must be visible on the portal in the same check-in that
+# accepted it. Without this the agent takes the new value within a minute but the
+# reading that shows its effect waits up to cloud_push_min, so someone who edits a
+# threshold and watches the page concludes it did not work.
+# No queued maintenance command, so the only thing that can trigger a reading
+# below is the settings change itself.
+curl -sS "http://127.0.0.1:$PORT/command/clear" >/dev/null
+rm -f -- "$cache"
+cloud_config_pull 1
+eq 'a first pull with no cache is a change' 1 "$CLOUD_CONFIG_CHANGED"
+cloud_config_pull 1
+eq 'an identical pull is not a change' 0 "$CLOUD_CONFIG_CHANGED"
+# With nothing changed and a fresh reading already sent, the check-in stays cheap.
+printf '%s\tok\n' "${EPOCHSECONDS:-0}" >"$(_cloud_push_stamp)"
+before_quiet=$(grep -c hyn_ingest "$REQLOG")
+cloud_push 1 1
+eq 'an unchanged check-in sends no reading' "$before_quiet" "$(grep -c hyn_ingest "$REQLOG")"
+# Now make the portal return something different and confirm the reading follows
+# immediately, without waiting for the interval.
+curl -sS "http://127.0.0.1:$PORT/config/report_at/09:15" >/dev/null
+printf '%s\tok\n' "${EPOCHSECONDS:-0}" >"$(_cloud_push_stamp)"
+before_changed=$(grep -c hyn_ingest "$REQLOG")
+cloud_push 1 1
+eq 'a changed setting is pushed in the same check-in' \
+  "$((before_changed + 1))" "$(grep -c hyn_ingest "$REQLOG")"
+eq 'the changed value is the one now in effect' '09:15' "${CFG[report_at]}"
+# And the cache is rewritten wholesale, so a setting the portal stops sending
+# falls back to the agent default rather than staying pinned for ever.
+curl -sS "http://127.0.0.1:$PORT/config/drop/report_at" >/dev/null
+cloud_config_pull 1
+cfg_load
+eq 'a withdrawn setting returns to the agent default' '08:00' "${CFG[report_at]}"
 # The world-readable config cache must never hold a credential.
 missing 'secret is NOT in the config cache' 're_secret' "$cachetext"
 
@@ -358,51 +463,23 @@ reqs=$(<"$REQLOG")
 contains 'fetch_config was called' '/rest/v1/rpc/hyn_fetch_config' "$reqs"
 
 # ---------------------------------------------------------------------------
-# notification delivery reporting
+# there is no local delivery report to send
 # ---------------------------------------------------------------------------
 printf '\nnotification reporting\n'
 
-: >"$(cloud_notify_queue)"
-cloud_notify_record resend 'ops@example.com' warn '[hyn] disk 86%' sent '' alert
-cloud_notify_record resend 'ops@example.com' info '[hyn] daily report' failed 'HTTP 403: domain not verified' report
-truthy 'deliveries are queued locally' '[[ $(wc -l <"$(cloud_notify_queue)") -eq 2 ]]'
-
-truthy 'queue flushes to the portal' 'cloud_notify_flush 1'
-truthy 'queue is emptied after flush' '[[ ! -s $(cloud_notify_queue) ]]'
-
+# The agent used to queue its own delivery outcomes and drain them to the portal,
+# because it was the only thing that knew whether Resend had accepted a message.
+# It is not any more: the portal's own worker performs the send and writes the log,
+# so a local report could only ever be a guess about work this process did not do.
+falsy 'no local delivery queue exists'   'declare -F cloud_notify_queue >/dev/null'
+falsy 'nothing records a local outcome'  'declare -F cloud_notify_record >/dev/null'
+falsy 'nothing flushes one to the portal' 'declare -F cloud_notify_flush >/dev/null'
+# Queueing an event must not claim it was delivered. Only the portal knows that.
 reqs=$(<"$REQLOG")
-notif_line=$(printf '%s\n' "$reqs" | grep hyn_report_notification | tail -1)
-contains 'report carries the channel'  'resend' "$notif_line"
-contains 'report carries a failure'    'domain not verified' "$notif_line"
-contains 'report carries the category' 'report' "$notif_line"
-truthy 'reported events are valid JSON' 'printf "%s" "$notif_line" | python3 -c "
-import json,sys
-req = json.loads(sys.stdin.read())
-body = json.loads(req[\"body\"])
-ev = body[\"p_events\"]
-assert len(ev) == 2, ev
-assert ev[0][\"status\"] == \"sent\"
-assert ev[1][\"status\"] == \"failed\"
-assert ev[1][\"severity\"] == \"info\"
-"'
+truthy 'the agent never reports a delivery it did not make' \
+  '[[ $(printf "%s\n" "$reqs" | grep -c hyn_report_notification) -eq 0 ]]'
+contains 'the agent queues events instead' 'hyn_queue_web_notification' "$reqs"
 
-# A failed report must not lose the queue: an alert that was sent but never
-# accounted for is a reporting bug, and silently dropping it hides it.
-secret_set cloud_node_token 'wrong-token' >/dev/null
-SECRETS_LOADED=0
-cloud_notify_record ntfy 'topic' crit '[hyn] test' sent '' alert
-if cloud_notify_flush 1 2>/dev/null; then
-  bad 'flush should fail with a bad token'
-else
-  ok
-fi
-truthy 'queue is preserved when reporting fails' '[[ -s $(cloud_notify_queue) ]]'
-secret_set cloud_node_token "$(printf 'b%.0s' {1..64})" >/dev/null
-SECRETS_LOADED=0
-cloud_notify_flush 1 >/dev/null 2>&1
-
-# ---------------------------------------------------------------------------
-# administrative pause and suspend, as the agent sees them
 # ---------------------------------------------------------------------------
 printf '\nadministrative status\n'
 
@@ -468,7 +545,6 @@ eq 'cloud disabled after unlink' 'off' "${CFG[cloud_enabled]}"
 CFG[cloud_api_url]="http://127.0.0.1:$PORT/api/agent/v1"
 CFG[cloud_portal_url]='https://www.hyn-view.in'
 CFG[cloud_url]='' CFG[cloud_anon_key]=''
-config_set notify_channels smtp >/dev/null
 out=$(cloud_link 2>&1)
 rc=$?
 eq 'zero-config hosted link succeeds' 0 "$rc"
@@ -476,7 +552,6 @@ missing 'hosted link does not ask for a Supabase URL' 'Supabase project URL' "$o
 missing 'hosted link does not ask for an anon key' 'Supabase anon key' "$out"
 contains 'hosted link prints the product pairing page' 'https://www.hyn-view.in/link' "$out"
 cfg_load
-eq 'an existing local notification channel is preserved' 'smtp' "${CFG[notify_channels]}"
 SECRETS_LOADED=0
 truthy 'hosted link stores a node token' '[[ -n $(secret cloud_node_token) ]]'
 cloud_unlink >/dev/null

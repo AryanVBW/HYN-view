@@ -12,7 +12,34 @@ state = {
     "node_status": "active",
     "command_kind": None,
     "command_claimed": False,
+    "config_override": {},
+    "config_dropped": set(),
 }
+
+
+def portal_config():
+    """The settings the portal would return, plus the hostile ones the agent must
+    refuse. /config/<key>/<value> and /config/drop/<key> let a test change or
+    withdraw one, which is how the change-detection path is exercised."""
+    config = {
+        "alert_mem_pct": 80,
+        "alert_disk_pct": "x[$(touch${IFS}$HYN_VAR/cloud-rce-marker)]",
+        "report_at": "07:30",
+        "auto_update": "install",
+        "notify_access_details": "on",
+        "webhook_url": "https://attacker.example/hook",
+        "heartbeat_url": "https://attacker.example/ping",
+        "notify_to": "attacker@example.com",
+        "telegram_chat_id": "12345",
+        "ntfy_topic": "attacker-topic",
+        "cloud_url": "https://attacker.example",
+        "interval": "2.0",
+        "not_a_real_key": "x",
+    }
+    config.update(state["config_override"])
+    for key in state["config_dropped"]:
+        config.pop(key, None)
+    return config
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -28,9 +55,34 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"ok")
             return
+        if self.path == "/command/clear":
+            state["command_kind"] = None
+            state["command_claimed"] = False
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
         if self.path in ("/command/queue", "/command/sync"):
             state["command_kind"] = "sync" if self.path.endswith("/sync") else "update"
             state["command_claimed"] = False
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
+        # Test-only levers for portal-managed settings: change one, or withdraw
+        # one so the agent falls back to its own default.
+        #   /config/<key>/<value>   set it
+        #   /config/drop/<key>      remove it
+        if self.path.startswith("/config/"):
+            parts = self.path.split("/")[2:]
+            if len(parts) == 2 and parts[0] == "drop":
+                state["config_override"].pop(parts[1], None)
+                state["config_dropped"].add(parts[1])
+            elif len(parts) == 2:
+                state["config_override"][parts[0]] = parts[1]
+                state["config_dropped"].discard(parts[0])
             self.send_response(200)
             self.send_header("Content-Length", "2")
             self.end_headers()
@@ -92,21 +144,7 @@ class Handler(BaseHTTPRequestHandler):
                 "report_template_b64": base64.b64encode(
                     b'<div data-template="report">{{content}}</div>'
                 ).decode(),
-                "config": {
-                    "alert_mem_pct": 80,
-                    "alert_disk_pct": "x[$(touch${IFS}$HYN_VAR/cloud-rce-marker)]",
-                    "report_at": "07:30",
-                    "auto_update": "install",
-                    "notify_access_details": "on",
-                    "webhook_url": "https://attacker.example/hook",
-                    "heartbeat_url": "https://attacker.example/ping",
-                    "notify_to": "attacker@example.com",
-                    "telegram_chat_id": "12345",
-                    "ntfy_topic": "attacker-topic",
-                    "cloud_url": "https://attacker.example",
-                    "interval": "2.0",
-                    "not_a_real_key": "x",
-                },
+                "config": portal_config(),
                 "channels": [
                     {
                         "kind": "resend",

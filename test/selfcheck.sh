@@ -201,6 +201,14 @@ write_proc 1001 'sshd(x)' 10 5 2560
 # ---------------------------------------------------------------------------
 export HYN_PROC="$FP" HYN_SYS="$FS" HYN_ETC="$TMP/etc" HYN_VAR="$TMP/var"
 mkdir -p "$HYN_ETC" "$HYN_VAR"
+# cfg_load also reads ${XDG_CONFIG_HOME:-$HOME/.config}/hyn-view/config, which on
+# a developer's or an operator's machine is a REAL file with real settings in it.
+# Running the suite there produced six false failures that did not appear on a
+# machine with no personal config -- so the results depended on who was running
+# it. Both are pointed at the fixture directory for the whole run.
+export HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/xdg" XDG_STATE_HOME="$TMP/xdgstate"
+export HYN_CONFIG=''
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
 HYN_LIB="$ROOT/lib"
 HYN_ROOT="$ROOT"
 export HYN_LIB HYN_ROOT
@@ -216,9 +224,18 @@ for m in core ui net collect highway speedtest notify alerts report update panel
 done
 
 cfg_load
+# Read a shipped default straight out of core.sh. Assertions about *defaults* must
+# not depend on CFG, which later sections deliberately mutate.
+_default_of() {
+  local k=$1 v
+  v=$(grep -oE "^[[:space:]]*\[$k\]=.*" "$HYN_LIB/core.sh" | head -1)
+  v=${v#*=}
+  v=${v#\'} v=${v%\'}
+  printf '%s' "$v"
+}
 eq 'notification access details default off' 'off' "${CFG[notify_access_details]:-missing}"
 eq 'cloud telemetry defaults to ten minutes' '10' "${CFG[cloud_push_min]:-missing}"
-eq 'automatic CLI updates are the default' 'install' "${CFG[auto_update]:-missing}"
+eq 'automatic CLI updates are the default' 'install' "$(_default_of auto_update)"
 color_detect
 theme_load hiway || { printf 'theme load failed\n' >&2; exit 1; }
 ui_init
@@ -704,22 +721,56 @@ section 'read-only guarantee'
 # trusting review: this is the one property a monitoring tool cannot get wrong.
 # Comments are stripped first -- the file's own header documents the prohibition
 # by naming the forbidden verbs, and matching prose would be a false positive.
-code_only() { grep -vE '^[[:space:]]*#' "$1"; }
+# Strips comment lines so a prohibition documented in prose is not mistaken for
+# the thing it prohibits. Takes any number of files: it used to read only "$1",
+# which silently reduced a three-file check to a one-file check.
+code_only() { grep -hvE '^[[:space:]]*#' "$@"; }
 if code_only "$HYN_LIB/highway.sh" |
-  grep -qE 'systemctl[^|]*[[:space:]](start|stop|restart|reload|kill|enable|disable|mask)[[:space:]]'; then
+  grep -E  'systemctl[^|]*[[:space:]](start|stop|restart|reload|kill|enable|disable|mask)[[:space:]]'; then
   bad 'highway.sh contains a state-changing systemctl call'
 else ok; fi
 if code_only "$HYN_LIB/highway.sh" |
-  grep -qE '\b(tc|nft|iptables)\b[^|#]*\b(add|del|delete|flush|replace|change)\b'; then
+  grep -E  '\b(tc|nft|iptables)\b[^|#]*\b(add|del|delete|flush|replace|change)\b'; then
   bad 'highway.sh contains a mutating firewall/tc call'
 else ok; fi
-if code_only "$HYN_LIB/highway.sh" | grep -qE '>[[:space:]]*"?(/etc|/var/lib|/opt)/(highway|hw-os)'; then
+if code_only "$HYN_LIB/highway.sh" | grep -E  '>[[:space:]]*"?(/etc|/var/lib|/opt)/(highway|hw-os)'; then
   bad 'highway.sh writes into a Highway directory'
 else ok; fi
-# setup.sh may enable its own timer, but must never touch Highway units.
-if code_only "$HYN_LIB/setup.sh" | grep -qE 'systemctl.*(highway|nebula|mosaic|hw-)'; then
-  bad 'setup.sh references Highway units'
-else ok; fi
+# setup.sh may enable its own timer, but must never touch a unit that is not
+# hyn's. This is now the ONLY thing standing between the agent and the node:
+# the units run with full filesystem access, so there is no mount namespace left
+# to fall back on. Every source file is checked, not just highway.sh, and the
+# match is on "a state-changing systemctl verb followed by something that is not
+# a hyn unit or a hyn variable".
+_verbs='start|stop|restart|reload|try-restart|kill|enable|disable|mask|unmask|reset-failed|set-property|edit|revert'
+for _f in "$HYN_LIB"/*.sh "$ROOT/bin/hyn"; do
+  while IFS= read -r _line; do
+    # Only care about state-changing calls. `show`, `cat`, `list-*`, `is-active`
+    # and `is-enabled` are reads and are allowed anywhere.
+    [[ $_line =~ systemctl[^\|]*[[:space:]]($_verbs)([[:space:]]|$) ]] || continue
+    # What follows the verb must be a hyn unit, or a variable that only ever
+    # holds one (checked by the unit-name assertions further down).
+    if [[ $_line =~ (hyn-[a-z]+\.(service|timer)|\"?\$(unit|u|SVC_NAME|HYN_UNIT_DIR)) ]]; then
+      continue
+    fi
+    bad "${_f##*/} has a state-changing systemctl call on a non-hyn unit: ${_line#"${_line%%[![:space:]]*}"}"
+  done < <(code_only "$_f")
+done
+ok
+# Belt and braces: no source file may name a Highway unit next to a systemctl at
+# all, however the line is shaped.
+for _f in "$HYN_LIB"/*.sh "$ROOT/bin/hyn"; do
+  if code_only "$_f" | grep -E  "systemctl[^|#]*($_verbs)[^|#]*(highway|hway|nebula|mosaic|hw-os)"; then
+    bad "${_f##*/} aims a state-changing systemctl at a Highway unit"
+  else ok; fi
+done
+# Every unit hyn is allowed to act on, spelled out. If a new managed unit is
+# added it has to be added here too, which is the point.
+for _u in hyn-speedtest hyn-record hyn-alerts hyn-report hyn-push hyn-update; do
+  if code_only "$HYN_LIB/setup.sh" "$HYN_LIB/update.sh" "$HYN_LIB/cloud.sh" |
+     grep  "$_u"; then ok
+  else bad "$_u is not referenced by the unit management code"; fi
+done
 
 # ---------------------------------------------------------------------------
 section 'frame rendering'
@@ -1075,22 +1126,15 @@ json_escape_v $'evil","x":"pwned'; contains 'json injection neutralised' '\"' "$
 falsy 'no raw quote survives escaping' '[[ $JSON_OUT == *[^\\]\"* ]]'
 json_escape_v $'ctrl\x01char'; eq 'json strips control chars' 'ctrlchar' "$JSON_OUT"
 
-truthy 'accepts a normal address'   'valid_email ops@example.com'
-truthy 'accepts plus addressing'    'valid_email ops+hyn@example.co.uk'
-falsy  'rejects missing domain'     'valid_email ops@'
-falsy  'rejects missing tld'        'valid_email ops@example'
-falsy  'rejects no at sign'         'valid_email example.com'
-falsy  'rejects empty'              'valid_email ""'
-# Header injection: a newline in an address would let a crafted value add its
-# own SMTP headers.
-falsy  'rejects embedded newline'   'valid_email "$(printf "a@b.com\nBcc: x@y.com")"'
-falsy  'rejects embedded CR'        'valid_email "$(printf "a@b.com\rX: y")"'
-
-valid_email_list 'a@b.com, c@d.com'
-eq 'parses a recipient list' '2' "${#VALID_TO[@]}"
-valid_email_list 'a@b.com,broken,c@d.com' 2>/dev/null
-eq 'drops invalid recipients' '2' "${#VALID_TO[@]}"
-falsy 'rejects an all-invalid list' 'valid_email_list "nope,alsonope" 2>/dev/null'
+# Address validation left with the providers. There is no local recipient to
+# validate: the portal resolves it from the node's owner, and this machine is not
+# allowed to know or override it.
+falsy 'the agent has no email validator to get wrong' 'declare -F valid_email >/dev/null'
+falsy 'nor a recipient list parser'                   'declare -F valid_email_list >/dev/null'
+# The token validator stays: it guards the one credential this box does hold.
+truthy 'a node token is still validated' 'valid_token "abc.DEF-123_~+/=:"'
+falsy  'a token with a quote is refused' 'valid_token "abc\"def"'
+falsy  'a token with a newline is refused' 'valid_token "$(printf "a\nb")"'
 
 truthy 'accepts an api-key charset'  'valid_token re_AbC123-_.=+/'
 falsy  'rejects a key with a space'  'valid_token "abc def"'
@@ -1216,7 +1260,16 @@ HW_NEBULA=nebula1
 CFG[highway_track]=off
 
 # Notification gating: below min severity nothing goes out.
-CFG[notify_channels]=stdout
+#
+# There is one delivery path now and it is an HTTPS call to the portal, so the
+# digest is captured by standing in for it. The subject of these checks is the
+# alert engine -- severity gating, the digest, hysteresis, the cooldown -- not the
+# transport, which test/cloud-integration.sh drives against a real endpoint.
+notify_configured() { return 0; }
+ch_web() {
+  printf -- '--- [%s] %s\n%s\n' "$4" "$1" "$2"
+  return 0
+}
 CFG[alert_min_severity]=crit
 _reset_alerts; _AL_PREV_STATE=(); _AL_PREV_NOTIFIED=()
 _check_bool t_warn warn 1 'a warning'
@@ -1269,6 +1322,11 @@ CFG[notify_max_per_day]=50
 rm -f "$TMP/var/notify-budget"
 
 # ---------------------------------------------------------------------------
+# Back to the real delivery path for everything after this point. Re-sourced
+# rather than `unset -f`, because unsetting a redefined function removes it
+# outright instead of revealing the original.
+source "$HYN_LIB/notify.sh"
+
 section 'daily report'
 # ---------------------------------------------------------------------------
 # Hand-built metric rows: cpu 10/20/30, mem 50/60/70, disk 80->82 over 24h,
@@ -1597,8 +1655,10 @@ onboard_mark_done completed
 contains 'marker updates the outcome' 'completed' "$(cat "$ob_marker")"
 rm -f "$ob_marker"
 
-# The onboarding prompt is opt-out via config.
-eq 'onboarding defaults on' 'on' "${CFG[onboarding]}"
+# The onboarding prompt is off by default now that the postinstall configures the
+# machine itself -- a wizard offering to set up what is already set up is a prompt
+# with no useful answer -- and remains opt-in via config.
+eq 'onboarding defaults off' 'off' "$(_default_of onboarding)"
 CFG[onboarding]=off
 falsy 'onboarding can be disabled' 'cfg_on onboarding'
 CFG[onboarding]=on
@@ -1609,12 +1669,19 @@ truthy 'onboarding re-enabled' 'cfg_on onboarding'
 source "$HYN_LIB/wizard.sh"
 truthy 'onboard_run exists'    'declare -F onboard_run >/dev/null'
 truthy 'onboard_prompt exists' 'declare -F onboard_prompt >/dev/null'
-truthy 'wizard_run exists'     'declare -F wizard_run >/dev/null'
+falsy  'the notification wizard is gone' 'declare -F wizard_run >/dev/null'
+falsy  'and its channel step with it'    'declare -F _wiz_channel >/dev/null'
+falsy  'and its test sender'             'declare -F _wiz_test >/dev/null'
 truthy 'detection helper exists' 'declare -F onboard_detect >/dev/null'
 picked=$(printf '1\n' | { _wiz_update_choice update_mode >/dev/null; printf '%s' "$update_mode"; })
-eq 'first update choice means notify before install' 'check' "$picked"
+eq 'first update choice means automatic install' 'install' "$picked"
+# Holding Enter through the wizard must produce the documented default, not a
+# quieter one. ask_choice takes choice 1 on an empty line. Asserted against the
+# literal rather than CFG[auto_update], which earlier sections mutate.
+picked=$(printf '\n' | { _wiz_update_choice update_mode >/dev/null; printf '%s' "$update_mode"; })
+eq 'Enter accepts managed updates' 'install' "$picked"
 picked=$(printf '2\n' | { _wiz_update_choice update_mode >/dev/null; printf '%s' "$update_mode"; })
-eq 'second update choice means automatic install' 'install' "$picked"
+eq 'second update choice means notify before install' 'check' "$picked"
 picked=$(printf '3\n' | { _wiz_update_choice update_mode >/dev/null; printf '%s' "$update_mode"; })
 eq 'third update choice means manual only' 'off' "$picked"
 # Non-interactive must be refused rather than hanging waiting for stdin.
@@ -1629,13 +1696,8 @@ truthy 'accepts 23:59'           '_v_hhmm 23:59'
 falsy  'rejects hour 24'         '_v_hhmm 24:00'
 falsy  'rejects minute 60'       '_v_hhmm 12:60'
 falsy  'rejects a bare hour'     '_v_hhmm 8'
-truthy 'accepts a long topic'    '_v_topic hyn-abc123456'
-falsy  'rejects a short topic'   '_v_topic short'
-falsy  'rejects a topic with a slash' '_v_topic "abc/def12345"'
 truthy 'accepts an https url'    '_v_url https://example.com/ping'
 falsy  'rejects a non-url'       '_v_url notaurl'
-truthy 'accepts a hostname'      '_v_host smtp.gmail.com'
-falsy  'rejects a host with a space' '_v_host "bad host"'
 
 # ---------------------------------------------------------------------------
 # cloud: JSON field reader
@@ -1869,6 +1931,537 @@ contains 'token is sent via --data-binary' '--data-binary "@$tmp"' "$_cloudsrc"
 falsy 'token never reaches a curl -d argument' '[[ $_cloudsrc == *"-d \"p_node_token"* ]]'
 contains 'anon key goes through curl --config' '--config -' "$_cloudsrc"
 
+section 'portal / database / agent settings parity'
+# ---------------------------------------------------------------------------
+# The set of settings the portal may manage is declared three times: in the agent
+# (_cfg_cloud_allowed), in the database (_hyn_portal_config_valid, which is also
+# a CHECK constraint on nodes.config), and in the portal (PORTAL_CONFIG_KEYS).
+# They agree today. Nothing was making them stay in step, and drift here does not
+# fail loudly -- it presents as "I changed it in the portal and the server ignored
+# me", which is the hardest class of bug to report and the easiest to introduce.
+_schema="$ROOT/supabase/schema.sql"
+_nodecfg="$ROOT/web-portal/lib/node-config.ts"
+_agent_keys=$(sed -n '/^_cfg_cloud_allowed()/,/^}/p' "$HYN_LIB/core.sh" |
+  grep -oE '[a-z_]+ \||[a-z_]+\)' | tr -d ' |)' | grep -v '^$' | sort -u)
+eq 'the agent declares eleven managed settings' 11 "$(printf '%s\n' "$_agent_keys" | grep -c .)"
+# The database and portal declarations live in the repository, not in the npm
+# package, so this half of the comparison only runs where they exist. Stated as a
+# skip rather than silently passing: a check that quietly does nothing is worse
+# than one that is absent.
+if [[ -r $_schema && -r $_nodecfg ]]; then
+  _db_keys=$(sed -n "/^create or replace function public._hyn_portal_config_valid/,/^\\$\\$;/p" \
+    "$_schema" | grep 'when e\.key' |
+    grep -oE "'[a-z_]+'" | tr -d "'" | sort -u)
+  _portal_keys=$(sed -n '/^export const PORTAL_CONFIG_KEYS/,/^]);/p' \
+    "$_nodecfg" | grep -oE '"[a-z_]+"' | tr -d '"' | sort -u)
+  eq 'the database allows exactly what the agent accepts' '' \
+    "$(comm -3 <(printf '%s\n' "$_agent_keys") <(printf '%s\n' "$_db_keys") | tr -d '\t' | tr '\n' ' ' | sed 's/^ *//; s/ *$//')"
+  eq 'the portal offers exactly what the agent accepts' '' \
+    "$(comm -3 <(printf '%s\n' "$_agent_keys") <(printf '%s\n' "$_portal_keys") | tr -d '\t' | tr '\n' ' ' | sed 's/^ *//; s/ *$//')"
+else
+  printf '  skip  database/portal parity (repository-only files not in this package)\n'
+fi
+# Nothing local, secret or endpoint-shaped may ever enter that set, whatever the
+# three lists happen to contain.
+for _k in cloud_url cloud_anon_key cloud_api_url notify_to notify_from smtp_host \
+          telegram_chat_id ntfy_topic webhook_url heartbeat_url notify_access_details \
+          highway_units hide_mount panels interval theme; do
+  falsy "the portal cannot set $_k" "_cfg_cloud_allowed $_k"
+done
+# The value validators must agree too, not just the key names. A bound the portal
+# accepts and the agent rejects is a setting that saves and never applies.
+truthy 'a threshold the portal accepts is one the agent applies' \
+  '_cfg_cloud_value_allowed alert_disk_pct 100 && _cfg_cloud_value_allowed cloud_push_min 1440'
+falsy 'a threshold past the shared bound is refused' \
+  '_cfg_cloud_value_allowed alert_disk_pct 101 || _cfg_cloud_value_allowed cloud_push_min 1441'
+falsy 'zero is not a valid push interval'   '_cfg_cloud_value_allowed cloud_push_min 0'
+falsy 'an empty value never overrides a default' \
+  '_cfg_cloud_value_allowed alert_disk_pct "" || _cfg_cloud_value_allowed auto_update ""'
+
+# Central management has to be able to give a setting back, not only take it.
+# cfg_load layered values onto whatever CFG already held, so a threshold cleared
+# in the portal kept its last pulled value for the life of the process -- for the
+# dashboard, which runs for days, it never reverted at all.
+(
+  export HYN_ETC=$TMP/rev-etc HYN_VAR=$TMP/rev-var
+  mkdir -p "$HYN_ETC" "$HYN_VAR"
+  state_dir_v
+  printf 'report_at=09:15\n' >"$STATE_DIR/cloud-config"
+  cfg_load
+  [[ ${CFG[report_at]} == 09:15 ]] || exit 1
+  # The portal stops managing it: the cache is rewritten without the key.
+  : >"$STATE_DIR/cloud-config"
+  cfg_load
+  [[ ${CFG[report_at]} == "$(_default_of report_at)" ]]
+) && ok || bad 'a setting withdrawn by the portal does not return to the agent default'
+# A local file still wins over a default, and losing the portal value must not
+# lose the operator's own line either.
+(
+  export HYN_ETC=$TMP/rev2-etc HYN_VAR=$TMP/rev2-var
+  mkdir -p "$HYN_ETC" "$HYN_VAR"
+  printf 'theme=gruvbox\nreport_at=05:00\n' >"$HYN_ETC/config"
+  state_dir_v
+  printf 'report_at=09:15\n' >"$STATE_DIR/cloud-config"
+  cfg_load
+  [[ ${CFG[report_at]} == 09:15 && ${CFG[theme]} == gruvbox ]] || exit 1
+  : >"$STATE_DIR/cloud-config"
+  cfg_load
+  # Back to the operator's line, not to the shipped default.
+  [[ ${CFG[report_at]} == 05:00 && ${CFG[theme]} == gruvbox ]]
+) && ok || bad 'withdrawing a portal setting discarded the local config too'
+cfg_load
+
+# ---------------------------------------------------------------------------
+section 'a timer is on, or there is a reason'
+# ---------------------------------------------------------------------------
+# The state that could not be explained: a correctly installed machine with two
+# disabled timers and a doctor full of warnings, nothing actually wrong. Now every
+# scheduled job treats "nowhere to send" as a no-op, so only the portal push --
+# which cannot work at all without a token -- is ever conditional.
+(
+  source "$HYN_LIB/setup.sh"
+  systemctl() { return 0; }
+  CFG[alert_enabled]=on CFG[report_enabled]=on
+  CFG[cloud_enabled]=off
+  cloud_linked() { return 1; }
+  out=$(setup_apply_schedule "$ROOT/bin/hyn" 2>&1)
+  # Four of five on, straight out of the box, with no channel configured at all.
+  [[ $out == *'hyn-speedtest.timer'*enabled* ]] &&
+  [[ $out == *'hyn-record.timer'*enabled* ]] &&
+  [[ $out == *'hyn-alerts.timer'*enabled* ]] &&
+  [[ $out == *'hyn-report.timer'*enabled* ]] &&
+  [[ $out == *'hyn-push.timer'*disabled* ]]
+) && ok || bad 'a fresh install leaves a timer off for no reason the operator can see'
+# ...and the one that is off can say why, in words, so doctor does not call it a
+# warning.
+(
+  source "$HYN_LIB/setup.sh"
+  CFG[cloud_enabled]=off
+  why=$(setup_timer_reason hyn-push.timer)
+  [[ $why == *'sudo hyn link'* ]]
+) && ok || bad 'a disabled push timer cannot explain itself'
+(
+  source "$HYN_LIB/setup.sh"
+  CFG[report_enabled]=off
+  why=$(setup_timer_reason hyn-report.timer)
+  [[ $why == *report_enabled=off* ]]
+) && ok || bad 'a deliberately disabled report timer cannot explain itself'
+(
+  source "$HYN_LIB/setup.sh"
+  CFG[cloud_enabled]=on CFG[alert_enabled]=on CFG[report_enabled]=on
+  cloud_linked() { return 0; }
+  # Nothing to explain when everything should be running: an empty reason is what
+  # doctor treats as a genuine problem.
+  ! setup_timer_reason hyn-push.timer && ! setup_timer_reason hyn-alerts.timer &&
+  ! setup_timer_reason hyn-record.timer
+) && ok || bad 'a timer that should be running was excused instead of flagged'
+
+# "Nowhere to send" must be a clean no-op, or the report unit goes red every
+# morning on a machine that is working perfectly.
+# One question decides whether anything can be delivered: is this machine paired.
+# There is no channel list to be empty and no provider to be half-configured.
+truthy 'an unpaired machine has no delivery' \
+  '( cloud_linked() { return 1; }; ! notify_configured )'
+truthy 'a paired machine has delivery' \
+  '( cloud_configured() { return 0; }; cloud_linked() { return 0; }; notify_configured )'
+(
+  export HYN_VAR=$TMP/rep-var HYN_ETC=$TMP/rep-etc
+  mkdir -p "$HYN_VAR" "$HYN_ETC"
+  cloud_linked() { return 1; }
+  out=$(report_run --send 2>&1)
+  rc=$?
+  ((rc == 0)) && [[ $out == *'no delivery channel is configured'* ]] && [[ $out == *'sudo hyn link'* ]]
+) && ok || bad 'the daily report reports a failure when there is simply nowhere to send'
+
+# There is one delivery path, so there is one thing to check. doctor must say
+# whether this machine can reach the portal at all, and must not report an unpaired
+# machine as broken -- a local monitor that cannot mail anyone is a working local
+# monitor.
+_doc_unpaired=$(
+  export HYN_ETC=$TMP/chan-etc HYN_VAR=$TMP/chan-var TERM=dumb
+  mkdir -p "$HYN_ETC" "$HYN_VAR"
+  : >"$HYN_ETC/config"
+  bash "$ROOT/bin/hyn" doctor 2>&1
+)
+contains 'doctor has a delivery section'   'Delivery'        "$_doc_unpaired"
+contains 'doctor says how to enable email' 'sudo hyn link'   "$_doc_unpaired"
+contains 'doctor covers outage detection'  'outage detection' "$_doc_unpaired"
+# Not one word about a provider, a key, a recipient or a sender: none of those
+# exist on this side any more, and printing a local copy would be printing a guess.
+for _gone in resend brevo smtp telegram ntfy webhook 'notify_to' 'notify_from' \
+             'recipients' 'sender'; do
+  missing "doctor no longer mentions $_gone" "$_gone" "$_doc_unpaired"
+done
+# A paired machine reports the endpoint, the token and the transport instead.
+_doc_paired=$(
+  export HYN_ETC=$TMP/chan2-etc HYN_VAR=$TMP/chan2-var TERM=dumb
+  mkdir -p "$HYN_ETC" "$HYN_VAR"
+  printf 'cloud_enabled=on\ncloud_node_id=3f7a0000-0000-4000-8000-000000000001\n' >"$HYN_ETC/config"
+  ( umask 077; printf 'cloud_node_token=%s\n' "$(printf 'b%.0s' {1..64})" >"$HYN_ETC/secrets" )
+  bash "$ROOT/bin/hyn" doctor 2>&1
+)
+contains 'a paired machine names the endpoint' 'web portal' "$_doc_paired"
+contains 'a paired machine confirms the token' 'node token' "$_doc_paired"
+contains 'a paired machine checks the transport' 'transport'  "$_doc_paired"
+contains 'a paired machine reports the endpoint scheme' 'https' "$_doc_paired"
+contains 'a paired machine reports the queue budget' 'daily budget' "$_doc_paired"
+contains 'a paired machine is watched from outside' 'three missed heartbeats' "$_doc_paired"
+
+# ---------------------------------------------------------------------------
+section 'config migration'
+# ---------------------------------------------------------------------------
+# Changing a default in core.sh does nothing for a box whose config file already
+# contains the old one, and `hyn setup` writes every default into that file -- so
+# on a deployed fleet the old value is on every machine. A known-bad shipped
+# default is corrected in place; anything the operator chose is left alone.
+(
+  source "$HYN_LIB/setup.sh"
+  export HYN_ETC=$TMP/mig
+  mkdir -p "$HYN_ETC"
+  printf '%s\n' 'theme=nord' 'highway_units=highway*,hw-*,nebula*,mosaic*' \
+    'alert_disk_pct=85' >"$HYN_ETC/config"
+  setup_migrate_config >/dev/null
+  grep -xF  'highway_units=highway*,hway*,hw-*,nebula*,mosaic*' "$HYN_ETC/config" &&
+  grep -xF  'theme=nord' "$HYN_ETC/config" &&
+  grep -xF  'alert_disk_pct=85' "$HYN_ETC/config" &&
+  [[ $(wc -l <"$HYN_ETC/config") -eq 3 ]]
+) && ok || bad 'a stale shipped highway_units default was not corrected'
+# A deliberately narrowed list is the operator's, not ours to widen.
+(
+  source "$HYN_LIB/setup.sh"
+  export HYN_ETC=$TMP/mig2
+  mkdir -p "$HYN_ETC"
+  printf '%s\n' 'highway_units=hway-relayer.service' >"$HYN_ETC/config"
+  setup_migrate_config >/dev/null
+  grep -xF  'highway_units=hway-relayer.service' "$HYN_ETC/config"
+) && ok || bad 'a hand-picked highway_units list was overwritten'
+# Nothing to migrate must not rewrite the file at all.
+(
+  source "$HYN_LIB/setup.sh"
+  export HYN_ETC=$TMP/mig3
+  mkdir -p "$HYN_ETC"
+  printf '%s\n' 'theme=mono' >"$HYN_ETC/config"
+  before=$(cat "$HYN_ETC/config")
+  setup_migrate_config >/dev/null
+  [[ $before == "$(cat "$HYN_ETC/config")" ]] && [[ ! -e $HYN_ETC/config.mig.$$ ]]
+) && ok || bad 'migration touched a config with nothing to migrate'
+
+# Removing a feature means recognising its remains. Every local email key was
+# written into /etc/hyn-view/config by an earlier release of this same tool, so on
+# an upgraded box they are all still on disk. Reporting nine "unknown config key"
+# warnings for settings the tool itself wrote is the fastest way to teach an
+# operator that this output can be ignored.
+(
+  export HYN_ETC=$TMP/ret-etc HYN_VAR=$TMP/ret-var
+  mkdir -p "$HYN_ETC" "$HYN_VAR"
+  printf '%s\n' 'theme=nord' 'notify_channels=resend' 'notify_to=ops@example.com' \
+    'notify_from=a@b.com' 'notify_from_name=hyn' 'smtp_host=smtp.example.com' \
+    'smtp_port=587' 'telegram_chat_id=1' 'ntfy_topic=t' 'ntfy_server=https://ntfy.sh' \
+    'webhook_url=https://x/y' 'heartbeat_url=https://x/z' 'alert_disk_pct=85' \
+    'typo_key=1' >"$HYN_ETC/config"
+  CFG_WARNINGS=()
+  cfg_load
+  # One grouped note for the retired keys, and the genuine typo still called out.
+  [[ ${#CFG_WARNINGS[@]} -eq 2 ]] &&
+  [[ ${CFG_WARNINGS[*]} == *'typo_key'* ]] &&
+  [[ ${CFG_WARNINGS[*]} == *'11 local email/notification setting(s)'* ]] &&
+  [[ ${CFG_WARNINGS[*]} == *'moved to the web portal'* ]] &&
+  # And none of them applied to anything.
+  [[ ${CFG[theme]} == nord && ${CFG[alert_disk_pct]} == 85 ]]
+) && ok || bad 'retired email keys are reported as typos instead of explained once'
+# `sudo hyn setup` then removes them, so the note stops for good. Dropped rather
+# than commented out: a commented-out recipient address is still an address
+# sitting on the box.
+(
+  source "$HYN_LIB/setup.sh"
+  export HYN_ETC=$TMP/ret-etc HYN_VAR=$TMP/ret-var
+  setup_migrate_config >/dev/null
+  ! grep -E  '^(notify_channels|notify_to|notify_from|notify_from_name|smtp_host|smtp_port|telegram_chat_id|ntfy_topic|ntfy_server|webhook_url|heartbeat_url)' "$HYN_ETC/config" &&
+  ! grep  'ops@example.com' "$HYN_ETC/config" &&
+  grep -x  'theme=nord' "$HYN_ETC/config" &&
+  grep -x  'alert_disk_pct=85' "$HYN_ETC/config" &&
+  grep -x  'typo_key=1' "$HYN_ETC/config"
+) && ok || bad 'setup did not strip the retired email settings, or took a live one with them'
+cfg_load
+
+# Nothing local is left that could deliver a message anywhere.
+for _k in notify_channels notify_to notify_from notify_from_name smtp_host smtp_port \
+          telegram_chat_id ntfy_topic ntfy_server webhook_url heartbeat_url; do
+  falsy "$_k is no longer a setting" "_cfg_allowed $_k"
+  truthy "$_k is recognised as retired" "_cfg_retired $_k"
+done
+# ...and the functions that used to send through them are gone with them.
+for _f in ch_resend ch_brevo ch_smtp ch_telegram ch_ntfy ch_webhook ch_stdout \
+          heartbeat_ping _curl_json valid_email valid_email_list \
+          cloud_notify_queue cloud_notify_record cloud_notify_flush; do
+  falsy "$_f no longer exists" "declare -F $_f >/dev/null"
+done
+truthy 'the one remaining channel is the portal' 'declare -F ch_web >/dev/null'
+# The whole point: no source file can name a provider endpoint any more.
+for _f in "$HYN_LIB"/*.sh "$ROOT/bin/hyn"; do
+  if code_only "$_f" | grep -iE  'api\.resend\.com|api\.brevo\.com|api\.telegram\.org|ntfy\.sh|hooks\.slack\.com|discord\.com/api/webhooks|healthchecks\.io'; then
+    bad "${_f##*/} still contains a third-party delivery endpoint"
+  else ok; fi
+done
+
+# ---------------------------------------------------------------------------
+section 'highway on a real relayer OS'
+# ---------------------------------------------------------------------------
+# Fixtures taken from a production Highway Relayer OS 1.0.1 box, because the
+# names there are not the ones this tracker was originally written against and
+# the mismatch was silent: hyn reported "ok, 3 units active" while the relayer
+# was untracked and hway-logrotate.service sat in `failed`.
+_hway_units=(
+  hway-relayer.service hway-monitor.service hway-otel-agent.service
+  hway-otel-mtls-shim.service hway-traffic-shaper.service hway-logrotate.service
+  hway-binary-watch.timer hway-killswitch-watch.timer
+  nebula-hway.service nebula-guard.service nebula-hway-renew.timer
+)
+# The default pattern list must match every one of them. `hw-*` needs the hyphen
+# straight after "hw" and `highway*` needs an "i", so neither matches "hway-".
+_unmatched=()
+for _u in "${_hway_units[@]}"; do
+  _hit=0
+  _oIFS=$IFS; IFS=,
+  for _p in ${CFG[highway_units]}; do
+    # shellcheck disable=SC2053
+    [[ $_u == $_p ]] && { _hit=1; break; }
+  done
+  IFS=$_oIFS
+  ((_hit)) || _unmatched+=("$_u")
+done
+eq 'every unit on a real relayer OS is tracked' '' "${_unmatched[*]}"
+# The specific regression: without hway* the relayer itself is invisible.
+falsy 'hw-* does not match hway-relayer.service' '[[ hway-relayer.service == hw-* ]]'
+falsy 'highway* does not match hway-relayer.service' '[[ hway-relayer.service == highway* ]]'
+
+# The node process comes from the relayer unit's MainPID, not from a comm scan.
+# /proc/<pid>/comm is capped at 15 chars, so hway-relayer-supervise shows up as
+# "hway-relayer-su"; matching the old fixed names picked nebula-guard and
+# reported 11 MiB for a process holding 1.5 GiB.
+mkdir -p "$TMP/proc/1141" "$TMP/proc/1095"
+: >"$TMP/proc/1141/stat"
+: >"$TMP/proc/1095/stat"
+(
+  HW_UNITS=(hway-monitor.service nebula-guard.service hway-relayer.service)
+  HW_UNIT_COUNT=3
+  HW_STATE=([hway-monitor.service]=active [nebula-guard.service]=active [hway-relayer.service]=active)
+  HW_PID=0
+  systemctl() { case $* in *hway-relayer.service*) printf '1141\n' ;; *) printf '1095\n' ;; esac; }
+  _HAVE[systemctl]=1
+  hw_main_pid && [[ $HW_PID == 1141 && $HW_NODE_UNIT == hway-relayer.service ]]
+) && ok || bad 'the node pid is not taken from the relayer unit'
+# The regression this replaced: `systemctl list-units` is alphabetical, so
+# hway-monitor.service is seen before hway-relayer.service. Picking the first
+# MainPID reported a 3.8 MiB shell as the node while the relayer held 1.5 GiB.
+(
+  HW_UNITS=(hway-monitor.service hway-relayer.service)
+  HW_UNIT_COUNT=2
+  HW_STATE=([hway-monitor.service]=active [hway-relayer.service]=active)
+  HW_PID=0
+  systemctl() { case $* in *hway-relayer.service*) printf '1141\n' ;; *) printf '1093\n' ;; esac; }
+  _HAVE[systemctl]=1
+  hw_main_pid && [[ $HW_PID == 1141 ]]
+) && ok || bad 'an alphabetically earlier sidecar outranked the relayer'
+truthy 'hw_units no longer guesses the pid from the first MainPID it sees' \
+  '! grep  "newpid" "$HYN_LIB/highway.sh"'
+# A sidecar must never be reported as the node.
+(
+  HW_UNITS=(hway-monitor.service nebula-guard.service)
+  HW_UNIT_COUNT=2
+  HW_STATE=([hway-monitor.service]=inactive [nebula-guard.service]=active)
+  HW_PID=0
+  systemctl() { printf '1095\n'; }
+  _HAVE[systemctl]=1
+  hw_main_pid
+) && bad 'nebula-guard was accepted as the node process' || ok
+
+# Version comes from the file the relayer OS actually keeps it in. The unit and
+# journal scans below it found "v0.3.1" in unrelated metadata while the truth was
+# v0.1.95, which then compared as "newer than latest" and suppressed the update.
+truthy 'the relayer agent VERSION path is searched' \
+  'grep  "/opt/hway-agent/current/VERSION" "$HYN_LIB/highway.sh"'
+truthy 'the version file scan runs before the journal scan' \
+  '[[ $(grep -n "^  for f in /opt/hway-agent" "$HYN_LIB/highway.sh" | cut -d: -f1) -lt $(grep -n "VERSION_SRC=journal" "$HYN_LIB/highway.sh" | cut -d: -f1) ]]'
+
+# A process that exits between the glob and the read is completely normal. It
+# must not print to stderr: on a busy relayer that was one line per snapshot.
+_stray=$(
+  mkdir -p "$TMP/proc/999991"
+  ( export HYN_PROC=$TMP/proc; source "$HYN_LIB/core.sh"; source "$HYN_LIB/collect.sh"
+    proc_sample 0 5 cpu ) 2>&1 >/dev/null
+)
+eq 'a vanished process is read quietly' '' "$_stray"
+
+# ---------------------------------------------------------------------------
+section 'overlay and VPN non-interference'
+# ---------------------------------------------------------------------------
+# The mesh tunnel is the node's lifeline: on a real relayer OS hway1 is a tun
+# device owned by nebula-hway.service, carrying the overlay the relayer earns on.
+# hyn reads its counters and nothing else. This is checked by grep rather than by
+# review because the units now have full write access -- there is no sandbox left
+# to stop a mutating command, so the source is the only place it can be stopped.
+_netmut='link set|addr (add|del)|route (add|del|change|replace)|tunnel (add|del)|neigh (add|del)'
+_tcmut='qdisc (add|del|replace|change)|class (add|del)|filter (add|del)'
+_fwmut='(add|insert|delete|flush|replace) (table|chain|rule|set)|-A |-D |-I |-F '
+for _f in "$HYN_LIB"/*.sh "$ROOT/bin/hyn"; do
+  _src=$(code_only "$_f")
+  if printf '%s\n' "$_src" | grep -E  "\bip[[:space:]]+(-[a-z0-9]+[[:space:]]+)*($_netmut)"; then
+    bad "${_f##*/} reconfigures a network interface"
+  else ok; fi
+  if printf '%s\n' "$_src" | grep -E  "\btc[[:space:]]+(-[a-z]+[[:space:]]+)*($_tcmut)"; then
+    bad "${_f##*/} changes traffic control"
+  else ok; fi
+  if printf '%s\n' "$_src" | grep -E  "\b(nft|iptables|ip6tables)\b[^|#]*($_fwmut)"; then
+    bad "${_f##*/} changes a firewall rule"
+  else ok; fi
+  if printf '%s\n' "$_src" | grep -E  '\b(wg|wg-quick|openvpn|nebula-cert)\b[[:space:]]'; then
+    bad "${_f##*/} drives a VPN tool"
+  else ok; fi
+  # No writes anywhere under the overlay's own configuration or state.
+  if printf '%s\n' "$_src" | grep -E  '>[[:space:]]*"?(/etc|/var/lib|/opt)/(nebula|hway|hway-agent|mosaic)'; then
+    bad "${_f##*/} writes into overlay or node state"
+  else ok; fi
+done
+# The only tc and nft calls in the tree must be read-only subcommands.
+while IFS= read -r _line; do
+  [[ $_line =~ (^|[^a-z-])(tc|nft|iptables)[[:space:]] ]] || continue
+  [[ $_line =~ (show|list|-s[[:space:]]qdisc|have[[:space:]]) ]] && continue
+  bad "a tc/nft call that is not a show/list: ${_line#"${_line%%[![:space:]]*}"}"
+done < <(code_only "$HYN_LIB/highway.sh"; code_only "$HYN_LIB/net.sh")
+ok
+# The mesh interface is read through the same /sys counters as any other link.
+truthy 'the tunnel is discovered, not configured' \
+  'grep  "tun_flags" "$HYN_LIB/highway.sh"'
+falsy 'no nebula unit is ever acted on' \
+  'code_only "$HYN_LIB/highway.sh" | grep -E  "systemctl[^|#]*(start|stop|restart|enable|disable)[^|#]*nebula"'
+
+# ---------------------------------------------------------------------------
+section 'zero-setup install'
+# ---------------------------------------------------------------------------
+# `npm install -g hyn-view` must be the whole installation. The postinstall
+# finishes it, and the four rules that keep that honest are asserted here,
+# because a postinstall that can fail an install or reconfigure a developer's
+# laptop is worse than the manual step it replaced.
+_pi="$ROOT/scripts/postinstall.sh"
+truthy 'the postinstall script ships'  '[[ -r $_pi ]]'
+truthy 'the package runs it'           'grep  "\"postinstall\"" "$ROOT/package.json"'
+truthy 'the package ships scripts/'    'grep  "\"scripts/\"" "$ROOT/package.json"'
+# 1. It can never fail an install.
+truthy 'a local install is refused' \
+  '( unset npm_config_global; out=$(bash "$_pi" 2>&1); [[ $? -eq 0 && $out == *"local install"* ]] )'
+truthy 'an opt-out is honoured' \
+  '( export HYN_NO_POSTINSTALL=1 npm_config_global=true; out=$(bash "$_pi" 2>&1); [[ $? -eq 0 && $out == *"HYN_NO_POSTINSTALL"* ]] )'
+truthy 'a non-root global install exits cleanly and says what is left to do' \
+  '( export npm_config_global=true; out=$(bash "$_pi" 2>&1); [[ $? -eq 0 ]] )'
+# 2. Nothing in it can write outside what `hyn setup` already writes.
+truthy 'the postinstall delegates rather than writing units itself' \
+  '! grep -E  "systemd/system|_write_unit" "$_pi"'
+truthy 'the postinstall never enables a non-hyn unit' \
+  '! grep -E  "systemctl[^#]*(highway|hway|nebula|mosaic)" "$_pi"'
+# 3. It must not pair, because pairing needs a human with a browser. Mentioning
+# the command in a hint is fine; running it is not.
+truthy 'the postinstall does not attempt pairing' \
+  '! grep -nE "^[^#]*(\$exe|hyn)[[:space:]]+(link|pair)([[:space:]]|$)" "$_pi" | grep -v  "say "'
+
+# Defaults must make setup unnecessary: no prompt, updates managed, alerting and
+# sampling on. If any of these needed an answer the install would not be silent.
+eq 'no first-run prompt'          'off'     "$(_default_of onboarding)"
+eq 'updates are managed'          'install' "$(_default_of auto_update)"
+eq 'alerting is on by default'    'on'      "$(_default_of alert_enabled)"
+eq 'sampling is on by default'    'on'      "$(_default_of report_enabled)"
+truthy 'a sampling interval is set' '[[ $(_default_of record_interval_min) =~ ^[0-9]+$ ]]'
+
+# Alert evaluation must not depend on a delivery channel: the portal event log is
+# built from it, and on a fresh install there is no channel yet.
+(
+  source "$HYN_LIB/setup.sh"
+  systemctl() { return 0; }
+  CFG[alert_enabled]=on CFG[report_enabled]=on
+  CFG[cloud_enabled]=off
+  cloud_linked() { return 1; }
+  out=$(setup_apply_schedule "$ROOT/bin/hyn" 2>&1)
+  [[ $out == *'hyn-alerts.timer'*enabled* ]] &&
+  [[ $out == *'hyn-record.timer'*enabled* ]] &&
+  [[ $out == *'hyn-report.timer'*'disabled'* ]] &&
+  [[ $out == *'hyn-push.timer'*'disabled'* ]]
+) && ok || bad 'a fresh install does not evaluate alerts until email is configured'
+# ...and a linked machine gets the report too, because `web` is a channel.
+(
+  source "$HYN_LIB/setup.sh"
+  systemctl() { return 0; }
+  CFG[alert_enabled]=on CFG[report_enabled]=on
+  CFG[cloud_enabled]=on
+  cloud_linked() { return 0; }
+  out=$(setup_apply_schedule "$ROOT/bin/hyn" 2>&1)
+  [[ $out == *'hyn-report.timer'*enabled* ]] && [[ $out == *'hyn-push.timer'*enabled* ]]
+) && ok || bad 'linking does not switch on reporting and the portal push'
+
+# The unattended setup must leave behind a config file that is actually editable:
+# every key present with its default, so "change one line" is a real instruction
+# rather than "look up the key name in the README".
+(
+  source "$HYN_LIB/setup.sh"
+  export HYN_ETC=$TMP/zero-etc HYN_VAR=$TMP/zero-var HYN_ROOT=$ROOT
+  is_root() { return 0; }
+  have() { [[ $1 != systemctl ]]; }
+  setup_run --no-timer --no-wizard >/dev/null 2>&1
+  [[ -r $HYN_ETC/config ]]
+) && ok || bad 'an unattended setup did not write a config file'
+_zerocfg=$TMP/zero-etc/config
+if [[ -r $_zerocfg ]]; then
+  _missing=()
+  for _k in profile theme interval net_unit graph panels wan_iface latency_targets \
+            speedtest_per_day speedtest_guard_pct highway_track highway_units \
+            notify_max_per_day alert_enabled alert_min_severity alert_repeat_hours \
+            alert_disk_pct report_enabled report_at record_interval_min auto_update; do
+    grep -E  "^$_k=" "$_zerocfg" || _missing+=("$_k")
+  done
+  eq 'the written config carries every key an operator might change' '' "${_missing[*]}"
+  # Comments, so the file explains itself to whoever opens it at 3am.
+  truthy 'the written config is commented' \
+    '[[ $(grep -c "^#" "$_zerocfg") -gt 20 ]]'
+  # Every key an operator could want must be in the file, or the instruction
+  # "edit /etc/hyn-view/config" is only true for the keys someone remembered to
+  # write. The only permitted omissions are credentials, which belong in the 0600
+  # secrets file and must never appear in a world-readable one.
+  _tmplkeys=$(grep -oE '^[a-z_]+=' "$_zerocfg" | tr -d '=' | sort -u)
+  _absent=()
+  for _k in $(printf '%s\n' "${!CFG[@]}" | sort -u); do
+    printf '%s\n' "$_tmplkeys" | grep -x  "$_k" && continue
+    _absent+=("$_k")
+  done
+  # webhook_url and heartbeat_url are secrets; they are read from the 0600 file.
+  # Nothing is left out any more: every remaining key is safe in a 0644 file,
+  # because the only credential the agent holds is the node token and that lives
+  # in the 0600 secrets file, which `hyn link` writes.
+  eq 'every setting is in the config file' '' "${_absent[*]}"
+  # Secrets must never be in the world-readable file.
+  falsy 'no credential is written to the config' \
+    'grep -E  "^(resend_api_key|brevo_api_key|telegram_token|smtp_pass|webhook_url|heartbeat_url)=" "$_zerocfg"'
+  # Everything written back must be a key the parser accepts, or `hyn` warns about
+  # its own generated file on every launch.
+  _unknown=()
+  for _k in $_tmplkeys; do _cfg_allowed "$_k" || _unknown+=("$_k"); done
+  eq 'every key in the generated config is one the parser knows' '' "${_unknown[*]}"
+  # A reinstall keeps the operator's edits.
+  printf 'theme=gruvbox\n' >>"$_zerocfg"
+  (
+    source "$HYN_LIB/setup.sh"
+    export HYN_ETC=$TMP/zero-etc HYN_VAR=$TMP/zero-var HYN_ROOT=$ROOT
+    is_root() { return 0; }
+    have() { [[ $1 != systemctl ]]; }
+    setup_run --no-timer --no-wizard >/dev/null 2>&1
+  )
+  truthy 'a second install does not overwrite the config' 'grep -x  "theme=gruvbox" "$_zerocfg"'
+  # The secrets file exists at 0600 before anything has a key to put in it.
+  truthy 'the secrets file is created 0600' \
+    '[[ $(stat -c "%a" "$TMP/zero-etc/secrets" 2>/dev/null || stat -f "%Lp" "$TMP/zero-etc/secrets") == 600 ]]'
+else
+  bad 'no config file to inspect'
+fi
+
+# ---------------------------------------------------------------------------
 section 'systemd schedule failure reporting'
 if (
   source "$HYN_LIB/setup.sh"
@@ -1891,6 +2484,90 @@ if (
 else
   ok
 fi
+
+section 'generated units'
+# Written into a directory the test owns, then read back. The alternative --
+# grepping setup.sh for the strings it emits -- passes even when the heredoc that
+# is supposed to contain them was never reached.
+_unitdir=$TMP/units
+mkdir -p "$_unitdir"
+(
+  export HYN_UNIT_DIR=$_unitdir
+  source "$HYN_LIB/setup.sh"
+  systemctl() { return 0; }
+  setup_apply_schedule() { return 0; }
+  setup_timers /usr/bin/hyn
+) >/dev/null 2>&1
+_push_svc=$(<"$_unitdir/hyn-push.service") || _push_svc=''
+_push_tmr=$(<"$_unitdir/hyn-push.timer") || _push_tmr=''
+_maint=$(<"$_unitdir/hyn-update.service") || _maint=''
+
+# HOME. systemd does not set it for a system service without User=, and the tool
+# runs under `set -u`, so its absence aborted every timer run. Asserted on the
+# generated unit as well as in core.sh because they are independent fixes and
+# either one alone is enough to keep a box working.
+for _u in hyn-push hyn-alerts hyn-record hyn-report hyn-speedtest hyn-update; do
+  if [[ -r $_unitdir/$_u.service && $(<"$_unitdir/$_u.service") == *'Environment=HOME='* ]]; then ok
+  else bad "$_u.service does not set HOME, so it will die under set -u"; fi
+done
+if (
+  set -u
+  # shellcheck disable=SC2030
+  export HYN_ETC=$TMP/etc HYN_VAR=$TMP/var HYN_PROC=$TMP/proc HYN_SYS=$TMP/sys
+  unset HOME
+  source "$HYN_LIB/core.sh" && cfg_load && [[ -n ${HOME:-} ]]
+) >/dev/null 2>&1; then ok
+else bad 'cfg_load still dies when HOME is unset (the systemd case)'; fi
+
+# Full write access, by request and by necessity: the agent installs its own
+# updates and rewrites its own units, and neither is possible under a strict
+# mount namespace. These assertions exist so the sandbox is not reintroduced by
+# someone tidying, which would silently break self-update again.
+for _u in hyn-push hyn-alerts hyn-record hyn-report hyn-speedtest; do
+  _c=$(<"$_unitdir/$_u.service")
+  if [[ $_c != *ProtectSystem* && $_c != *ReadWritePaths* && $_c != *MemoryDenyWriteExecute* ]]; then ok
+  else bad "$_u.service is sandboxed again; self-update and doctor --fix cannot work"; fi
+done
+
+# What replaced it: the limits that actually keep monitoring from disturbing a
+# relayer. A node holding 1.5 GiB must always win a contended CPU, and if the
+# kernel has to pick an OOM victim it must pick hyn.
+for _u in hyn-push hyn-alerts hyn-record hyn-report hyn-speedtest; do
+  _c=$(<"$_unitdir/$_u.service")
+  if [[ $_c == *CPUWeight=* && $_c == *IOWeight=* && $_c == *MemoryMax=* \
+     && $_c == *OOMScoreAdjust=* && $_c == *Nice=* ]]; then ok
+  else bad "$_u.service does not yield to the node (missing a weight, cap or OOM bias)"; fi
+done
+truthy 'the collector memory cap is tight' '[[ $_push_svc == *MemoryMax=256M* ]]'
+# npm and node need more than bash does, which is why the install has its own
+# unit rather than a relaxed collector.
+truthy 'the maintenance unit has room for node' '[[ $_maint == *MemoryMax=1G* ]]'
+truthy 'the maintenance unit still yields to the node' '[[ $_maint == *OOMScoreAdjust=500* ]]'
+# ...and must finish inside the portal's three-minute quiet window, on its own.
+contains 'the check-in unit cannot hang past two intervals' 'TimeoutStartSec=120' "$_push_svc"
+
+# 15s of jitter plus 30s of timer coalescing turned a "one minute" heartbeat into
+# up to 105s, and two of those read as a machine that has gone quiet.
+contains 'the check-in timer runs every minute' 'OnUnitActiveSec=1min' "$_push_tmr"
+truthy 'the check-in timer spends no heartbeat budget on jitter' \
+  '[[ ${_push_tmr##*RandomizedDelaySec=} == 0* ]]'
+truthy 'the check-in timer is not coalesced away from its minute' \
+  '[[ ${_push_tmr##*AccuracySec=} == 1s* ]]'
+
+# The maintenance unit is where an install runs: on its own timeout, with its own
+# memory headroom, and out of the sixty-second check-in's way.
+contains 'the maintenance unit runs the command executor' 'cloud run-command' "$_maint"
+# No [Install] section: it is started by name when the portal asks for an update,
+# never enabled, so it cannot run itself at boot and claim a command unasked.
+truthy 'the maintenance unit is on demand only'  '[[ $_maint != *"[Install]"* ]]'
+truthy 'the maintenance unit is bounded'          '[[ $_maint == *TimeoutStartSec=900* ]]'
+# It writes outside the state directory, so it is the one unit where a hang has a
+# blast radius. Every other unit must keep its politeness limits.
+for _u in "$_unitdir"/hyn-alerts.service "$_unitdir"/hyn-record.service \
+          "$_unitdir"/hyn-report.service "$_unitdir"/hyn-speedtest.service; do
+  if [[ -r $_u && $(<"$_u") == *CPUWeight=20* ]]; then ok
+  else bad "${_u##*/} no longer yields CPU to the node"; fi
+done
 
 # ---------------------------------------------------------------------------
 printf '\n'
