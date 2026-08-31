@@ -382,6 +382,12 @@ panel_cpu() {
   right="${CPU_COUNT}c"
   [[ -n $CPU_MHZ ]] && right+=" · ${CPU_MHZ} MHz"
   [[ -n $CPU_TEMP ]] && right+=" · ${CPU_TEMP}°C"
+  # Package draw belongs beside the clock and the temperature: the three of them
+  # together are what say whether a busy CPU is also a hot, thirsty one.
+  if [[ -n ${PWR_CPU_DW:-} ]]; then
+    fmt_fixed_v "$PWR_CPU_DW" 10 1
+    right+=" · ${FMT_OUT}W"
+  fi
 
   # Rows are built in priority order and then emitted up to the caller's budget,
   # so a short terminal loses the reference information rather than the load.
@@ -427,6 +433,45 @@ panel_cpu() {
       fmt_fixed_v "$n" 100 1
       line+="${C[dim]}${r:0:3}${C[reset]} $c$FMT_OUT%${C[reset]}  "
     done
+    body+=("$line")
+  fi
+  # Power draw, when the platform will say. The source is named next to the
+  # number because "118W psu" is a measurement of the machine and "17W cpu+dram"
+  # is an estimate of part of it, and an operator sizing a UPS needs to know
+  # which one they are reading.
+  #
+  # Ordering is load-bearing. panel_row truncates from the right, and in a
+  # two-column dash this panel is about 44 columns wide, so whatever goes last
+  # gets an ellipsis. Losing mains is the only fact here that is an incident
+  # rather than a measurement, so it goes FIRST when it happens; cpu and dram are
+  # the detail and go last, where losing them costs nothing.
+  if [[ -n ${PWR_INPUT_DW:-} || -n ${PWR_CPU_DW:-} || -n ${PWR_AC:-} ]]; then
+    line="${C[dim]}power${C[reset]} "
+    if [[ ${PWR_AC:-} == 0 ]]; then
+      line+="${C[crit]}${C[bold]}on battery${C[reset]}"
+      [[ -n ${PWR_BAT_PCT:-} ]] && line+=" ${C[crit]}${PWR_BAT_PCT}%${C[reset]}"
+      line+='  '
+    fi
+    if [[ -n ${PWR_INPUT_DW:-} ]]; then
+      fmt_fixed_v "$PWR_INPUT_DW" 10 1
+      line+="${C[bold]}${FMT_OUT}W${C[reset]}"
+      local psrc
+      psrc=$(power_src_label "${PWR_INPUT_SRC:-}")
+      [[ -n $psrc ]] && line+=" ${C[dim]}$psrc${C[reset]}"
+      line+='  '
+    fi
+    if [[ -n ${PWR_CPU_DW:-} ]]; then
+      fmt_fixed_v "$PWR_CPU_DW" 10 1; line+="${C[dim]}cpu${C[reset]} ${FMT_OUT}W  "
+    fi
+    if [[ -n ${PWR_DRAM_DW:-} ]]; then
+      fmt_fixed_v "$PWR_DRAM_DW" 10 1; line+="${C[dim]}dram${C[reset]} ${FMT_OUT}W  "
+    fi
+    # Mains present is the unremarkable case, so it is a quiet note at the end
+    # and is the first thing dropped on a narrow panel.
+    if [[ ${PWR_AC:-} == 1 ]]; then
+      line+="${C[dim]}mains${C[reset]}"
+      [[ -n ${PWR_BAT_PCT:-} ]] && ((PWR_BAT_PCT < 100)) && line+=" ${C[dim]}bat ${PWR_BAT_PCT}%${C[reset]}"
+    fi
     body+=("$line")
   fi
   [[ -n $CPU_MODEL && $CPU_MODEL != unknown ]] && body+=("${C[dim]}$CPU_MODEL${C[reset]}")
@@ -1159,6 +1204,38 @@ _simple_essentials_line() {
   return 0
 }
 
+# _simple_power_line -- one line for what the machine is drawing, and whether it
+# is drawing it from the wall. Absent on a box that cannot measure either, rather
+# than printed as a dash: this view earns its place by being short, and a row
+# saying "no power sensor" on every VM would be noise on the screen nobody is
+# working at.
+_simple_power_line() {
+  local w=$1 line=''
+  [[ -n ${PWR_INPUT_DW:-} || -n ${PWR_AC:-} ]] || return 1
+  if [[ -n ${PWR_INPUT_DW:-} ]]; then
+    fmt_fixed_v "$PWR_INPUT_DW" 10 1
+    local psrc
+    psrc=$(power_src_label "${PWR_INPUT_SRC:-}")
+    line="${C[dim]}power${C[reset]}     ${C[bold]}${FMT_OUT}W${C[reset]}"
+    [[ -n $psrc ]] && line+=" ${C[dim]}$psrc${C[reset]}"
+  else
+    line="${C[dim]}power${C[reset]}     "
+  fi
+  # Running on battery is the headline when it happens, so it is coloured and it
+  # displaces the polite "mains".
+  if [[ ${PWR_AC:-} == 0 ]]; then
+    line+="  ${C[crit]}${C[bold]}ON BATTERY${C[reset]}"
+    [[ -n ${PWR_BAT_PCT:-} ]] && line+=" ${C[crit]}${PWR_BAT_PCT}%${C[reset]}"
+    [[ -n ${PWR_BAT_STATUS:-} ]] && line+=" ${C[dim]}${PWR_BAT_STATUS,,}${C[reset]}"
+  elif [[ ${PWR_AC:-} == 1 ]]; then
+    line+="  ${C[ok]}mains${C[reset]}"
+    [[ -n ${PWR_BAT_PCT:-} ]] && ((PWR_BAT_PCT < 100)) && \
+      line+=" ${C[dim]}battery ${PWR_BAT_PCT}%${C[reset]}"
+  fi
+  panel_row P_SIMPLE "$w" "$line"
+  return 0
+}
+
 # render_simple -- the premium "just tell me" dashboard. One panel, four
 # sections in fixed order (node, internet, temperature, essentials), each
 # section appearing exactly once. Sized to fill whatever height is available
@@ -1175,6 +1252,9 @@ render_simple() {
   _simple_speed_lines "$w" "$inner"
   panel_row P_SIMPLE "$w" ''
   _simple_temp_line "$w"
+  # Directly under the temperature, because they are the same question asked two
+  # ways and they move together.
+  _simple_power_line "$w" || true
   panel_row P_SIMPLE "$w" ''
   _simple_essentials_line "$w"
   panel_close P_SIMPLE "$w"

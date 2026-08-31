@@ -47,8 +47,15 @@ secrets_load() {
   [[ -r $f ]] || return 1
   # Refuse to read a secrets file that others can read. Better to fail loudly at
   # setup time than to keep quietly using a key that has already leaked.
+  #
+  # Silent inside the resident agent, which checks this once at startup instead.
+  # `secret` runs in a command substitution, so its cache dies with the subshell
+  # and every call re-reads the file -- that is what keeps a newly paired machine
+  # from needing a restart, and it also means a warning here fires on every read.
+  # At four reads per 24-second beat that measured 15,600 journal lines a day from
+  # one mis-permissioned file, which buries everything else on the box.
   local perm
-  if have stat; then
+  if have stat && [[ ${HYN_IN_AGENT:-0} != 1 ]]; then
     perm=$(stat -c '%a' "$f" 2>/dev/null) || perm=''
     if [[ -n $perm && ${#perm} -ge 3 && ${perm: -2} != 00 ]]; then
       warn "$f is mode $perm; it holds API keys and should be 0600. Fix with: sudo chmod 600 $f"

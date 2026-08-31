@@ -112,6 +112,12 @@ HOSTNAME_S=web-01 DISTRO='Ubuntu 24.04 LTS' KERNEL='6.8.0-31-generic'
 UPTIME_S=123456 LOAD1=0.42 LOAD5=0.31 LOAD15=0.28
 CPU_PCT=37.5 CPU_USER=20 CPU_SYS=10 CPU_IOWAIT=1.1 CPU_STEAL=0.2 CPU_COUNT=8
 CPU_TEMP=52 CPU_MHZ=3400 CPU_MODEL='AMD EPYC 9354'
+# Power: a PSU input rail plus RAPL, and a UPS that has lost mains. Deciwatts
+# here, because that is the internal unit; the assertions below check the wire
+# carries watts.
+PWR_INPUT_DW=1180 PWR_INPUT_SRC=hwmon-input PWR_CPU_DW=150 PWR_DRAM_DW=20
+PWR_AC=0 PWR_BAT_PCT=87 PWR_BAT_STATUS=Discharging PWR_BAT_DW=95
+declare -A PWR_RAILS=(['pmbus PSU1 Input Power']=1180 ['package-0']=150)
 MEM_TOTAL=33285996544 MEM_USED=20000000000 MEM_PCT=61.2 SWAP_USED=0
 MOUNTS=(/) ; MP_PCT[/]=58.4 ; MP_USED[/]=100 ; MP_SIZE[/]=200 ; MP_AVAIL[/]=100 ; MP_FSTYPE[/]=ext4
 NET_WAN=eth0
@@ -324,6 +330,17 @@ assert body[\"p_payload\"][\"cpu\"][\"temp_c\"] == 52
 assert body[\"p_payload\"][\"disk\"][\"pct\"] == 58.4
 assert body[\"p_payload\"][\"alerts\"][0][\"severity\"] == \"warn\"
 assert body[\"p_payload\"][\"latency_ms\"] == 1.20, body[\"p_payload\"][\"latency_ms\"]
+pw = body[\"p_payload\"][\"power\"]
+# Watts on the wire, not the deciwatts used internally: a dashboard axis in
+# tenths of a watt would be wrong by a factor of ten and look plausible.
+assert pw[\"input_w\"] == 118.0, pw
+assert pw[\"cpu_w\"] == 15.0 and pw[\"dram_w\"] == 2.0, pw
+# The source travels with the number. Without it the portal cannot tell a PSU
+# measurement from a RAPL estimate, and would plot them on one axis.
+assert pw[\"input_src\"] == \"hwmon-input\", pw
+assert pw[\"ac_online\"] == 0 and pw[\"battery_pct\"] == 87, pw
+assert pw[\"battery_status\"] == \"Discharging\" and pw[\"battery_w\"] == 9.5, pw
+assert pw[\"rails\"][\"pmbus PSU1 Input Power\"] == 118.0, pw
 assert body[\"p_payload\"][\"agent_version\"] == \"$HYN_VERSION\", body[\"p_payload\"][\"agent_version\"]
 assert body[\"p_payload\"][\"agent_update\"][\"latest\"] == \"$HYN_VERSION\", body[\"p_payload\"][\"agent_update\"]
 assert body[\"p_payload\"][\"agent_update\"][\"available\"] is False, body[\"p_payload\"][\"agent_update\"]

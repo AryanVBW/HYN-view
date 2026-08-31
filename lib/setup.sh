@@ -260,6 +260,13 @@ public_ip=${CFG[public_ip]}
 tcp_states=${CFG[tcp_states]}
 tcp_states_interval=${CFG[tcp_states_interval]}
 
+# --- power -------------------------------------------------------------------
+# Track what the machine draws: RAPL energy counters (CPU package and DRAM),
+# hwmon power rails (a PSU or BMC input reading, where the board exposes one),
+# and mains/battery/UPS state. A box that exposes none of these reports every
+# field as unavailable rather than as 0 W, so leaving this on costs nothing.
+power_track=${CFG[power_track]}
+
 # --- speed test --------------------------------------------------------------
 # how many times a day the timer runs
 speedtest_per_day=${CFG[speedtest_per_day]}

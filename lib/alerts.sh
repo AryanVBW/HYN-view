@@ -140,6 +140,10 @@ alerts_collect() {
   net_sample 0
   cpu_sample 0
   disk_sample 0
+  # Seeds the RAPL energy counters so the read after the sleep has a previous
+  # sample to differentiate against; without this pair every non-interactive
+  # invocation would report no CPU power at all.
+  power_read 0
   sleep 1
   net_sample 1000
   net_snmp 1000
@@ -150,6 +154,7 @@ alerts_collect() {
   disk_sample 1000
   psi_sample
   thermal_read
+  power_read 1000
   cpu_freq_read
   cpu_freq_all
   sensors_read

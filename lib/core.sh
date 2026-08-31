@@ -100,6 +100,10 @@ declare -A CFG=(
   [public_ip]=on
   [tcp_states]=on
   [tcp_states_interval]=5
+  # Power draw: RAPL energy counters, hwmon power rails, and mains/battery state.
+  # On a box that exposes none of them every field stays unavailable rather than
+  # reading 0 W, so leaving this on costs nothing there.
+  [power_track]=on
   [speedtest_per_day]=4
   [speedtest_down_mb]=25
   [speedtest_up_mb]=10
@@ -330,6 +334,13 @@ cfg_load() {
   # portal pull, and layering onto the previous result would make a withdrawn
   # setting permanent -- see CFG_DEFAULT.
   for k in "${!CFG_DEFAULT[@]}"; do CFG[$k]=${CFG_DEFAULT[$k]}; done
+  # The warnings describe the configuration as it is right now, so a reload
+  # replaces them rather than appending to them. Without this they only ever grew:
+  # harmless for a one-shot, but hyn-agent.service reloads every five minutes for
+  # months, so one misspelled key in /etc/hyn-view/config added ~105,000 entries a
+  # year to a process that nothing ever reads them from. It also stopped the
+  # dashboard listing the same warning twice after a portal pull.
+  CFG_WARNINGS=()
   CFG_EXPLICIT=()
   # Read operator-controlled files first. A validated portal cache then
   # overrides only the small `_cfg_cloud_allowed` set. Standard installations

@@ -35,10 +35,12 @@ record_sample() {
   # Two samples for rates, same as snapshot and the alert run.
   net_sample 0
   cpu_sample 0
+  power_read 0
   sleep 1
   net_sample 1000
   net_snmp 1000
   cpu_sample 1000
+  power_read 1000
   mem_sample
   sys_sample
   psi_sample
@@ -67,12 +69,17 @@ record_sample() {
   f=$(metrics_file)
   state_dir_v
   [[ -d $STATE_DIR ]] || mkdir -p "$STATE_DIR" 2>/dev/null || return 1
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  # Column 21 is power, in deciwatts, appended rather than inserted so a file
+  # written by an older release still parses -- the reader names it last and
+  # defaults it, so a 20-column row simply has no power history. An unreadable
+  # sensor records as empty, never 0: averaging a fabricated zero into the day
+  # would understate every figure in the report.
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${EPOCHSECONDS:-0}" "$CPU_PCT" "$CPU_STEAL" "$CPU_IOWAIT" "$MEM_PCT" "$SWAP_PCT" \
     "$loadm" "$diskmax" "${NET_RXR[$ifc]:-0}" "${NET_TXR[$ifc]:-0}" \
     "${NET_RX[$ifc]:-0}" "${NET_TX[$ifc]:-0}" "$NET_RETRANS_PM" "$lat" \
     "${CT_PCT:-0}" "${HW_ACTIVE:-0}" "${HW_RSS:-0}" "${HW_CPU:-0}" \
-    "${PROC_TOTAL:-0}" "$hwrest" >>"$f"
+    "${PROC_TOTAL:-0}" "$hwrest" "${PWR_INPUT_DW:-}" >>"$f"
 
   # Trim by age rather than line count, so changing the record interval does not
   # silently change how much history is kept.
@@ -171,6 +178,10 @@ report_aggregate() {
   local hw_up=0 hw_rss_max=0 hw_cpu_s=0 hw_rest_max=0 hw_rest_first=-1
   local procs_max=0 first_ts=0 last_ts=0
   local cpu_busy_n=0 mem_busy_n=0
+  # Power is summed separately because it is the one column that is legitimately
+  # absent: a box with no sensor, or a run before this release, contributes no
+  # sample rather than a zero. pwr_n is therefore not n.
+  local pwr_s=0 pwr_n=0 pwr_max=0 pwr_min=-1
   local -a s_cpu=() s_mem=() s_disk=() s_rx=() s_tx=()
 
   local busy_cpu=${CFG[report_busy_cpu_pct]:-80}
@@ -178,7 +189,7 @@ report_aggregate() {
   [[ $busy_cpu =~ ^[0-9]+$ ]] || busy_cpu=80
   [[ $busy_mem =~ ^[0-9]+$ ]] || busy_mem=85
 
-  while IFS=$'\t' read -r ts cpu steal iowait mem swap loadm diskmax rxb txb rxt txt retr lat ctp hwa hwr hwc procs hwrest; do
+  while IFS=$'\t' read -r ts cpu steal iowait mem swap loadm diskmax rxb txb rxt txt retr lat ctp hwa hwr hwc procs hwrest pwr; do
     [[ $ts =~ ^[0-9]+$ ]] || continue
     ((ts < cutoff)) && continue
     ((n == 0)) && first_ts=$ts
@@ -219,6 +230,14 @@ report_aggregate() {
     ((hw_rest_first < 0)) && hw_rest_first=$hwrest
     ((hwrest > hw_rest_max)) && hw_rest_max=$hwrest
     procs=${procs:-0}; ((procs > procs_max)) && procs_max=$procs
+    # Only a real reading counts. A row from before this column existed, or from a
+    # box with no sensor, leaves the field empty and must not drag the average
+    # towards zero.
+    if [[ ${pwr:-} =~ ^[0-9]+$ ]]; then
+      ((pwr_s += pwr)); ((pwr_n++))
+      ((pwr > pwr_max)) && pwr_max=$pwr
+      ((pwr_min < 0 || pwr < pwr_min)) && pwr_min=$pwr
+    fi
     s_cpu+=("$cpu"); s_mem+=("$mem"); s_disk+=("$diskmax")
     s_rx+=("$rxb"); s_tx+=("$txb")
   done <"$f"
@@ -250,6 +269,21 @@ report_aggregate() {
   R[hw_cpu_avg]=$((hw_cpu_s / n))
   R[hw_restarts]=$((hw_rest_max - (hw_rest_first < 0 ? hw_rest_max : hw_rest_first)))
   R[procs_max]=$procs_max
+  # Power, in deciwatts, and only when something actually measured it. Absent
+  # stays absent: R[pwr_n]=0 is what every renderer checks, so no section has to
+  # decide for itself whether 0 W means idle or unknown.
+  R[pwr_n]=$pwr_n
+  if ((pwr_n > 0)); then
+    R[pwr_avg]=$((pwr_s / pwr_n))
+    R[pwr_max]=$pwr_max
+    R[pwr_min]=$((pwr_min < 0 ? 0 : pwr_min))
+    # Energy over the window, in watt-hours. Average watts times the span the
+    # samples actually cover -- not the nominal 24h, because a box that was off
+    # for six hours did not draw anything during them.
+    R[pwr_wh]=$((pwr_s / pwr_n * (last_ts - first_ts) / 36000))
+  else
+    R[pwr_avg]=0 R[pwr_max]=0 R[pwr_min]=0 R[pwr_wh]=0
+  fi
   # Minutes spent above the busy thresholds, derived from the sample interval.
   local ival=${CFG[record_interval_min]:-5}
   [[ $ival =~ ^[0-9]+$ ]] || ival=5
@@ -393,6 +427,14 @@ report_text() {
         "${R[mem_avg]}" "${R[mem_max]}" "${R[mem_busy_min]}" "${CFG[report_busy_mem_pct]:-85}"
       printf '  swap             peak %s%%\n' "${R[swap_max]}"
       printf '  processes        peak %s\n' "${R[procs_max]}"
+      # Only when something measured it. A "0 W" line on a VM would be worse than
+      # no line: it reads as a machine drawing nothing.
+      if ((${R[pwr_n]:-0} > 0)); then
+        printf '  power draw       avg %sW   peak %sW   low %sW\n' \
+          "$(fmt_fixed "${R[pwr_avg]}" 10 1)" "$(fmt_fixed "${R[pwr_max]}" 10 1)" \
+          "$(fmt_fixed "${R[pwr_min]}" 10 1)"
+        printf '  energy used      ~%s Wh over the window\n' "${R[pwr_wh]}"
+      fi
       _t_spark RH_CPU '  cpu trend        '
       _t_spark RH_MEM '  memory trend     '
       printf '\n'
@@ -693,6 +735,10 @@ report_html() {
       fi
       e_kv 'iowait' "avg ${R[io_avg]:-0}%, peak ${R[io_max]:-0}%"
       e_kv 'Processes' "peak ${R[procs_max]:-0}"
+      if ((${R[pwr_n]:-0} > 0)); then
+        e_kv 'Power draw' "avg $(fmt_fixed "${R[pwr_avg]}" 10 1)W, peak $(fmt_fixed "${R[pwr_max]}" 10 1)W, low $(fmt_fixed "${R[pwr_min]}" 10 1)W"
+        e_kv 'Energy' "about ${R[pwr_wh]} Wh over the window"
+      fi
       e_spark RH_CPU 'CPU trend' "$E_ACCENT"
       e_spark RH_MEM 'Memory trend' "$E_ACCENT"
       e_kv_close

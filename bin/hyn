@@ -4,13 +4,25 @@
 # Entry point: resolves its own install location, loads the library, then either
 # runs the interactive loop or handles a one-shot subcommand.
 #
-# Requires bash 4.3+ for namerefs and associative arrays. Ubuntu 22.04 ships
-# 5.1 and 24.04 ships 5.2, so this is not a practical limit on the target.
+# Requires bash 5.0+: namerefs and associative arrays need 4.3, EPOCHSECONDS
+# needs 5.0, and see the version gate below for why that is enforced rather than
+# worked around. Ubuntu 22.04 ships 5.1 and 24.04 ships 5.2.
 
 set -uo pipefail
 
-if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3))); then
-  printf 'hyn: needs bash 4.3 or newer (found %s)\n' "${BASH_VERSION:-unknown}" >&2
+# Requires bash 5.0+ for EPOCHSECONDS, which the collectors, the alert cooldowns,
+# the resident agent's liveness stamp and every rate calculation are built on --
+# 61 uses across 12 files. They are all written `${EPOCHSECONDS:-0}` so that an
+# older shell does not abort under `set -u`, and that is exactly the problem: on
+# bash 4.x every one of them would silently read 0, so rates, cooldowns and the
+# heartbeat's staleness check would be quietly wrong rather than loudly broken.
+# This tool reports an unreadable sensor as unavailable rather than as zero; the
+# same standard applies to its own clock. Ubuntu 22.04 ships 5.1 and 24.04 ships
+# 5.2, so this is not a practical limit on the target.
+if ((BASH_VERSINFO[0] < 5)); then
+  printf 'hyn: needs bash 5.0 or newer (found %s)\n' "${BASH_VERSION:-unknown}" >&2
+  printf 'hyn: it uses EPOCHSECONDS for every rate and timing calculation; on an\n' >&2
+  printf 'hyn: older shell those would silently read zero instead of failing.\n' >&2
   exit 1
 fi
 
@@ -94,6 +106,9 @@ sample_all() {
   disk_sample "$ms"
   psi_sample
   thermal_read
+  # Cheap: a handful of /sys reads, and the RAPL half needs the same interval the
+  # network counters do because energy_uj is a counter, not a reading.
+  power_read "$ms"
 
   # Staggered work: each of these is either a fork or a large read, so they run
   # on their own cadence rather than every tick.
@@ -385,6 +400,14 @@ cmd_snapshot() {
     printf '  "load": [%s, %s, %s],\n' "${LOAD1:-0}" "${LOAD5:-0}" "${LOAD15:-0}"
     printf '  "cpu": {"pct": %s, "user": %s, "sys": %s, "iowait": %s, "steal": %s, "cores": %s},\n' \
       "$CPU_PCT" "$CPU_USER" "$CPU_SYS" "$CPU_IOWAIT" "$CPU_STEAL" "$CPU_COUNT"
+    # Watts, not deciwatts, for anything leaving this process -- and null, never
+    # 0, for a sensor the platform does not have. _jnum is what enforces that.
+    printf '  "power": {"input_w": %s, "input_src": "%s", "cpu_w": %s, "dram_w": %s,\n' \
+      "$(_jnum "$(power_watts "${PWR_INPUT_DW:-}")")" "${PWR_INPUT_SRC:-}" \
+      "$(_jnum "$(power_watts "${PWR_CPU_DW:-}")")" "$(_jnum "$(power_watts "${PWR_DRAM_DW:-}")")"
+    printf '    "ac_online": %s, "battery_pct": %s, "battery_status": "%s", "battery_w": %s},\n' \
+      "$(_jnum "${PWR_AC:-}")" "$(_jnum "${PWR_BAT_PCT:-}")" "${PWR_BAT_STATUS:-}" \
+      "$(_jnum "$(power_watts "${PWR_BAT_DW:-}")")"
     printf '  "memory": {"total": %s, "used": %s, "pct": %s, "swap_used": %s},\n' \
       "$MEM_TOTAL" "$MEM_USED" "$MEM_PCT" "$SWAP_USED"
     printf '  "network": {"iface": "%s", "rx_bps": %s, "tx_bps": %s, "rx_total": %s, "tx_total": %s,\n' \

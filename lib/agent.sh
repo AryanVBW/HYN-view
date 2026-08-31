@@ -201,6 +201,11 @@ agent_run() {
   done
 
   agent_interval_v
+  # Once, before HYN_IN_AGENT silences the per-read check below: a secrets file
+  # others can read is worth saying out loud, and startup is the one place in a
+  # months-long process where saying it costs a single line rather than 15,600 a
+  # day. The timers and `hyn doctor` still report it if it breaks later.
+  secrets_load >/dev/null || true
   # Read by update_refresh_services and setup_heal_agent, both of which restart
   # hyn-agent.service: from inside the loop that is self-destruction, and both
   # have a better answer available (exit on the version change; trust the beat).
@@ -227,13 +232,21 @@ agent_run() {
     # progress", and a beat that blocks for its full curl timeout is progress.
     printf '%s\n' "$now" >"$stamp.tmp" 2>/dev/null && mv -f "$stamp.tmp" "$stamp" 2>/dev/null || true
 
+    # The beat goes FIRST, before any maintenance.
+    #
+    # This used to be the other way round, and it was wrong in the one case that
+    # matters most: a machine that has just booted. Maintenance walks six units
+    # with systemctl, and on a box where the whole unit graph is still starting
+    # those calls are slow -- measured at 3.3s with a 250ms systemctl, all of it
+    # spent before the portal heard anything at all. The portal's entire job is
+    # knowing this machine is alive, so nothing gets to queue ahead of saying so.
+    beat_at=$now
+    agent_beat || true
+
     if ((now - maint_at >= maint_every)); then
       maint_at=$now
       agent_maintain
     fi
-
-    beat_at=$now
-    agent_beat || true
 
     ((once)) && break
     ((AGENT_STOP)) && break

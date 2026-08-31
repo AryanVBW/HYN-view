@@ -196,7 +196,8 @@ duplex, driver, MTU, local address, gateway and DNS, interface errors and drops,
 TCP retransmit share, socket state distribution, listen-queue drops and conntrack
 headroom; first-hop latency separately from internet latency; PSI for cpu, memory
 and io; per-core clock speeds with the governor and the hardware's floor and
-ceiling. The person watching the portal is the person who cannot reach the
+ceiling; **what the machine is drawing and whether it is drawing it from the
+wall**, with every power rail the platform exposes. The person watching the portal is the person who cannot reach the
 machine, so a dashboard that makes them ask for ssh has failed at its only job.
 An administrator sees the same panels inside the per-client view at `/admin`.
 
@@ -268,8 +269,10 @@ NVMe at 70°C is what explains a fan that will not stop), memory and swap, every
 real filesystem with its size and projected pressure, WAN throughput with errors,
 drops, retransmits, **negotiated link speed and duplex**, TCP state distribution,
 conntrack headroom, PSI for cpu/memory/io, first-hop and internet latency, the
-last speed test, process count and the **top processes by cpu and rss**, and
-every alert currently firing.
+last speed test, process count and the **top processes by cpu and rss**,
+**power draw with the measurement it came from** — a PSU rail read over hwmon, a
+platform or CPU+DRAM figure derived from RAPL energy counters, plus mains presence
+and any battery or UPS — and every alert currently firing.
 
 Highway goes over the wire in full, not as a verdict: **every tracked unit with
 its state, sub-state, restart count, cgroup memory and how long it has been
@@ -456,7 +459,8 @@ labelled as a trend rather than an incident, because on an internet-facing host
 that number is never zero.
 
 One message a day. Performance with averages, peaks and minutes spent busy;
-storage with the 24h change and a projected fill date; network totals, peak
+power draw averaged over the window with its peak and an energy estimate in watt
+hours; storage with the 24h change and a projected fill date; network totals, peak
 rates, retransmit share and latency; every LAN and WAN interface with its type,
 address, state and traffic, plus SSID, gateway and DNS; throughput tests against
 your all-time best; full Highway node status; and everything that fired.
@@ -642,8 +646,9 @@ zombie) — cpu/mem only breaks ties inside a group, so the panel always reads a
 The simple view (`0`) is the one to leave on a screen nobody is actively working
 at: a single glanceable verdict for the node (running / degraded / not running),
 current throughput next to today's fastest recorded speed test with a braille
-sparkline of the day's tests, CPU temperature against fixed thresholds, and one
-line each for memory, the tightest disk and load. Set `default_view=simple` to
+sparkline of the day's tests, CPU temperature against fixed thresholds, what the
+machine is drawing and whether it is on mains or battery, and one line each for
+memory, the tightest disk and load. Set `default_view=simple` to
 open there by default; `hyn net`/`hyn proc`/`hyn node` still override it.
 
 The network panel header names the connection the way you do — Wi-Fi SSID or
@@ -813,6 +818,7 @@ Keys worth knowing:
 | `speedtest_per_day` | `4` | drives the systemd timer schedule |
 | `speedtest_guard_pct` | `25` | skip a scheduled test if the link is busier than this |
 | `speedtest_provider` | `auto` | prefers Ookla `speedtest`, then `speedtest-cli`, then `curl` |
+| `power_track` | `on` | RAPL, hwmon power rails and mains/battery state |
 | `highway_track` | `on` | node panel |
 | `profile` | `best` | `best` or `performance` |
 | `notify_access_details` | `off` | set `on` only to include run-as/session usernames, session source IPs and the worst rejected-login IP in notifications |
@@ -838,7 +844,7 @@ colours, resolved at load into whatever the terminal supports (truecolor, 256,
 ## Requirements
 
 Ubuntu 22.04 or 24.04, including Highway Relayer OS, which is 24.04 underneath
-(anything with Linux `/proc` and bash 4.3+ will work).
+(anything with Linux `/proc` and bash 5.0+ will work).
 Snap mounts are excluded automatically: they are read-only squashfs and therefore
 permanently 100% full, so a box with twenty snaps would otherwise show twenty
 filesystems and fire twenty disk-full alerts that could never clear.
@@ -855,7 +861,7 @@ them, and `hyn doctor` reports any that are missing:
 
 | Dependency | Needed for | If absent |
 | --- | --- | --- |
-| `bash` 4.3+ | everything | nothing runs; Ubuntu ships 5.1+ |
+| `bash` 5.0+ | everything — `EPOCHSECONDS` underpins every rate, cooldown and the heartbeat stamp | nothing runs; Ubuntu 22.04 ships 5.1, 24.04 ships 5.2 |
 | `systemd` | the resident agent and the five timers | the CLI still works, nothing is scheduled, no heartbeat |
 | `curl` | the portal, the npm registry, speed tests | no beat, no update check, no throughput test |
 | `ca-certificates` | verifying every https endpoint above | every request fails certificate verification |

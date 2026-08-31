@@ -320,6 +320,29 @@ cloud_payload_v() {
     p+="\"$(_jstr "$k")\": $(_jnum "${SENSORS[$k]}" 0)"
   done
   p+='}'
+  # Power draw. input_src travels with input_w because the two are one fact: a
+  # PSU reading is a measurement of the machine, a RAPL sum is an estimate of
+  # part of it, and a dashboard that plotted them on the same axis without
+  # saying which is which would be inventing a trend.
+  p+=', "power": {'
+  p+="\"input_w\": $(_jnum "$(power_watts "${PWR_INPUT_DW:-}")")"
+  p+=", \"input_src\": \"$(_jstr "${PWR_INPUT_SRC:-}")\""
+  p+=", \"cpu_w\": $(_jnum "$(power_watts "${PWR_CPU_DW:-}")")"
+  p+=", \"dram_w\": $(_jnum "$(power_watts "${PWR_DRAM_DW:-}")")"
+  p+=", \"ac_online\": $(_jnum "${PWR_AC:-}")"
+  p+=", \"battery_pct\": $(_jnum "${PWR_BAT_PCT:-}")"
+  p+=", \"battery_status\": \"$(_jstr "${PWR_BAT_STATUS:-}")\""
+  p+=", \"battery_w\": $(_jnum "$(power_watts "${PWR_BAT_DW:-}")")"
+  # Every rail the platform exposes, the same way sensors carries every
+  # temperature: on real hardware the interesting one is often not the package.
+  p+=', "rails": {'
+  first=1
+  for k in "${!PWR_RAILS[@]}"; do
+    ((first)) || p+=', '
+    first=0
+    p+="\"$(_jstr "$k")\": $(_jnum "$(power_watts "${PWR_RAILS[$k]}")")"
+  done
+  p+='}}'
   # Top processes by the configured sort, so the portal can answer "what was
   # using the box at 3am" without a shell on it.
   p+=", \"processes\": {\"count\": $(_jnum "${PROC_TOTAL:-}")"
@@ -470,6 +493,24 @@ cloud_heartbeat_stamp() {
   printf '%s/cloud-last-heartbeat' "$STATE_DIR"
 }
 
+# _cloud_stamp <file> <field>... -- write a status stamp atomically.
+#
+# tmp + rename, the same way agent_stamp does it, because these files are written
+# on every check-in and every beat and read by `hyn cloud status` and `hyn doctor`.
+# A plain redirect that is interrupted by a kill -9, an OOM kill or a power loss
+# leaves a half-written line, and the reader then does arithmetic on it: a stamp
+# containing "not-a-num" produced `not: unbound variable` under `set -u` and a
+# blank duration, at exactly the moment an operator is running the command to find
+# out what is wrong. Cheap to make impossible rather than to handle.
+_cloud_stamp() {
+  local f=$1; shift
+  local line
+  printf -v line '%s\t' "$@"
+  line=${line%$'\t'}
+  printf '%s\n' "$line" >"$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" 2>/dev/null
+  return 0
+}
+
 # Age in seconds of the last *successful* beat, or -1 when there has never been
 # one. Used by doctor and by the self-heal check that decides whether the
 # resident loop is actually beating rather than merely running.
@@ -507,7 +548,7 @@ cloud_heartbeat() {
   f=$(cloud_heartbeat_stamp)
   if _cloud_rpc hyn_heartbeat "$body"; then
     json_field_v "$CLOUD_LAST_BODY" node_status && CLOUD_HEARTBEAT_STATUS=$JSON_FIELD
-    printf '%s\tok\t%s\n' "${EPOCHSECONDS:-0}" "${CLOUD_HEARTBEAT_STATUS:-active}" >"$f" 2>/dev/null
+    _cloud_stamp "$f" "${EPOCHSECONDS:-0}" ok "${CLOUD_HEARTBEAT_STATUS:-active}"
     ((quiet)) || printf 'hyn: heartbeat accepted by %s%s\n' "$(cloud_url)" \
       "$([[ -n $CLOUD_HEARTBEAT_STATUS && $CLOUD_HEARTBEAT_STATUS != active ]] && printf ' (node %s)' "$CLOUD_HEARTBEAT_STATUS")"
     return 0
@@ -519,12 +560,12 @@ cloud_heartbeat() {
   case $CLOUD_LAST_ERR in
     *'404'* | *'unknown agent action'* | *'does not exist'* | *'not find'*)
       if cloud_config_pull 1; then
-        printf '%s\tok\tfallback\n' "${EPOCHSECONDS:-0}" >"$f" 2>/dev/null
+        _cloud_stamp "$f" "${EPOCHSECONDS:-0}" ok fallback
         ((quiet)) || printf 'hyn: heartbeat recorded through the settings pull (portal has no hyn_heartbeat yet)\n'
         return 0
       fi ;;
   esac
-  printf '%s\tfail\t%s\n' "${EPOCHSECONDS:-0}" "${CLOUD_LAST_ERR:0:200}" >"$f" 2>/dev/null
+  _cloud_stamp "$f" "${EPOCHSECONDS:-0}" fail "${CLOUD_LAST_ERR:0:200}"
   ((quiet)) || warn "heartbeat failed: $CLOUD_LAST_ERR"
   return 1
 }
@@ -587,21 +628,21 @@ cloud_ingest_collected() {
   f=$(_cloud_push_stamp)
   if _cloud_rpc hyn_ingest "$body"; then
     CLOUD_INGESTED=1
-    printf '%s\tok\n' "${EPOCHSECONDS:-0}" >"$f" 2>/dev/null
+    _cloud_stamp "$f" "${EPOCHSECONDS:-0}" ok
     ((quiet)) || printf 'hyn: pushed to %s\n' "$(cloud_url)"
     return 0
   fi
   case $CLOUD_LAST_ERR in
     *'node paused'*)
-      printf '%s\tpaused\n' "${EPOCHSECONDS:-0}" >"$f" 2>/dev/null
+      _cloud_stamp "$f" "${EPOCHSECONDS:-0}" paused
       ((quiet)) || printf 'hyn: monitoring is paused for this node by an administrator\n'
       return 0 ;;
     *'node suspended'*)
-      printf '%s\tsuspended\t%s\n' "${EPOCHSECONDS:-0}" "$CLOUD_LAST_ERR" >"$f" 2>/dev/null
+      _cloud_stamp "$f" "${EPOCHSECONDS:-0}" suspended "$CLOUD_LAST_ERR"
       warn "this node is suspended: $CLOUD_LAST_ERR"
       return 1 ;;
   esac
-  printf '%s\tfail\t%s\n' "${EPOCHSECONDS:-0}" "$CLOUD_LAST_ERR" >"$f" 2>/dev/null
+  _cloud_stamp "$f" "${EPOCHSECONDS:-0}" fail "$CLOUD_LAST_ERR"
   ((quiet)) || warn "push failed: $CLOUD_LAST_ERR"
   return 1
 }
@@ -1307,6 +1348,12 @@ cloud_status() {
   stamp=$(_cloud_push_stamp)
   if [[ -r $stamp ]]; then
     IFS=$'\t' read -r ts st err <"$stamp"
+    # Validate before any arithmetic. The writes are atomic now, but a stamp can
+    # still be corrupted by a full disk or a filesystem that lost a page, and
+    # `$(( now - not-a-number ))` under `set -u` aborts with "not: unbound
+    # variable" -- while an operator is running this command to find out what
+    # broke. Treat an unreadable timestamp as unknown, not as a number.
+    [[ $ts =~ ^[0-9]+$ ]] || { ts=0; st=corrupt; }
     case $st in
       ok) printf 'last push %s ago\n' "$(fmt_dur $((${EPOCHSECONDS:-0} - ts)))" ;;
       paused)
@@ -1315,6 +1362,7 @@ cloud_status() {
       suspended)
         printf 'last push %s ago — this node is suspended: %s\n' \
           "$(fmt_dur $((${EPOCHSECONDS:-0} - ts)))" "$err" ;;
+      corrupt) printf 'last push unknown — %s is unreadable\n' "$stamp" ;;
       *) printf 'last push failed %s ago: %s\n' "$(fmt_dur $((${EPOCHSECONDS:-0} - ts)))" "$err" ;;
     esac
   else
@@ -1327,7 +1375,10 @@ cloud_status() {
   hstamp=$(cloud_heartbeat_stamp)
   if [[ -r $hstamp ]]; then
     IFS=$'\t' read -r hts hst herr <"$hstamp"
-    if [[ $hst == ok ]]; then
+    [[ $hts =~ ^[0-9]+$ ]] || { hts=0; hst=corrupt; }
+    if [[ $hst == corrupt ]]; then
+      printf 'heartbeat unknown — %s is unreadable\n' "$hstamp"
+    elif [[ $hst == ok ]]; then
       printf 'heartbeat %s ago, every %ss%s\n' "$(fmt_dur $((${EPOCHSECONDS:-0} - hts)))" \
         "${CFG[heartbeat_sec]}" "$([[ -n $herr && $herr != active ]] && printf ' (node %s)' "$herr")"
     else

@@ -39,6 +39,13 @@ eq() {
 contains() {
   if [[ $3 == *"$2"* ]]; then ok; else bad "$1: [$3] does not contain [$2]"; fi
 }
+# The negative of contains. This was being CALLED before it existed, which meant
+# ten assertions about what `hyn doctor` must no longer mention were failing with
+# "command not found" and counting as neither a pass nor a failure -- exactly the
+# silent no-op this suite warns about elsewhere.
+missing() {
+  if [[ $3 != *"$2"* ]]; then ok; else bad "$1: [${3:0:200}] must not contain [$2]"; fi
+}
 truthy() {
   if eval "$2" >/dev/null 2>&1; then ok; else bad "$1: expected success from: $2"; fi
 }
@@ -1949,6 +1956,230 @@ falsy 'rejects a below-absolute-zero reading' '[[ -v SENSORS["nvme temp4"] ]]'
 rm -f "$FS/class/hwmon/hwmon9/temp3_input" "$FS/class/hwmon/hwmon9/temp4_input"
 sensors_read
 
+# ---------------------------------------------------------------------------
+section 'power draw'
+# ---------------------------------------------------------------------------
+# Three unrelated kernel interfaces, and on any given box one or two of them are
+# simply absent. RAPL is the awkward one: energy_uj is a monotonic COUNTER, so a
+# rate needs two samples, and the register is narrow enough to roll over in about
+# a minute on a busy part.
+mkdir -p "$FS/class/powercap/intel-rapl:0" "$FS/class/powercap/intel-rapl:0:2" \
+         "$FS/class/hwmon/hwmon11" "$FS/class/power_supply/AC" "$FS/class/power_supply/BAT0"
+_rapl_max=262143328850
+printf 'package-0\n'      >"$FS/class/powercap/intel-rapl:0/name"
+printf '%s\n' "$_rapl_max" >"$FS/class/powercap/intel-rapl:0/max_energy_range_uj"
+printf '1000000\n'        >"$FS/class/powercap/intel-rapl:0/energy_uj"
+printf 'dram\n'           >"$FS/class/powercap/intel-rapl:0:2/name"
+printf '%s\n' "$_rapl_max" >"$FS/class/powercap/intel-rapl:0:2/max_energy_range_uj"
+printf '500000\n'         >"$FS/class/powercap/intel-rapl:0:2/energy_uj"
+printf 'pmbus\n'             >"$FS/class/hwmon/hwmon11/name"
+printf 'PSU1 Input Power\n'  >"$FS/class/hwmon/hwmon11/power1_label"
+printf '118000000\n'         >"$FS/class/hwmon/hwmon11/power1_input"
+printf 'Mains\n'   >"$FS/class/power_supply/AC/type"
+printf '1\n'       >"$FS/class/power_supply/AC/online"
+printf 'Battery\n' >"$FS/class/power_supply/BAT0/type"
+printf '87\n'      >"$FS/class/power_supply/BAT0/capacity"
+printf 'Charging\n' >"$FS/class/power_supply/BAT0/status"
+printf '9500000\n' >"$FS/class/power_supply/BAT0/power_now"
+
+truthy 'discovers power sources' 'power_discover'
+eq 'both rapl domains found' '2' "${#PWR_RAPL[@]}"
+eq 'the hwmon rail is found'  '1' "${#PWR_HWMON[@]}"
+
+# One sample cannot produce a rate. Reporting a since-boot average as "current
+# draw" would be the same lie the network collector refuses to tell.
+power_read 1000
+eq 'a single sample yields no cpu rate' '' "${PWR_CPU_DW:-}"
+# ...but an instantaneous rail and the mains state are readable immediately.
+eq 'psu input read on the first pass' '1180' "${PWR_INPUT_DW:-}"
+eq 'the psu rail outranks any counter' 'hwmon-input' "${PWR_INPUT_SRC:-}"
+eq 'mains is seen as present'  '1'  "${PWR_AC:-}"
+eq 'battery charge is read'    '87' "${PWR_BAT_PCT:-}"
+eq 'battery status is read'    'Charging' "${PWR_BAT_STATUS:-}"
+eq 'battery draw in deciwatts' '95' "${PWR_BAT_DW:-}"
+
+# +15 J package and +2 J dram over one second is 15.0 W and 2.0 W.
+printf '16000000\n' >"$FS/class/powercap/intel-rapl:0/energy_uj"
+printf '2500000\n'  >"$FS/class/powercap/intel-rapl:0:2/energy_uj"
+power_read 1000
+eq 'cpu package watts from the counter' '150' "${PWR_CPU_DW:-}"
+eq 'dram watts from the counter'        '20'  "${PWR_DRAM_DW:-}"
+eq 'the psu still wins the input slot'  '1180' "${PWR_INPUT_DW:-}"
+eq 'the labelled rail is kept by name'  '1180' "${PWR_RAILS[pmbus PSU1 Input Power]:-}"
+
+# The rollover. Treating a backwards counter as "no data" is right for a 64-bit
+# network counter and wrong here: RAPL wraps in about a minute under load, so a
+# sample would be dropped every wrap. With a known register width the true delta
+# is (max - prev) + cur.
+printf '%s\n' "$((_rapl_max - 5000000))" >"$FS/class/powercap/intel-rapl:0/energy_uj"
+power_read 1000
+printf '5000000\n' >"$FS/class/powercap/intel-rapl:0/energy_uj"
+power_read 1000
+eq 'a rolled-over counter is unwrapped, not dropped' '100' "${PWR_CPU_DW:-}"
+
+# Without a width there is no honest answer, and 0 W is not one.
+_saved_max=$(<"$FS/class/powercap/intel-rapl:0/max_energy_range_uj")
+rm -f "$FS/class/powercap/intel-rapl:0/max_energy_range_uj"
+power_discover
+printf '9000000\n' >"$FS/class/powercap/intel-rapl:0/energy_uj"; power_read 1000
+printf '1000000\n' >"$FS/class/powercap/intel-rapl:0/energy_uj"; power_read 1000
+eq 'a backwards counter with no width reports nothing' '' "${PWR_CPU_DW:-}"
+printf '%s\n' "$_saved_max" >"$FS/class/powercap/intel-rapl:0/max_energy_range_uj"
+
+# A 20 kW rail is a broken driver, not a server.
+printf '99000000000\n' >"$FS/class/hwmon/hwmon11/power1_input"
+power_discover; power_read 1000
+falsy 'an impossible rail is rejected' '[[ -v PWR_RAILS["pmbus PSU1 Input Power"] ]]'
+printf '118000000\n' >"$FS/class/hwmon/hwmon11/power1_input"
+
+# Losing mains is the one power fact that is an incident.
+printf '0\n' >"$FS/class/power_supply/AC/online"
+printf 'Discharging\n' >"$FS/class/power_supply/BAT0/status"
+power_read 1000
+eq 'mains loss is visible'   '0' "${PWR_AC:-}"
+eq 'and the battery is discharging' 'Discharging' "${PWR_BAT_STATUS:-}"
+printf '1\n' >"$FS/class/power_supply/AC/online"
+printf 'Charging\n' >"$FS/class/power_supply/BAT0/status"
+
+# The switch is honoured: a machine whose operator turned this off must report
+# nothing rather than stale values.
+CFG[power_track]=off
+power_read 1000
+eq 'power_track=off collects nothing' '' "${PWR_INPUT_DW:-}"
+CFG[power_track]=on
+power_read 1000
+
+# Deciwatts are an internal unit. Everything that leaves the process -- JSON, the
+# portal, the report -- is watts, and an absent sensor stays empty so the caller's
+# null handling takes over.
+eq 'deciwatts render as watts'   '118.0' "$(power_watts 1180)"
+eq 'sub-watt resolution survives' '2.4'  "$(power_watts 24)"
+eq 'an absent reading stays empty' ''    "$(power_watts '')"
+eq 'a non-number stays empty'      ''    "$(power_watts 'x')"
+# The source travels with the number, because "118W psu" is a measurement of the
+# machine and "17W cpu+dram" is an estimate of part of it.
+eq 'psu source label'      'psu'      "$(power_src_label hwmon-input)"
+eq 'platform source label' 'platform' "$(power_src_label rapl-psys)"
+eq 'derived source label'  'cpu+dram' "$(power_src_label rapl-cpu)"
+eq 'unknown source is unlabelled' ''  "$(power_src_label '')"
+
+# The rows these values produce have to fit. The frame-rendering section above
+# runs before any of this is populated, so without rendering again here the power
+# row would be the one panel row never measured against the terminal width -- and
+# an over-wide row is what makes a bash TUI wrap and smear.
+PWR_INPUT_DW=1180 PWR_INPUT_SRC=hwmon-input PWR_CPU_DW=1503 PWR_DRAM_DW=204
+PWR_AC=0 PWR_BAT_PCT=87 PWR_BAT_STATUS=Discharging
+for _pw in 140 100 80; do
+  TERM_COLS=$_pw TERM_ROWS=45
+  panels_enabled
+  render_dash
+  _over=0
+  for _i in "${!FB[@]}"; do
+    vlen "${FB[_i]}"
+    ((VLEN > TERM_COLS)) && _over=$((_over + 1))
+  done
+  eq "dash with power fits $_pw cols" '0' "$_over"
+  render_simple
+  _over=0
+  for _i in "${!FB[@]}"; do
+    vlen "${FB[_i]}"
+    ((VLEN > TERM_COLS)) && _over=$((_over + 1))
+  done
+  eq "simple view with power fits $_pw cols" '0' "$_over"
+done
+TERM_COLS=140 TERM_ROWS=45
+panels_enabled
+render_dash
+_dash_out=$(printf '%s\n' "${FB[@]}")
+contains 'the dash shows the input watts' '118.0W' "$_dash_out"
+contains 'the dash names the source'      'psu'    "$_dash_out"
+contains 'the dash shows package watts in the header' '150.3W' "$_dash_out"
+
+# The truncation contract, asserted on the row itself rather than on the whole
+# frame -- the header carries the package watts too, so a frame-wide `contains`
+# would pass even if the row were cut to nothing.
+#
+# panel_row truncates from the right. At 44 columns, which is what this panel
+# gets in a two-column dash, there is not room for all of it, so what must
+# survive is the incident: an operator glancing at a box on battery has to see
+# that before they see how many watts the DRAM is using.
+_pwr_row() {
+  local w=$1
+  P_CPU_=()
+  panel_cpu x "$w" 99 >/dev/null
+  printf '%s\n' "${P_CPU_[@]}" | sed 's/\x1b\[[0-9;]*m//g' | grep -a 'power'
+}
+_row44=$(_pwr_row 44)
+_row90=$(_pwr_row 90)
+contains 'on battery survives a narrow panel'  'on battery' "$_row44"
+contains 'the charge survives a narrow panel'  '87%'        "$_row44"
+contains 'a wide panel still shows the watts'  '118.0W'     "$_row90"
+contains 'a wide panel shows cpu and dram'     'dram 20.4W' "$_row90"
+# The quiet case puts mains last, so it is the first thing a narrow panel drops
+# rather than the last -- there is no incident to preserve.
+PWR_AC=1 PWR_BAT_PCT=100
+_row90m=$(_pwr_row 90)
+contains 'mains is a quiet note at the end' 'mains' "$_row90m"
+truthy 'and the watts still lead the row' '[[ ${_row90m#*power } == 118.0W* ]]'
+PWR_AC=0 PWR_BAT_PCT=87
+
+render_simple
+_simple_out=$(printf '%s\n' "${FB[@]}")
+contains 'the simple view shows watts'     '118.0W'     "$_simple_out"
+contains 'the simple view shouts on battery' 'ON BATTERY' "$_simple_out"
+# ...and says nothing at all where there is nothing to say, rather than a dash.
+PWR_INPUT_DW='' PWR_CPU_DW='' PWR_DRAM_DW='' PWR_AC='' PWR_BAT_PCT='' PWR_INPUT_SRC=''
+render_simple
+_simple_bare=$(printf '%s\n' "${FB[@]}")
+missing 'the simple view omits power when unmeasurable' 'power' "$_simple_bare"
+render_dash
+missing 'the cpu panel omits the power row when unmeasurable' \
+  'power' "$(printf '%s\n' "${FB[@]}")"
+
+# A machine with no power interfaces at all is a normal outcome -- every VM -- and
+# must leave every field unavailable rather than reporting a box drawing 0 W.
+(
+  export HYN_SYS=$TMP/nosys
+  mkdir -p "$HYN_SYS/class"
+  power_discover
+  power_read 1000
+  [[ -z ${PWR_INPUT_DW:-} && -z ${PWR_CPU_DW:-} && -z ${PWR_AC:-} && ${#PWR_RAILS[@]} -eq 0 ]]
+) && ok || bad 'a box with no power sensors invents a reading'
+# Restore the fixture tree for anything downstream.
+power_discover
+power_read 1000
+printf '16000000\n' >"$FS/class/powercap/intel-rapl:0/energy_uj"
+printf '2500000\n'  >"$FS/class/powercap/intel-rapl:0:2/energy_uj"
+power_read 1000
+
+# A collector must not depend on another module's globals. This one did: it used
+# net.sh's _PREV for its counter state, which worked only because every entry
+# point happens to source net.sh first. Loaded alone, `_PREV[$key]=` on an
+# undeclared name is an INDEXED array assignment, the string key is evaluated as
+# arithmetic, and the process aborts under `set -u` with "rapl: unbound
+# variable" -- a monitoring agent dying on a sensor read.
+_pwr_alone=$TMP/pwr-alone
+mkdir -p "$_pwr_alone/class/powercap/intel-rapl:0"
+printf 'package-0\n'       >"$_pwr_alone/class/powercap/intel-rapl:0/name"
+printf '262143328850\n'    >"$_pwr_alone/class/powercap/intel-rapl:0/max_energy_range_uj"
+printf '1000000\n'         >"$_pwr_alone/class/powercap/intel-rapl:0/energy_uj"
+# A fresh `bash -c`, not a `( )` subshell: a subshell inherits every array this
+# suite has already declared -- including net.sh's _PREV -- which is exactly the
+# masking that let the bug exist. Only a new process proves the module stands up
+# on its own.
+truthy 'the power collector loads and runs with no other module present' \
+  'env -u _PREV HYN_SYS='"$_pwr_alone"' HYN_PROC='"$TMP/proc"' HYN_ETC='"$TMP/etc"' \
+     HYN_VAR='"$TMP/var"' HOME='"$TMP"' HYN_LIB='"$HYN_LIB"' \
+     bash -c '"'"'
+       set -uo pipefail
+       source "$HYN_LIB/core.sh" && cfg_load >/dev/null 2>&1
+       source "$HYN_LIB/collect.sh"
+       power_discover && power_read 1000
+       printf "16000000\n" >"$HYN_SYS/class/powercap/intel-rapl:0/energy_uj"
+       power_read 1000
+       [[ $PWR_CPU_DW == 150 ]]
+     '"'"''
+
 # Process total comes from /proc/loadavg's fourth field, which is one small read
 # rather than a stat per process.
 section 'detail: process count'
@@ -2855,6 +3086,87 @@ rm -f "$_astamp"
   agent_run --once >/dev/null 2>&1
 )
 truthy 'one tick writes the liveness stamp' '[[ -r $_astamp ]]'
+
+# Order within a tick. Maintenance walks six units with systemctl, and on a
+# machine that is still booting those calls are slow -- 3.3s was measured with a
+# 250ms systemctl, all of it ahead of the portal hearing anything. The beat is the
+# whole reason this unit exists, so it must not queue behind that.
+_order_log=$TMP/agent-order
+rm -f "$_order_log"
+(
+  agent_beat() { printf 'beat\n' >>"$_order_log"; return 0; }
+  agent_maintain() { printf 'maintain\n' >>"$_order_log"; return 0; }
+  agent_run --once >/dev/null 2>&1
+)
+eq 'the beat happens before maintenance' 'beat maintain' "$(tr '\n' ' ' <"$_order_log" | sed 's/ $//')"
+
+# `secret` runs in a command substitution, so its cache dies with the subshell and
+# every call re-reads the file. That is deliberate -- it is what lets a machine
+# paired while the agent is running start beating without a restart -- but it also
+# means a permissions warning fires on every read. At four reads per 24s beat that
+# measured 15,600 journal lines a day from one mis-permissioned file. The resident
+# loop therefore checks once at startup and stays quiet after; everything
+# short-lived still warns on every read.
+_perm_secrets=$TMP/perm-etc
+mkdir -p "$_perm_secrets"
+printf 'cloud_node_token=abc\n' >"$_perm_secrets/secrets"
+chmod 644 "$_perm_secrets/secrets"
+_perm_warns() {
+  local in_agent=$1
+  (
+    export HYN_ETC=$_perm_secrets HYN_IN_AGENT=$in_agent
+    stat() { [[ $1 == -c ]] && { printf '644\n'; return 0; }; return 1; }
+    _HAVE[stat]=1
+    SECRETS_LOADED=0
+    secrets_load 2>&1 >/dev/null | grep -c 'should be 0600'
+  )
+}
+eq 'a short-lived command warns about loose secrets perms' '1' "$(_perm_warns 0)"
+eq 'the resident loop does not repeat it every beat'       '0' "$(_perm_warns 1)"
+
+# cfg_load is called every five minutes for the life of the resident agent, so
+# anything it appends to without clearing grows without bound. One misspelled key
+# in /etc/hyn-view/config added an entry per reload -- ~105,000 a year in a process
+# nothing reads them from. The warnings describe the config as it is now, so a
+# reload must replace them.
+_warn_etc=$TMP/warn-etc
+mkdir -p "$_warn_etc"
+printf 'this_key_does_not_exist=1\n' >"$_warn_etc/config"
+eq 'repeated config reloads do not accumulate warnings' '1' "$(
+  export HYN_ETC=$_warn_etc
+  for _ in 1 2 3 4 5 6 7 8 9 10; do cfg_load >/dev/null 2>&1; done
+  printf '%s' "${#CFG_WARNINGS[@]}"
+)"
+# ...and the warning itself is still produced, or the reset would have hidden it.
+truthy 'the reload still reports the bad key' '(
+  export HYN_ETC='"$_warn_etc"'
+  cfg_load >/dev/null 2>&1
+  [[ ${CFG_WARNINGS[0]} == *this_key_does_not_exist* ]]
+)'
+cfg_load >/dev/null 2>&1
+
+# A stamp truncated by a kill -9, an OOM kill or a full disk must not make the
+# diagnosis command itself fail. `$(( now - not-a-number ))` under `set -u` aborts
+# with "not: unbound variable" and prints a blank duration, at exactly the moment
+# an operator is trying to find out what is wrong.
+_corrupt_status=$(
+  export HYN_ETC=$TMP/etc HYN_VAR=$TMP/var
+  printf 'not-a-number' >"$(_cloud_push_stamp)"
+  printf 'garbage' >"$(cloud_heartbeat_stamp)"
+  cloud_status 2>&1
+)
+missing 'a corrupted stamp does not abort cloud status' 'unbound variable' "$_corrupt_status"
+contains 'and it names the unreadable file'  'last push unknown' "$_corrupt_status"
+contains 'for the heartbeat stamp too'       'heartbeat unknown' "$_corrupt_status"
+# Written atomically, so a half-written stamp cannot be observed in the first
+# place and no temp file is left lying about.
+(
+  export HYN_VAR=$TMP/var
+  _f=$(cloud_heartbeat_stamp)
+  _cloud_stamp "$_f" 1700000000 ok active
+  [[ $(<"$_f") == $'1700000000\tok\tactive' && ! -e $_f.tmp ]]
+) && ok || bad 'the status stamp is not written atomically'
+rm -f "$(HYN_VAR=$TMP/var; cloud_heartbeat_stamp)" "$(HYN_VAR=$TMP/var; _cloud_push_stamp)"
 
 # Self-heal, which is the other half: a loop that stopped beating gets restarted,
 # and one that is beating is left alone.

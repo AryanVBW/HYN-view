@@ -57,6 +57,7 @@ collect_init() {
   CPU_MODEL=${CPU_MODEL% }
   thermal_discover
   cpufreq_discover
+  power_discover
   return 0
 }
 
@@ -319,6 +320,223 @@ sensors_read() {
     [[ -v SENSORS[$label] ]] || SENSORS[$label]=$v
   done
   ((${#SENSORS[@]} > 0))
+}
+
+# ---------------------------------------------------------------------------
+# power
+# ---------------------------------------------------------------------------
+# "Power input" is three different measurements on Linux, and which one exists
+# depends entirely on the hardware. All three are read, because on any given box
+# one or two of them are simply absent:
+#
+#   1. hwmon `power*_input` -- instantaneous microwatts. On a server with a PMBus
+#      PSU driver or a BMC bridged into hwmon this is the real answer: what the
+#      chassis is drawing from the wall. It is also the rarest.
+#   2. Intel/AMD RAPL under /sys/class/powercap -- `energy_uj`, a monotonic
+#      microjoule COUNTER, not a reading. Differentiating it gives package and
+#      DRAM watts. Nearly every bare-metal x86 server has this and no VM does.
+#   3. /sys/class/power_supply -- mains present, and a battery or USB-HID UPS
+#      with its charge and state. On a relay node behind a domestic link "the box
+#      is running on battery" is the most actionable line this tool can print.
+#
+# Everything is kept in DECIWATTS (tenths of a watt) as integers, the same
+# fixed-point approach used for load and PSI, so there is no floating point
+# anywhere and 0.1 W of resolution survives for an idle CPU package.
+#
+# An absent sensor stays empty and serialises as null. A server that cannot
+# measure its own draw is a normal outcome; a plotted 0 W is a lie about a
+# machine that is plainly running.
+PWR_CPU_DW='' PWR_DRAM_DW='' PWR_INPUT_DW='' PWR_INPUT_SRC=''
+PWR_AC='' PWR_BAT_PCT='' PWR_BAT_STATUS='' PWR_BAT_DW=''
+declare -A PWR_RAILS=()
+declare -a PWR_RAPL=()
+declare -A PWR_RAPL_NAME=()
+declare -A PWR_RAPL_MAX=()
+declare -a PWR_HWMON=()
+# Previous energy counter readings, keyed by domain path.
+#
+# Declared here rather than reusing net.sh's _PREV, which is what this used to do.
+# That worked only because every entry point happens to source net.sh before
+# collect.sh: without it, `_PREV[$key]=...` on an undeclared name is an INDEXED
+# array assignment, the key is evaluated as arithmetic, and the process aborts
+# under `set -u` with "rapl: unbound variable". A collector must not depend on
+# another module's globals for that.
+declare -A _PWR_PREV=()
+
+# Discovery is done once at boot, not per tick: walking /sys/class/powercap and
+# every hwmon directory is dozens of reads, and the answer cannot change without
+# a driver being loaded.
+power_discover() {
+  PWR_RAPL=() PWR_RAPL_NAME=() PWR_RAPL_MAX=() PWR_HWMON=()
+  local d name f mx
+  # RAPL domains. intel-rapl:0 is the package, intel-rapl:0:N its sub-domains
+  # (core, uncore, dram). The name file is what says which is which; the
+  # directory numbering is not stable across parts.
+  for d in "$HYN_SYS/class/powercap"/*; do
+    [[ -r $d/energy_uj ]] || continue
+    readval name "$d/name" || name=${d##*/}
+    PWR_RAPL+=("$d")
+    PWR_RAPL_NAME[$d]=$name
+    # Needed to unwrap the counter. RAPL's energy register is narrow enough to
+    # roll over in about a minute on a busy part, so treating a backwards delta
+    # as "no data" (which is right for a 64-bit network counter) would silently
+    # drop a sample every wrap.
+    if readval mx "$d/max_energy_range_uj" && [[ $mx =~ ^[0-9]+$ ]]; then
+      PWR_RAPL_MAX[$d]=$mx
+    else
+      PWR_RAPL_MAX[$d]=0
+    fi
+  done
+  # hwmon power rails.
+  for d in "$HYN_SYS/class/hwmon"/hwmon*; do
+    [[ -d $d ]] || continue
+    for f in "$d"/power*_input; do
+      [[ -r $f ]] || continue
+      PWR_HWMON+=("$f")
+    done
+  done
+  ((${#PWR_RAPL[@]} > 0 || ${#PWR_HWMON[@]} > 0)) || return 1
+  return 0
+}
+
+# power_energy_rate_dw <key> <energy_uj> <max_uj> <ms> -> PWR_RATE_DW
+#
+# Microjoules over milliseconds is milliwatts, so deciwatts is d/(ms*100).
+# Kept separate from delta_rate because of the wrap: with a known register width
+# a backwards step is a rollover and the true delta is (max - prev) + cur.
+PWR_RATE_DW=0
+power_energy_rate_dw() {
+  local key=$1 cur=$2 max=$3 ms=$4 prev d
+  PWR_RATE_DW=''
+  prev=${_PWR_PREV[$key]:-}
+  _PWR_PREV[$key]=$cur
+  [[ -z $prev ]] && return 1
+  ((ms <= 0)) && return 1
+  d=$((cur - prev))
+  if ((d < 0)); then
+    # Rolled over. Without a width to unwrap against there is no honest answer,
+    # so say nothing rather than emit a spike or a zero.
+    ((max > 0)) || return 1
+    d=$((max - prev + cur))
+    ((d < 0)) && return 1
+  fi
+  PWR_RATE_DW=$((d / (ms * 100)))
+  # A single interval cannot draw a megawatt. This catches a driver resetting
+  # its counter to something arbitrary, which reads as an enormous delta.
+  ((PWR_RATE_DW > 100000)) && { PWR_RATE_DW=''; return 1; }
+  return 0
+}
+
+# power_read <interval-ms>
+power_read() {
+  local ms=${1:-0}
+  PWR_CPU_DW='' PWR_DRAM_DW='' PWR_INPUT_DW='' PWR_INPUT_SRC=''
+  PWR_AC='' PWR_BAT_PCT='' PWR_BAT_STATUS='' PWR_BAT_DW=''
+  PWR_RAILS=()
+  cfg_on power_track || return 1
+
+  local d name v label f chip
+  # --- RAPL: counters, so they need the interval ------------------------------
+  for d in "${PWR_RAPL[@]}"; do
+    readval v "$d/energy_uj" || continue
+    [[ $v =~ ^[0-9]+$ ]] || continue
+    power_energy_rate_dw "rapl:$d" "$v" "${PWR_RAPL_MAX[$d]:-0}" "$ms" || continue
+    name=${PWR_RAPL_NAME[$d]:-${d##*/}}
+    PWR_RAILS[$name]=$PWR_RATE_DW
+    case $name in
+      package*)
+        # Sum the packages: a two-socket box has two, and one of them alone is
+        # not the machine's CPU power.
+        PWR_CPU_DW=$((${PWR_CPU_DW:-0} + PWR_RATE_DW)) ;;
+      dram) PWR_DRAM_DW=$((${PWR_DRAM_DW:-0} + PWR_RATE_DW)) ;;
+      psys)
+        # psys ("platform") is the whole SoC package power where the firmware
+        # exposes it, which is much closer to chassis input than the CPU package
+        # alone. Preferred over RAPL package below, still beaten by a real PSU.
+        PWR_INPUT_DW=$PWR_RATE_DW PWR_INPUT_SRC='rapl-psys' ;;
+    esac
+  done
+
+  # --- hwmon: instantaneous readings ------------------------------------------
+  for f in "${PWR_HWMON[@]}"; do
+    readval v "$f" || continue
+    [[ $v =~ ^[0-9]+$ ]] || continue
+    # Microwatts to deciwatts. A 20 kW reading is a broken driver, not a server.
+    v=$((v / 100000))
+    ((v < 0 || v > 200000)) && continue
+    d=${f%/*}
+    readval chip "$d/name" || chip=${d##*/}
+    label=''
+    readval label "${f%_input}_label" 2>/dev/null || label=''
+    [[ -n $label ]] || label=${f##*/}
+    [[ -n $label ]] && label="$chip $label"
+    PWR_RAILS[$label]=$v
+    # A rail the firmware calls "input" is the number this whole feature is
+    # about, and it outranks anything derived from a counter.
+    case ${label,,} in
+      *input*)
+        if [[ $PWR_INPUT_SRC != hwmon-input ]] || ((v > ${PWR_INPUT_DW:-0})); then
+          PWR_INPUT_DW=$v PWR_INPUT_SRC='hwmon-input'
+        fi ;;
+    esac
+  done
+
+  # --- mains, battery, UPS ----------------------------------------------------
+  local ps type online cap st
+  for ps in "$HYN_SYS/class/power_supply"/*; do
+    [[ -d $ps ]] || continue
+    readval type "$ps/type" || continue
+    case $type in
+      Mains | USB | UPS)
+        if readval online "$ps/online" && [[ $online =~ ^[01]$ ]]; then
+          # Any live source counts as mains present: a box with two PSUs has two
+          # entries and one of them being offline is not a power cut.
+          [[ $online == 1 ]] && PWR_AC=1 || PWR_AC=${PWR_AC:-0}
+        fi ;;
+    esac
+    case $type in
+      Battery | UPS)
+        readval cap "$ps/capacity" && [[ $cap =~ ^[0-9]+$ ]] && ((cap <= 100)) && PWR_BAT_PCT=$cap
+        readval st "$ps/status" && [[ -n $st ]] && PWR_BAT_STATUS=$st
+        if readval v "$ps/power_now" && [[ $v =~ ^-?[0-9]+$ ]]; then
+          ((v < 0)) && v=$((-v))
+          PWR_BAT_DW=$((v / 100000))
+        fi ;;
+    esac
+  done
+
+  # Last resort for "input": the CPU package plus DRAM is not chassis power, and
+  # must not be presented as if it were -- hence the source label travelling with
+  # the number everywhere it is displayed or sent.
+  if [[ -z $PWR_INPUT_DW && -n $PWR_CPU_DW ]]; then
+    PWR_INPUT_DW=$((PWR_CPU_DW + ${PWR_DRAM_DW:-0}))
+    PWR_INPUT_SRC='rapl-cpu'
+  fi
+  [[ -n $PWR_INPUT_DW || -n $PWR_CPU_DW || -n $PWR_AC || -n $PWR_BAT_PCT ]]
+}
+
+# Deciwatts to a decimal watt string, for anything that leaves this process --
+# JSON, the portal, the daily report. An empty input stays empty so the caller's
+# null handling takes over: 0 W is a claim about the machine that no absent
+# sensor entitles us to make.
+power_watts() {
+  local dw=${1:-}
+  [[ $dw =~ ^-?[0-9]+$ ]] || { printf ''; return 1; }
+  fmt_fixed_v "$dw" 10 1
+  printf '%s' "$FMT_OUT"
+  return 0
+}
+
+# What the number means, in the two words a panel header has room for. Presented
+# next to every reading because "118 W" from a PSU and "42 W" from a CPU counter
+# are not the same claim about a machine.
+power_src_label() {
+  case ${1:-} in
+    hwmon-input) printf 'psu' ;;
+    rapl-psys) printf 'platform' ;;
+    rapl-cpu) printf 'cpu+dram' ;;
+    *) printf '' ;;
+  esac
 }
 
 # Total process count. /proc/loadavg's fourth field is running/total, which is
