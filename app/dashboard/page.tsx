@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { ParticleField } from "@/components/particle-field";
 import { StatCards, ThroughputCard } from "@/components/dashboard/stat-cards";
 import { HighwayPanel } from "@/components/dashboard/highway-panel";
+import { SimpleDashboard } from "@/components/dashboard/simple-dashboard";
 import { CpuUsageChart } from "@/components/dashboard/cpu-usage-chart";
 import { TemperatureChart } from "@/components/dashboard/temperature-chart";
 import { NetworkChart } from "@/components/dashboard/network-chart";
@@ -168,6 +170,16 @@ export default async function DashboardPage({
   const heartbeatCapable = quietAfterSeconds === 180;
   const heartbeat = heartbeatState(durableHeartbeat, Date.now(), quietAfterSeconds);
   const agentRelease = readAgentRelease(latest.payload);
+  // The DB-managed setting is the default an administrator or the account
+  // page picked for this node; the header's DashboardViewToggle is a personal,
+  // client-side override that wins when present, stored in a cookie (not
+  // localStorage) precisely so this server component can read it on every
+  // render without a client round-trip. Absent the cookie, behaviour is
+  // unchanged from before the toggle existed.
+  const dbDefaultView = node.config?.dashboard_view === "simple" ? "simple" : "dash";
+  const viewOverride = (await cookies()).get("hyn_view_mode")?.value;
+  const dashboardView =
+    viewOverride === "simple" || viewOverride === "dash" ? viewOverride : dbDefaultView;
 
   return (
     <Shell email={auth.user.email} nodes={nodes} current={node}>
@@ -240,65 +252,79 @@ export default async function DashboardPage({
           </p>
         ) : null}
 
-        <StatCards latest={latest} />
+        {dashboardView === "simple" ? (
+          <SimpleDashboard node={node} latest={latest} speedtests={speedtests} />
+        ) : (
+          <>
+            <StatCards latest={latest} />
 
-        {/* Highway first, above the processor. On a relay node the question that
-            matters is whether its services are up: a box with a failed unit is
-            earning nothing however cool the CPU is running. */}
-        <section className="space-y-6">
-          <p className="section-kicker border-b border-border pb-3">// highway services</p>
-          <HighwayPanel latest={latest} />
-        </section>
+            <section className="space-y-6">
+              <p className="section-kicker border-b border-border pb-3">// processor</p>
+              <div className="grid gap-6 lg:grid-cols-2">
+                <CpuUsageChart data={toCpuSeries(metrics)} />
+                <TemperatureChart data={toTempSeries(metrics)} />
+              </div>
+            </section>
 
-        <section className="space-y-6">
-          <p className="section-kicker border-b border-border pb-3">// processor</p>
-          <div className="grid gap-6 lg:grid-cols-2">
-            <CpuUsageChart data={toCpuSeries(metrics)} />
-            <TemperatureChart data={toTempSeries(metrics)} />
-          </div>
-        </section>
+            <section className="space-y-6">
+              <p className="section-kicker border-b border-border pb-3">// network</p>
+              <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr]">
+                <NetworkChart data={toNetSeries(metrics)} />
+                <ThroughputCard latest={latest} />
+              </div>
+              <SpeedChart data={toSpeedSeries(speedtests)} />
+              {/* The counters that say whether the link itself is healthy, not just
+                  how much went through it. Errors, drops, retransmits, socket states
+                  and first-hop latency are the difference between "my connection is
+                  bad" and "my provider's is". */}
+              <NetworkDetailPanel latest={latest} />
+            </section>
 
-        <section className="space-y-6">
-          <p className="section-kicker border-b border-border pb-3">// network</p>
-          <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr]">
-            <NetworkChart data={toNetSeries(metrics)} />
-            <ThroughputCard latest={latest} />
-          </div>
-          <SpeedChart data={toSpeedSeries(speedtests)} />
-          {/* The counters that say whether the link itself is healthy, not just
-              how much went through it. Errors, drops, retransmits, socket states
-              and first-hop latency are the difference between "my connection is
-              bad" and "my provider's is". */}
-          <NetworkDetailPanel latest={latest} />
-        </section>
+            <section className="space-y-6">
+              <p className="section-kicker border-b border-border pb-3">// storage</p>
+              <FilesystemsPanel latest={latest} />
+            </section>
 
-        <section className="space-y-6">
-          <p className="section-kicker border-b border-border pb-3">// storage</p>
-          <FilesystemsPanel latest={latest} />
-        </section>
+            <section className="space-y-6">
+              <p className="section-kicker border-b border-border pb-3">
+                // pressure &amp; alerts
+              </p>
+              <PowerPanel latest={latest} />
+              <PressurePanel latest={latest} />
+              <HealthPanel latest={latest} />
+              <EventLog events={alerts} />
+            </section>
 
-        <section className="space-y-6">
-          <p className="section-kicker border-b border-border pb-3">
-            // pressure &amp; alerts
-          </p>
-          <PowerPanel latest={latest} />
-          <PressurePanel latest={latest} />
-          <HealthPanel latest={latest} />
-          <EventLog events={alerts} />
-        </section>
+            <section className="space-y-6">
+              <p className="section-kicker border-b border-border pb-3">// processes</p>
+              <ProcessesPanel latest={latest} />
+            </section>
 
-        <section className="space-y-6">
-          <p className="section-kicker border-b border-border pb-3">// processes</p>
-          <ProcessesPanel latest={latest} />
-        </section>
+            {/* Highway moved below the graphs at explicit request: this dashboard
+                now leads with the visual/telemetry sections and treats services as
+                the detail you check after the shape of the machine already looks
+                right, rather than the first thing on the page. That reverses the
+                original placement (see the terminal's render_simple and this
+                repo's README, "The Highway node comes first" / "a node that is not
+                running earns nothing however cool it is") — the terminal view and
+                daily report still lead with it. Kept as its own section, immediately
+                before the machine/controls, so it still reads as "and here is
+                whether the thing this box exists for is actually up" before you act
+                on anything below it. */}
+            <section className="space-y-6">
+              <p className="section-kicker border-b border-border pb-3">// highway services</p>
+              <HighwayPanel latest={latest} />
+            </section>
 
-        <section className="space-y-6">
-          <p className="section-kicker border-b border-border pb-3">// the machine</p>
-          <ServerDetailsPanel node={node} latest={latest} />
-        </section>
+            <section className="space-y-6">
+              <p className="section-kicker border-b border-border pb-3">// the machine</p>
+              <ServerDetailsPanel node={node} latest={latest} />
+            </section>
 
-        {/* Memory and disk trend, kept last: it is the slowest-moving panel. */}
-        <TrendNote data={toMemSeries(metrics)} />
+            {/* Memory and disk trend, kept last: it is the slowest-moving panel. */}
+            <TrendNote data={toMemSeries(metrics)} />
+          </>
+        )}
 
         {/* The controls sit at the bottom, after everything they act on. Sync and
             update are deliberate actions taken *because* of something read above,

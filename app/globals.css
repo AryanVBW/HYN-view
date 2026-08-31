@@ -273,6 +273,7 @@ nav {
 .terminal-panel {
   border: 1px solid var(--border);
   background: color-mix(in oklab, var(--background) 60%, transparent);
+  border-radius: var(--radius-lg);
 }
 
 /* Logo animation. Two loops, both opacity-only so they can never reflow or

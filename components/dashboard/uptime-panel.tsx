@@ -28,7 +28,7 @@ function Gauge({
 
   return (
     <div className="flex flex-col items-center">
-      <div className="relative">
+      <div className="relative rounded-full transition-transform duration-300 hover:scale-[1.03]">
         <ChartContainer config={chartConfig} className="aspect-square h-[124px] w-[124px]">
           <PieChart>
             <Pie
@@ -76,11 +76,11 @@ export function HealthPanel({ latest }: { latest: Metric }) {
       : "unknown";
 
   return (
-    <div className="terminal-panel animate-in fade-in slide-in-from-bottom-2 p-6 duration-500">
+    <div className="terminal-panel animate-in fade-in slide-in-from-bottom-2 rounded-xl p-6 duration-500">
       <p className="section-kicker">// resource pressure</p>
       <p className="mt-2 font-sentient text-2xl text-card-foreground">Where the node stands</p>
 
-      <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
+      <div className="mt-6 grid grid-cols-2 gap-4 rounded-lg border border-border/60 bg-foreground/[0.02] p-4 sm:grid-cols-4">
         <Gauge label="CPU" pct={latest.cpu_pct} caption={loadPerCore} />
         <Gauge label="Memory" pct={latest.mem_pct} caption={memCaption} />
         <Gauge label="Disk" pct={latest.disk_pct} caption="root fs" />

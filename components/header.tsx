@@ -5,6 +5,7 @@ import Link from "next/link";
 import { UserCircle2 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
+import { DashboardViewToggle } from "./dashboard-view-toggle";
 import { Logo } from "./logo";
 import { MobileMenu } from "./mobile-menu";
 import { ThemeToggle } from "./theme-toggle";
@@ -58,9 +59,11 @@ export const Header = () => {
               Sign in
             </Link>
           ) : null}
+          <DashboardViewToggle />
           <ThemeToggle />
         </div>
         <div className="flex items-center gap-x-2 lg:hidden">
+          <DashboardViewToggle />
           <ThemeToggle />
           <MobileMenu signedIn={signedIn} email={email ?? null} />
         </div>

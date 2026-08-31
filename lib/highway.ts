@@ -172,3 +172,75 @@ export function unitTone(unit: HighwayUnit): UnitTone {
   if (unit.state === "inactive") return "idle";
   return "warn";
 }
+
+// One verdict for "are the services okay", built from hw.units the same way
+// unitTone colours each row, rather than re-deriving health from hw.health /
+// hw.unitsFailed. hw.health already answers a slightly different question (it
+// also weighs the mesh tunnel, the journal and the process itself), and the
+// simple dashboard's promise is specifically about *services*: a node whose
+// journal has a stray warning but every unit is active should not show red
+// here even if the advanced health verdict is "warn".
+//
+// An inactive unit (one deliberately not started -- most nodes ship several
+// optional services) is muted, not red: only a unit systemd reports as
+// "failed" counts against the verdict. A crash-looping unit (unitTone "warn")
+// is active but unhealthy, which is exactly the case the amber tone exists for.
+export type ServicesVerdict = {
+  tone: "ok" | "warn" | "crit" | "idle";
+  label: string;
+  activeCount: number;
+  failedCount: number;
+  inactiveCount: number;
+};
+
+export function servicesVerdict(hw: HighwayState | null): ServicesVerdict {
+  if (!hw || !hw.present || !hw.tracked) {
+    return { tone: "idle", label: "Not applicable", activeCount: 0, failedCount: 0, inactiveCount: 0 };
+  }
+  if (hw.units.length === 0) {
+    // present + tracked but no unit rows: hw.pid tells us whether the process
+    // itself is at least running, which is the best a summary-only or
+    // unit-less reading can say.
+    return hw.pid !== null
+      ? { tone: "warn", label: "Running, unit detail unavailable", activeCount: 0, failedCount: 0, inactiveCount: 0 }
+      : { tone: "crit", label: "Not running", activeCount: 0, failedCount: 0, inactiveCount: 0 };
+  }
+
+  let failed = 0;
+  let active = 0;
+  let looping = 0;
+  let inactive = 0;
+  for (const unit of hw.units) {
+    const tone = unitTone(unit);
+    if (tone === "crit") failed++;
+    else if (tone === "warn") looping++;
+    else if (tone === "idle") inactive++;
+    else active++;
+  }
+
+  if (failed > 0) {
+    return {
+      tone: "crit",
+      label: `${failed} service${failed === 1 ? "" : "s"} failed`,
+      activeCount: active,
+      failedCount: failed,
+      inactiveCount: inactive,
+    };
+  }
+  if (looping > 0) {
+    return {
+      tone: "warn",
+      label: `${looping} service${looping === 1 ? "" : "s"} restarting repeatedly`,
+      activeCount: active,
+      failedCount: 0,
+      inactiveCount: inactive,
+    };
+  }
+  return {
+    tone: "ok",
+    label: active > 0 ? "All running services are okay" : "No services active",
+    activeCount: active,
+    failedCount: 0,
+    inactiveCount: inactive,
+  };
+}

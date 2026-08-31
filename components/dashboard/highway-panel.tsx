@@ -24,8 +24,12 @@ function HealthPill({ hw }: { hw: HighwayState }) {
   const t = TONE[tone];
   return (
     <span
-      className={`flex w-fit items-center gap-2 rounded-full border px-3 py-1.5 font-mono text-xs uppercase ${t.text} ${
-        tone === "ok" ? "border-primary/40" : tone === "crit" ? "border-destructive/50" : "border-current/40"
+      className={`flex w-fit items-center gap-2 rounded-full border px-3.5 py-2 font-mono text-xs uppercase ${t.text} ${
+        tone === "ok"
+          ? "border-primary/40 bg-primary/10"
+          : tone === "crit"
+            ? "border-destructive/50 bg-destructive/10"
+            : "border-current/40 bg-current/5"
       }`}
     >
       <span aria-hidden className={`size-1.5 rounded-full ${t.dot}`} />
@@ -61,7 +65,7 @@ function Figure({
 
 function Frame({ children, note }: { children: React.ReactNode; note?: React.ReactNode }) {
   return (
-    <div className="terminal-panel animate-in fade-in slide-in-from-bottom-2 p-6 duration-500">
+    <div className="terminal-panel animate-in fade-in slide-in-from-bottom-2 rounded-xl p-6 duration-500">
       {children}
       <p className="mt-6 border-t border-border/60 pt-4 font-mono text-[0.65rem] leading-6 text-muted-foreground">
         Read-only observation of{" "}

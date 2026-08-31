@@ -50,20 +50,26 @@ export function StatCards({ latest }: { latest: Metric }) {
   ];
 
   return (
-    <div className="grid gap-px overflow-hidden border border-border bg-border sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
       {stats.map((stat, i) => {
         const Icon = stat.icon;
         return (
           <div
             key={stat.label}
             style={{ animationDelay: `${i * 50}ms` }}
-            className="animate-in fade-in slide-in-from-bottom-2 fill-mode-backwards bg-card px-5 py-5 duration-500"
+            className="animate-in fade-in slide-in-from-bottom-2 fill-mode-backwards group relative overflow-hidden rounded-xl border border-border bg-card px-5 py-5 duration-500 transition-colors hover:border-primary/40"
           >
+            <div
+              aria-hidden
+              className="pointer-events-none absolute -right-6 -top-6 size-24 rounded-full bg-primary/10 opacity-0 blur-2xl transition-opacity duration-500 group-hover:opacity-100"
+            />
             <div className="flex items-center justify-between">
               <p className="font-mono text-[0.65rem] uppercase tracking-wide text-muted-foreground">
                 {stat.label}
               </p>
-              <Icon className="size-4 text-primary" aria-hidden />
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-primary/10">
+                <Icon className="size-3.5 text-primary" aria-hidden />
+              </span>
             </div>
             <p className="mt-3 font-sentient text-2xl text-card-foreground">{stat.value}</p>
             {stat.sub ? (
@@ -88,7 +94,11 @@ export function ThroughputCard({ latest }: { latest: Metric }) {
   ];
 
   return (
-    <div className="terminal-panel animate-in fade-in slide-in-from-bottom-2 p-6 duration-500">
+    <div className="terminal-panel animate-in fade-in slide-in-from-bottom-2 relative overflow-hidden rounded-xl p-6 duration-500">
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 -z-10 bg-gradient-to-br from-primary/[0.06] via-transparent to-transparent"
+      />
       <div className="flex items-baseline justify-between">
         <p className="section-kicker">// live throughput</p>
         <p className="font-mono text-xs text-muted-foreground">{latest.net_iface ?? "—"}</p>
@@ -100,10 +110,10 @@ export function ThroughputCard({ latest }: { latest: Metric }) {
               <span className="uppercase text-muted-foreground">{bar.label}</span>
               <span className="text-card-foreground">{bar.value} Mbit/s</span>
             </div>
-            <div className="mt-1.5 h-2 overflow-hidden rounded-sm bg-muted">
+            <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-muted">
               <div
-                className="h-full rounded-sm transition-[width] duration-700 ease-out"
-                style={{ width: `${(bar.value / peak) * 100}%`, backgroundColor: bar.color }}
+                className="h-full rounded-full shadow-[0_0_6px_var(--tw-shadow-color)] transition-[width] duration-700 ease-out"
+                style={{ width: `${(bar.value / peak) * 100}%`, backgroundColor: bar.color, "--tw-shadow-color": bar.color } as React.CSSProperties}
               />
             </div>
           </div>
