@@ -5,8 +5,10 @@ import {
   readFilesystems,
   readLatencyHops,
   readNetworkDetail,
+  readPower,
   readPressure,
   readProcesses,
+  powerSourceLabel,
 } from "@/lib/telemetry";
 import type { Metric } from "@/lib/types";
 
@@ -260,6 +262,66 @@ export function NetworkDetailPanel({ latest }: { latest: Metric }) {
           </ul>
         )}
       </div>
+    </Panel>
+  );
+}
+
+export function PowerPanel({ latest }: { latest: Metric }) {
+  const power = readPower(latest.payload);
+  // Losing mains is an incident, not a measurement, so it is the one thing here
+  // that gets colour and the top of the panel.
+  const onBattery = power?.acOnline === 0;
+  return (
+    <Panel kicker="power" title="Power draw">
+      {!power ? (
+        <Note>
+          This machine exposes no power measurement — no RAPL energy counters, no hwmon power rail
+          and no battery. That is normal on a virtual machine, and it is shown as absent rather than
+          as 0 W.
+        </Note>
+      ) : (
+        <>
+          {onBattery ? (
+            <p className="mb-4 border border-destructive/50 bg-destructive/10 px-3 py-2 font-mono text-xs text-destructive">
+              Running on battery
+              {power.batteryPct === null ? "" : ` · ${power.batteryPct}% charge`}
+              {power.batteryStatus ? ` · ${power.batteryStatus.toLowerCase()}` : ""}
+            </p>
+          ) : null}
+          <dl className="grid grid-cols-2 gap-x-8 gap-y-3 sm:grid-cols-4">
+            <Figure
+              label="Input"
+              value={n(power.inputW, " W", 1)}
+              hint={powerSourceLabel(power.inputSrc) ?? undefined}
+            />
+            <Figure label="CPU package" value={n(power.cpuW, " W", 1)} />
+            <Figure label="DRAM" value={n(power.dramW, " W", 1)} />
+            <Figure
+              label="Mains"
+              value={power.acOnline === null ? "—" : power.acOnline === 1 ? "present" : "absent"}
+              hint={power.batteryPct === null ? undefined : `battery ${power.batteryPct}%`}
+            />
+          </dl>
+          {power.rails.length === 0 ? null : (
+            <div className="mt-6 border-t border-border/60 pt-4">
+              <p className={MUTED}>Every rail this platform exposes</p>
+              <ul className="mt-2 grid grid-cols-1 gap-x-8 gap-y-1 sm:grid-cols-2">
+                {power.rails.map((rail) => (
+                  <li
+                    key={rail.label}
+                    className="flex items-baseline justify-between gap-4 border-b border-border/40 py-1 font-mono text-xs"
+                  >
+                    <span className="truncate text-muted-foreground" title={rail.label}>
+                      {rail.label}
+                    </span>
+                    <span className="shrink-0 text-card-foreground">{rail.watts.toFixed(1)} W</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
     </Panel>
   );
 }

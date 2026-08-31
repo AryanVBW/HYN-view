@@ -6,8 +6,10 @@ import {
   readFilesystems,
   readLatencyHops,
   readNetworkDetail,
+  readPower,
   readPressure,
   readProcesses,
+  powerSourceLabel,
 } from "./telemetry.ts";
 
 // One payload in the shape cloud_payload_v actually emits, including the awkward
@@ -44,6 +46,11 @@ const payload = {
   psi: { cpu: 4, memory: null, io: "11" },
   cpu: { governor: "performance", mhz_avg: 3400, mhz_min: 1500, mhz_max: 3700, cores_mhz: [3400, 3390, 0, 3401] },
   latency_us: { "1.1.1.1": 8620, "8.8.8.8": 0, gateway: 1200 },
+  power: {
+    input_w: 118, input_src: "hwmon-input", cpu_w: "15.0", dram_w: 2,
+    ac_online: 0, battery_pct: 87, battery_status: "Discharging", battery_w: 9.5,
+    rails: { "package-0": 15, "pmbus PSU1 Input Power": "118.0", broken: null },
+  },
 };
 
 test("every filesystem the agent sent is readable, and a nameless row is dropped", () => {
@@ -112,4 +119,49 @@ test("the first hop is separated from the internet, and a failed probe is not 0m
     { target: "gateway", ms: 1.2, firstHop: true },
     { target: "1.1.1.1", ms: 8.62, firstHop: false },
   ]);
+});
+
+test("power is read in watts, sorted by draw, and names where the figure came from", () => {
+  const power = readPower(payload);
+  assert.ok(power);
+  assert.equal(power.inputW, 118);
+  // Numerics that PostgREST round-trips as strings must still be numbers here.
+  assert.equal(power.cpuW, 15);
+  assert.equal(power.dramW, 2);
+  assert.equal(power.batteryW, 9.5);
+  assert.equal(power.batteryPct, 87);
+  assert.equal(power.batteryStatus, "Discharging");
+  // Biggest rail first: on a box with a dozen rails the interesting one is the
+  // one drawing the most, not whichever the kernel happened to enumerate first.
+  assert.deepEqual(power.rails, [
+    { label: "pmbus PSU1 Input Power", watts: 118 },
+    { label: "package-0", watts: 15 },
+  ]);
+  // A PSU measurement and a RAPL estimate are different claims, so the source is
+  // carried through to something a person can read.
+  assert.equal(powerSourceLabel(power.inputSrc), "measured at the PSU");
+  assert.equal(powerSourceLabel("rapl-cpu"), "estimated: CPU + DRAM counters");
+  assert.equal(powerSourceLabel(null), null);
+});
+
+test("a machine that cannot measure power reports nothing, never 0 W", () => {
+  assert.equal(readPower({}), null);
+  assert.equal(readPower(null), null);
+  // Every field null is exactly what a VM sends, and it must not render as a
+  // machine drawing no power at all.
+  assert.equal(
+    readPower({
+      power: {
+        input_w: null, input_src: "", cpu_w: null, dram_w: null,
+        ac_online: null, battery_pct: null, battery_status: "", battery_w: null,
+        rails: {},
+      },
+    }),
+    null,
+  );
+  // ...but a box with only mains state and no wattage is still worth a panel.
+  const acOnly = readPower({ power: { ac_online: 1, rails: {} } });
+  assert.ok(acOnly);
+  assert.equal(acOnly.acOnline, 1);
+  assert.equal(acOnly.inputW, null);
 });

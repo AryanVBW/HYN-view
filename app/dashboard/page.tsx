@@ -14,6 +14,7 @@ import { EventLog } from "@/components/dashboard/event-log";
 import {
   FilesystemsPanel,
   NetworkDetailPanel,
+  PowerPanel,
   PressurePanel,
   ProcessesPanel,
 } from "@/components/dashboard/telemetry-detail";
@@ -239,16 +240,6 @@ export default async function DashboardPage({
           </p>
         ) : null}
 
-        {!node.is_demo ? (
-          <AgentUpdateControl
-            nodeId={node.id}
-            nodeName={node.name}
-            currentVersion={node.agent_version}
-            release={agentRelease}
-            automatic={node.config?.auto_update === "install"}
-          />
-        ) : null}
-
         <StatCards latest={latest} />
 
         {/* Highway first, above the processor. On a relay node the question that
@@ -290,6 +281,7 @@ export default async function DashboardPage({
           <p className="section-kicker border-b border-border pb-3">
             // pressure &amp; alerts
           </p>
+          <PowerPanel latest={latest} />
           <PressurePanel latest={latest} />
           <HealthPanel latest={latest} />
           <EventLog events={alerts} />
@@ -307,6 +299,21 @@ export default async function DashboardPage({
 
         {/* Memory and disk trend, kept last: it is the slowest-moving panel. */}
         <TrendNote data={toMemSeries(metrics)} />
+
+        {/* The controls sit at the bottom, after everything they act on. Sync and
+            update are deliberate actions taken *because* of something read above,
+            so putting them last means the page reads as "here is the machine" and
+            then "here is what you can do about it" -- rather than offering a
+            button before the reader knows whether they need it. */}
+        {!node.is_demo ? (
+          <AgentUpdateControl
+            nodeId={node.id}
+            nodeName={node.name}
+            currentVersion={node.agent_version}
+            release={agentRelease}
+            automatic={node.config?.auto_update === "install"}
+          />
+        ) : null}
       </div>
     </Shell>
   );

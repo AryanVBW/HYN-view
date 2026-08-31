@@ -7,6 +7,7 @@ import { StatCards } from "@/components/dashboard/stat-cards";
 import {
   FilesystemsPanel,
   NetworkDetailPanel,
+  PowerPanel,
   PressurePanel,
   ProcessesPanel,
 } from "@/components/dashboard/telemetry-detail";
@@ -108,6 +109,7 @@ export function AdminClientDashboard({
               <HighwayPanel latest={metrics[metrics.length - 1]} />
               <NetworkDetailPanel latest={metrics[metrics.length - 1]} />
               <FilesystemsPanel latest={metrics[metrics.length - 1]} />
+              <PowerPanel latest={metrics[metrics.length - 1]} />
               <PressurePanel latest={metrics[metrics.length - 1]} />
               <ProcessesPanel latest={metrics[metrics.length - 1]} />
             </>

@@ -100,6 +100,67 @@ export type CpuClocks = {
 // what tells an operator whether a problem is theirs or their provider's.
 export type LatencyHop = { target: string; ms: number; firstHop: boolean };
 
+// Power draw. inputSrc is not decoration: "118 W" measured at a PSU and "17 W"
+// summed from RAPL counters are different claims about a machine, and a panel
+// that showed them identically would be inviting someone to size a UPS off a
+// CPU package reading.
+export type Power = {
+  inputW: number | null;
+  inputSrc: string | null;
+  cpuW: number | null;
+  dramW: number | null;
+  acOnline: number | null;
+  batteryPct: number | null;
+  batteryStatus: string | null;
+  batteryW: number | null;
+  rails: { label: string; watts: number }[];
+};
+
+// Which measurement the input figure came from, in the words the terminal uses.
+export function powerSourceLabel(src: string | null): string | null {
+  switch (src) {
+    case "hwmon-input":
+      return "measured at the PSU";
+    case "rapl-psys":
+      return "platform (SoC) counter";
+    case "rapl-cpu":
+      return "estimated: CPU + DRAM counters";
+    default:
+      return null;
+  }
+}
+
+export function readPower(payload: Record<string, unknown> | null): Power | null {
+  const p = obj(payload?.["power"]);
+  if (!p) return null;
+  const rails = Object.entries(obj(p["rails"]) ?? {}).flatMap(([label, raw]) => {
+    const watts = num(raw);
+    return watts === null ? [] : [{ label, watts }];
+  });
+  rails.sort((a, b) => b.watts - a.watts);
+  const out: Power = {
+    inputW: num(p["input_w"]),
+    inputSrc: str(p["input_src"]),
+    cpuW: num(p["cpu_w"]),
+    dramW: num(p["dram_w"]),
+    acOnline: num(p["ac_online"]),
+    batteryPct: num(p["battery_pct"]),
+    batteryStatus: str(p["battery_status"]),
+    batteryW: num(p["battery_w"]),
+    rails,
+  };
+  // A VM exposes no RAPL, no hwmon power rail and no battery. That is a normal
+  // outcome and the panel should say so once, rather than rendering a row of
+  // dashes or -- worse -- a machine apparently drawing 0 W.
+  if (
+    out.inputW === null && out.cpuW === null && out.dramW === null &&
+    out.acOnline === null && out.batteryPct === null && rails.length === 0
+  ) {
+    return null;
+  }
+  return out;
+}
+
 export function readFilesystems(payload: Record<string, unknown> | null): Filesystem[] {
   const disk = obj(payload?.["disk"]);
   if (!disk) return [];
