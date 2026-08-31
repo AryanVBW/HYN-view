@@ -50,7 +50,14 @@ export async function GET(request: NextRequest) {
     const userAgent = request.headers.get("user-agent")?.slice(0, 300) ?? null;
     after(async () => {
       const subject = "Welcome, you signed in";
-      await sendResendEmail({
+      // Every other sender in this codebase captures the delivery result and
+      // records it. This one discarded it, which is why "email is not sending"
+      // had no error anywhere to find: the send runs inside after(), so a failure
+      // never touched the response, was never logged, and never reached
+      // notification_log. The result is now inspected and the provider's own
+      // message is logged verbatim -- "API key is invalid", "Domain is not
+      // verified", a quota refusal -- because that string is the whole diagnosis.
+      const delivery = await sendResendEmail({
         apiKey: process.env.RESEND_API_KEY ?? "",
         from: process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.in>",
         to: email,
@@ -64,6 +71,14 @@ export async function GET(request: NextRequest) {
         }),
         idempotencyKey: `sign-in:${auth.user.id}:${signedInAt}`,
       });
+      if (!delivery.ok) {
+        console.error("[sign-in email] delivery failed:", delivery.error, {
+          configured: {
+            RESEND_API_KEY: Boolean(process.env.RESEND_API_KEY),
+            EMAIL_FROM: process.env.EMAIL_FROM ?? "(unset, using the built-in default)",
+          },
+        });
+      }
     });
   }
 

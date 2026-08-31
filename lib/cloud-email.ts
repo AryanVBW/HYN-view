@@ -240,6 +240,123 @@ export async function sendResendEmail(args: {
   }
 }
 
+// Why email is not sending, answered without sending anything.
+//
+// Every delivery failure in this portal comes from one of four causes, and until
+// now none of them was visible: the provider's error string was either discarded
+// (the sign-in email) or buried in a notification_log row nobody thinks to query.
+// This asks Resend directly and names the cause, so "email is not working"
+// becomes a specific, fixable sentence.
+//
+// It deliberately does not send a message. A diagnostic that mails somebody to
+// prove mail works cannot run when mail is broken, which is exactly when it is
+// needed.
+export type EmailDiagnosis = {
+  ok: boolean;
+  cause:
+    | "ok"
+    | "missing-key"
+    | "missing-from"
+    | "invalid-key"
+    | "sender-domain-unverified"
+    | "sender-domain-unknown"
+    | "provider-unreachable";
+  detail: string;
+  fromAddress: string | null;
+  senderDomain: string | null;
+  domains: { name: string; status: string }[];
+};
+
+// "HYN-view <reports@hyn-view.in>" and "reports@hyn-view.in" both yield the
+// domain, because either form is a legal EMAIL_FROM and both are used in practice.
+export function senderDomainOf(from: string | null | undefined): string | null {
+  if (!from) return null;
+  const angle = from.match(/<([^>]+)>/);
+  const address = (angle ? angle[1] : from).trim();
+  const at = address.lastIndexOf("@");
+  if (at < 0 || at === address.length - 1) return null;
+  return address.slice(at + 1).toLowerCase();
+}
+
+export async function diagnoseEmailDelivery(args: {
+  apiKey: string | undefined;
+  from: string | undefined;
+  fetchImpl?: typeof fetch;
+}): Promise<EmailDiagnosis> {
+  const from = args.from?.trim() ?? "";
+  const senderDomain = senderDomainOf(from);
+  const base: EmailDiagnosis = {
+    ok: false, cause: "ok", detail: "", fromAddress: from || null,
+    senderDomain, domains: [],
+  };
+  if (!args.apiKey) {
+    return { ...base, cause: "missing-key", detail: "RESEND_API_KEY is not set on the deployment." };
+  }
+  if (!from || !senderDomain) {
+    return {
+      ...base, cause: "missing-from",
+      detail: from
+        ? `EMAIL_FROM ("${from}") has no usable domain. Use "Name <you@your-domain>" or "you@your-domain".`
+        : "EMAIL_FROM is not set on the deployment.",
+    };
+  }
+  let payload: unknown;
+  let status = 0;
+  try {
+    const response = await (args.fetchImpl ?? fetch)("https://api.resend.com/domains", {
+      headers: { Authorization: `Bearer ${args.apiKey}` },
+    });
+    status = response.status;
+    payload = await response.json().catch(() => ({}));
+  } catch (error) {
+    return {
+      ...base, cause: "provider-unreachable",
+      detail: error instanceof Error ? error.message : "could not reach api.resend.com",
+    };
+  }
+  const body = (payload ?? {}) as { data?: unknown; message?: string };
+  if (status === 401 || status === 403 || /api key is invalid/i.test(body.message ?? "")) {
+    return {
+      ...base, cause: "invalid-key",
+      detail: body.message ?? `Resend rejected the key with HTTP ${status}.`,
+    };
+  }
+  if (status >= 400) {
+    return {
+      ...base, cause: "provider-unreachable",
+      detail: body.message ?? `Resend returned HTTP ${status}.`,
+    };
+  }
+  const domains = (Array.isArray(body.data) ? body.data : [])
+    .map((entry) => entry as { name?: unknown; status?: unknown })
+    .flatMap((entry) =>
+      typeof entry.name === "string"
+        ? [{ name: entry.name.toLowerCase(), status: typeof entry.status === "string" ? entry.status : "unknown" }]
+        : []
+    );
+  const match = domains.find((d) => d.name === senderDomain);
+  if (!match) {
+    return {
+      ...base, domains, cause: "sender-domain-unknown",
+      detail: `EMAIL_FROM sends from "${senderDomain}", which is not a domain in this Resend account. `
+        + (domains.length
+          ? `Verified domains are: ${domains.map((d) => `${d.name} (${d.status})`).join(", ")}.`
+          : "This Resend account has no domains configured at all."),
+    };
+  }
+  if (match.status !== "verified") {
+    return {
+      ...base, domains, cause: "sender-domain-unverified",
+      detail: `The sending domain "${senderDomain}" is "${match.status}" in Resend, not "verified". `
+        + "Resend refuses every send from an unverified domain.",
+    };
+  }
+  return {
+    ...base, ok: true, cause: "ok", domains,
+    detail: `Resend accepted the key and "${senderDomain}" is verified.`,
+  };
+}
+
 export function buildIncidentContent(events: Array<{
   severity: string;
   message: string;
