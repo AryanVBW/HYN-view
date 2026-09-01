@@ -1335,6 +1335,39 @@ cloud_unlink() {
   return 0
 }
 
+# What the portal thinks this node's administrative state is, as of the last beat
+# or push: active, paused, suspended, or unset when nothing has been accepted yet.
+# Read from the stamps rather than the network, so `hyn doctor` costs nothing and
+# still works on a box whose problem is that it cannot reach the portal.
+#
+# It exists because a pause or a suspension is invisible from inside the machine:
+# every local check passes, the agent is healthy, and the portal quietly refuses
+# everything it sends. An operator sent to run `hyn doctor` after a failed "Sync
+# now" would otherwise find nothing wrong and conclude the tool was lying.
+CLOUD_NODE_STATE=''
+cloud_node_state_v() {
+  local f st extra
+  CLOUD_NODE_STATE=''
+  f=$(cloud_heartbeat_stamp)
+  if [[ -r $f ]]; then
+    IFS=$'\t' read -r _ st extra <"$f" 2>/dev/null
+    # `fallback` is the pre-hyn_heartbeat portal path, which reports no state.
+    if [[ ${st:-} == ok && -n ${extra:-} && $extra != fallback ]]; then
+      CLOUD_NODE_STATE=$extra
+      return 0
+    fi
+  fi
+  f=$(_cloud_push_stamp)
+  if [[ -r $f ]]; then
+    IFS=$'\t' read -r _ st _ <"$f" 2>/dev/null
+    case ${st:-} in
+      ok) CLOUD_NODE_STATE=active; return 0 ;;
+      paused | suspended) CLOUD_NODE_STATE=$st; return 0 ;;
+    esac
+  fi
+  return 1
+}
+
 cloud_status() {
   local url token stamp ts st err
   url=$(cloud_url)

@@ -63,7 +63,7 @@ declare -A CFG=(
   # (the full multi-panel view) or 'simple' (node status, speed, temp -- the
   # premium glance view). `hyn net`/`hyn proc`/`hyn node` still win over this,
   # same as they win over the dash default today.
-  [default_view]=dash
+  [dashboard_view]=dash
   [interval]=1.0
   [net_unit]=bits
   [graph]=braille
@@ -268,7 +268,7 @@ _cfg_cloud_allowed() {
   case ${1:-} in
     alert_mem_pct | alert_disk_pct | alert_temp_c | alert_load_per_core | \
       alert_latency_ms | alert_min_severity | alert_repeat_hours | report_at | \
-      notify_max_per_day | cloud_push_min | auto_update) return 0 ;;
+      notify_max_per_day | cloud_push_min | auto_update | dashboard_view) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -297,6 +297,8 @@ _cfg_cloud_value_allowed() {
       [[ $v == crit || $v == warn || $v == info ]] ;;
     auto_update)
       [[ $v == install || $v == check || $v == off ]] ;;
+    dashboard_view)
+      [[ $v == dash || $v == simple ]] ;;
     report_at)
       [[ $v =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] ;;
     *) return 1 ;;

@@ -72,11 +72,11 @@ boot() {
   ui_init
   collect_init
   panels_enabled
-  # default_view only decides the view nobody asked for explicitly: `hyn net`
+  # dashboard_view only decides the view nobody asked for explicitly: `hyn net`
   # etc. below still wins over it. dash/simple are the only sane defaults --
   # landing on a subcommand-only view (help, node) with no idea what a fresh
   # operator wanted would look like a broken launch.
-  [[ ${CFG[default_view]} == simple ]] && VIEW=simple
+  [[ ${CFG[dashboard_view]} == simple ]] && VIEW=simple
   # Non-blocking: reads a cache, and only spawns a detached fetch when stale.
   update_startup
   return 0
@@ -822,6 +822,27 @@ cmd_doctor() {
       _chk ok 'daily budget' "$NOTIFY_SENT_TODAY of ${CFG[notify_max_per_day]} queued"
     else
       _chk warn 'daily budget' "$NOTIFY_SENT_TODAY of ${CFG[notify_max_per_day]} -- further messages are suppressed today"
+    fi
+    # The state the portal holds for this node, which nothing on this box can
+    # change and every local check would otherwise pass straight over. A paused or
+    # suspended node has its readings *and* its portal "Sync now" refused while the
+    # agent here is perfectly healthy, so doctor has to name it rather than leave
+    # an operator hunting for a fault on the machine.
+    if cloud_node_state_v; then
+      case $CLOUD_NODE_STATE in
+        active) _chk ok 'portal node state' 'active -- readings and portal commands are accepted' ;;
+        paused)
+          _chk warn 'portal node state' 'paused in the portal -- readings and Sync now are refused'
+          printf '       %snothing here can clear it: resume the machine in the portal (a timed\n' "${C[dim]}"
+          printf '       pause resumes by itself when it expires)%s\n' "${C[reset]}" ;;
+        suspended)
+          _chk warn 'portal node state' 'suspended in the portal -- readings and commands are refused'
+          printf '       %san administrator has to lift it; this is not a fault on this machine%s\n' \
+            "${C[dim]}" "${C[reset]}" ;;
+        *) _chk ok 'portal node state' "$CLOUD_NODE_STATE" ;;
+      esac
+    else
+      _chk warn 'portal node state' 'unknown -- nothing has been accepted yet: hyn push'
     fi
   else
     # Not a fault. An unpaired machine is a working local monitor that cannot mail

@@ -865,6 +865,7 @@ begin
     '{"alert_latency_ms":{}}'::jsonb,
     '{"alert_min_severity":"root"}'::jsonb,
     '{"auto_update":"surprise"}'::jsonb,
+    '{"dashboard_view":"fancy"}'::jsonb,
     '{"report_at":"99:99"}'::jsonb,
     '{"cloud_push_min":"0"}'::jsonb
   ] loop
@@ -889,7 +890,7 @@ update public.nodes
      "alert_load_per_core":"400", "alert_latency_ms":"250",
      "alert_min_severity":"warn", "alert_repeat_hours":"6",
      "report_at":"07:30", "notify_max_per_day":"25", "cloud_push_min":"5",
-     "auto_update":"install"
+     "auto_update":"install", "dashboard_view":"simple"
    }'::jsonb
  where id = (select v from t where k = 'node_id')::uuid;
 
@@ -900,7 +901,7 @@ begin
     from public.nodes nrow,
          lateral jsonb_object_keys(nrow.config)
    where nrow.id = (select v from t where k = 'node_id')::uuid;
-  if n <> 11 then raise exception 'portal allowlist rejected a supported setting'; end if;
+  if n <> 12 then raise exception 'portal allowlist rejected a supported setting'; end if;
   raise notice 'PASS  every portal-exposed monitoring setting remains writable';
 end $$;
 
@@ -1274,7 +1275,8 @@ begin
     'select public.hyn_admin_notifications(10)',
     'select public.hyn_admin_audit(10)',
     'select public.hyn_admin_templates()',
-    'select public.hyn_admin_save_template(''alert'', ''{{content}}'')'
+    'select public.hyn_admin_save_template(''alert'', ''{{content}}'')',
+    'select public.hyn_admin_set_node_config(''' || (select v from t where k = 'node_id') || '''::uuid, ''{"dashboard_view":"simple"}''::jsonb)'
   ] loop
     ok := false;
     begin
@@ -1295,6 +1297,56 @@ begin
   end;
   if not ok then raise exception 'a browser session could read notification template storage directly'; end if;
   raise notice 'PASS  template storage is reachable only through admin-checked RPCs';
+end $$;
+
+-- The internals are not an API, and "not an API" has to mean unreachable rather
+-- than undocumented. Every one of them carries `revoke all ... from public`, which
+-- is sufficient on plain PostgreSQL and does nothing on Supabase: the project
+-- grants EXECUTE on new functions to anon and authenticated by name. Measured on
+-- the live project before this was fixed, `POST /rest/v1/rpc/_hyn_audit` with the
+-- public anon key returned 204 and inserted a row into the audit trail. The
+-- harness now sets those same default privileges, so this check fails the way
+-- production would rather than passing because the test cluster was stricter.
+do $$
+declare r record; leaked text := '';
+begin
+  for r in
+    select p.oid::regprocedure::text as sig, p.proname
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public' and p.proname like '\_hyn\_%'
+     order by 1
+  loop
+    -- Backs a CHECK constraint on public.nodes, which is evaluated as the role
+    -- doing the write, so authenticated must keep EXECUTE on this one.
+    if r.proname = '_hyn_portal_config_valid' then continue; end if;
+    if has_function_privilege('anon', r.sig, 'execute')
+       or has_function_privilege('authenticated', r.sig, 'execute') then
+      leaked := leaked || ' ' || r.sig;
+    end if;
+  end loop;
+  if leaked <> '' then
+    raise exception 'internal helpers are callable from a browser session:%', leaked;
+  end if;
+  raise notice 'PASS  the internal helpers are unreachable from anon and authenticated';
+end $$;
+
+-- The specific one that mattered: a forged audit entry is worse than none, since
+-- the whole point of the table is that it can be believed afterwards.
+do $$
+declare ok boolean := false; n bigint;
+begin
+  set local role anon;
+  begin
+    perform public._hyn_audit('forged.by.anon', null, null, '{}'::jsonb);
+  exception when insufficient_privilege then ok := true;
+  end;
+  set local role postgres;
+  select count(*) into n from public.admin_audit where action = 'forged.by.anon';
+  set local role authenticated;
+  if not ok or n <> 0 then
+    raise exception 'anon wrote % row(s) into the audit trail', n;
+  end if;
+  raise notice 'PASS  anon cannot forge an audit entry';
 end $$;
 
 do $$
@@ -1607,6 +1659,34 @@ begin
   raise notice 'PASS  an admin can pause a node for a fixed window';
 end $$;
 
+-- An administrator sets a client's node config through the same allowlist a
+-- client uses for their own -- dashboard_view is the setting under test, but
+-- the point is that the admin entry point enforces the identical bound rather
+-- than a looser one, since an admin console is not a bigger trust boundary.
+do $$
+declare r json;
+begin
+  r := public.hyn_admin_set_node_config(
+    (select v from t where k = 'node_id')::uuid, '{"dashboard_view":"simple"}'::jsonb);
+  if r->>'status' <> 'ok' then raise exception 'admin config set failed: %', r; end if;
+  if (r->'config')->>'dashboard_view' <> 'simple' then
+    raise exception 'dashboard_view did not persist: %', r;
+  end if;
+  raise notice 'PASS  an admin can set a client node''s dashboard view';
+end $$;
+
+do $$
+declare ok boolean := false;
+begin
+  begin
+    perform public.hyn_admin_set_node_config(
+      (select v from t where k = 'node_id')::uuid, '{"dashboard_view":"not-a-real-mode"}'::jsonb);
+  exception when others then ok := true;
+  end;
+  if not ok then raise exception 'the admin config RPC accepted an out-of-band dashboard_view value'; end if;
+  raise notice 'PASS  the admin config RPC enforces the same value bounds as the client one';
+end $$;
+
 set local role anon;
 do $$
 declare ok boolean := false; msg text;
@@ -1762,6 +1842,268 @@ begin
   if n <> 1 then raise exception 'the client suspension was not audited'; end if;
   set local role authenticated;
   raise notice 'PASS  pause and client suspension are individually recorded';
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 16. deleting a machine, including one that never linked
+-- ---------------------------------------------------------------------------
+-- The phantom this exists for: approving a pairing code creates the node row
+-- immediately, so a client who never finishes `sudo hyn link` keeps a machine on
+-- their dashboard for ever. Pause, suspend and revoke all leave the row in
+-- place, which is why "never linked" has to be visible and deletable.
+do $$
+declare v_phantom uuid; machine jsonb; client jsonb;
+begin
+  set local role postgres;
+  insert into public.nodes (owner, name, hostname, token_hash)
+  values ('11111111-1111-1111-1111-111111111111', 'approved-never-linked', 'ghost',
+          public._hyn_sha256('phantom-node-token'))
+  returning id into v_phantom;
+  insert into public.device_codes (user_code_verifier, device_code_hash, hostname, node_id, expires_at)
+  values ('unused', public._hyn_sha256('phantom-device-code'), 'ghost', v_phantom,
+          now() + interval '10 minutes');
+  insert into t (k, v) values ('phantom_id', v_phantom::text);
+
+  set local role authenticated;
+  set local "test.uid" = '33333333-3333-3333-3333-333333333333';
+  select value into machine from jsonb_array_elements(public.hyn_admin_nodes()::jsonb)
+   where value->>'id' = v_phantom::text;
+  if machine->>'ever_connected' <> 'false' then
+    raise exception 'a node whose agent never checked in should not read as connected: %', machine;
+  end if;
+  select value into client from jsonb_array_elements(public.hyn_admin_clients()::jsonb)
+   where value->>'id' = '11111111-1111-1111-1111-111111111111';
+  if (client->>'nodes_unlinked')::int <> 1 then
+    raise exception 'the client fleet count should show one never-linked machine: %', client;
+  end if;
+  raise notice 'PASS  a machine that was approved but never linked is reported as such';
+end $$;
+
+do $$
+declare ok boolean := false;
+begin
+  set local "test.uid" = '22222222-2222-2222-2222-222222222222';
+  begin
+    perform public.hyn_admin_delete_node((select v from t where k = 'phantom_id')::uuid, 'mischief');
+  exception when others then ok := true;
+  end;
+  if not ok then raise exception 'a non-admin could delete another client''s machine'; end if;
+  set local role postgres;
+  if not exists (select 1 from public.nodes where id = (select v from t where k = 'phantom_id')::uuid) then
+    raise exception 'the machine was deleted by a non-admin';
+  end if;
+  set local role authenticated;
+  raise notice 'PASS  a non-admin cannot delete a machine';
+end $$;
+
+do $$
+declare r json; n integer; client jsonb;
+begin
+  set local "test.uid" = '33333333-3333-3333-3333-333333333333';
+  r := public.hyn_admin_delete_node((select v from t where k = 'phantom_id')::uuid, 'never linked');
+  if r->>'status' <> 'ok' then raise exception 'delete returned %', r; end if;
+
+  set local role postgres;
+  select count(*) into n from public.nodes where id = (select v from t where k = 'phantom_id')::uuid;
+  if n <> 0 then raise exception 'the machine survived its deletion'; end if;
+  -- A pairing row left pointing at nothing reads as 'pending' to an agent still
+  -- polling, so it goes with the node rather than waiting for expiry.
+  select count(*) into n from public.device_codes
+   where device_code_hash = public._hyn_sha256('phantom-device-code');
+  if n <> 0 then raise exception 'the unclaimed pairing row outlived its node'; end if;
+  select count(*) into n from public.admin_audit
+   where action = 'node.delete' and detail->>'name' = 'approved-never-linked'
+     and detail->>'ever_connected' = 'false' and detail->>'reason' = 'never linked';
+  if n <> 1 then raise exception 'the deletion was not attributed in the audit trail'; end if;
+
+  set local role authenticated;
+  select value into client from jsonb_array_elements(public.hyn_admin_clients()::jsonb)
+   where value->>'id' = '11111111-1111-1111-1111-111111111111';
+  if (client->>'nodes_unlinked')::int <> 0 then
+    raise exception 'the never-linked count did not follow the deletion: %', client;
+  end if;
+  raise notice 'PASS  an admin deletes a never-linked machine, audited, with its pairing row';
+end $$;
+
+-- Any machine, not only a phantom: the readings, speed tests and alerts go with
+-- it, which is the whole reason the button asks for the name to be typed.
+do $$
+declare v_node uuid; n integer;
+begin
+  v_node := (select v from t where k = 'node_id')::uuid;
+  set local role postgres;
+  select count(*) into n from public.metrics where node_id = v_node;
+  if n < 1 then raise exception 'expected the fixture node to have readings to cascade'; end if;
+
+  set local role authenticated;
+  set local "test.uid" = '33333333-3333-3333-3333-333333333333';
+  perform public.hyn_admin_delete_node(v_node, 'decommissioned');
+
+  set local role postgres;
+  select count(*) into n from public.nodes where id = v_node;
+  if n <> 0 then raise exception 'a linked machine could not be deleted'; end if;
+  select count(*) into n from public.metrics where node_id = v_node;
+  if n <> 0 then raise exception '% readings outlived their machine', n; end if;
+  select count(*) into n from public.alert_events where node_id = v_node;
+  if n <> 0 then raise exception '% alerts outlived their machine', n; end if;
+  -- The audit entry survives the row it refers to: target_node is set null on
+  -- delete, so the detail is what keeps the trail readable.
+  select count(*) into n from public.admin_audit
+   where action = 'node.delete' and detail->>'reason' = 'decommissioned';
+  if n <> 1 then raise exception 'deleting a linked machine was not audited'; end if;
+  set local role authenticated;
+  raise notice 'PASS  deleting a machine takes its telemetry with it and stays in the audit trail';
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 17. a refused command names the state that refused it
+-- ---------------------------------------------------------------------------
+-- The bug this covers: the portal's "Sync now" printed `active node not found`
+-- and told the operator to run `sudo hyn doctor` on the machine, for a machine
+-- that was in fact paused, suspended, revoked or demo -- none of which anything
+-- on the machine can clear. Worse, a pause whose deadline had already passed
+-- refused too, although every other RPC treats that as active.
+do $$
+declare v_node uuid; r json; caught text;
+begin
+  set local role postgres;
+  insert into public.nodes (owner, name, hostname, token_hash, last_seen_at)
+  values ('11111111-1111-1111-1111-111111111111', 'krishna', 'krishna',
+          public._hyn_sha256('krishna-node-token'), now())
+  returning id into v_node;
+  insert into t (k, v) values ('cmd_node', v_node::text);
+
+  set local role authenticated;
+  perform set_config('test.uid', '11111111-1111-1111-1111-111111111111', true);
+
+  -- 1. an elapsed timed pause is not a refusal: it resolves, and the command runs
+  set local role postgres;
+  update public.nodes set status = 'paused', paused_until = now() - interval '1 minute',
+         status_reason = 'maintenance window'
+   where id = v_node;
+  set local role authenticated;
+  r := public.hyn_request_node_command(v_node, 'sync');
+  if r->>'created' <> 'true' then
+    raise exception 'a sync was refused for a pause that had already expired: %', r;
+  end if;
+  set local role postgres;
+  if (select status from public.nodes where id = v_node) <> 'active' then
+    raise exception 'the expired pause was not resolved by the command request';
+  end if;
+  delete from public.node_commands where node_id = v_node;
+
+  -- 2. a live pause is refused, and says so
+  update public.nodes set status = 'paused', paused_until = now() + interval '30 minutes',
+         status_reason = 'maintenance window'
+   where id = v_node;
+  set local role authenticated;
+  caught := '';
+  begin
+    perform public.hyn_request_node_command(v_node, 'sync');
+  exception when others then caught := sqlerrm;
+  end;
+  if caught not like '%paused%' or caught not like '%maintenance window%' then
+    raise exception 'a paused machine refused a sync without saying it was paused: %', caught;
+  end if;
+
+  -- 3. suspended
+  set local role postgres;
+  update public.nodes set status = 'suspended', paused_until = null,
+         status_reason = 'non-payment'
+   where id = v_node;
+  set local role authenticated;
+  caught := '';
+  begin
+    perform public.hyn_request_node_command(v_node, 'sync');
+  exception when others then caught := sqlerrm;
+  end;
+  if caught not like '%suspended%' or caught not like '%non-payment%' then
+    raise exception 'a suspended machine refused a sync without saying so: %', caught;
+  end if;
+
+  -- 4. revoked, which is the one case the fix is on the server
+  set local role postgres;
+  update public.nodes set status = 'active', revoked = true, status_reason = null
+   where id = v_node;
+  set local role authenticated;
+  caught := '';
+  begin
+    perform public.hyn_request_node_command(v_node, 'sync');
+  exception when others then caught := sqlerrm;
+  end;
+  if caught not like '%revoked%' or caught not like '%hyn link%' then
+    raise exception 'a revoked machine did not point at re-pairing: %', caught;
+  end if;
+
+  -- 5. demo data
+  set local role postgres;
+  update public.nodes set revoked = false, is_demo = true where id = v_node;
+  set local role authenticated;
+  caught := '';
+  begin
+    perform public.hyn_request_node_command(v_node, 'sync');
+  exception when others then caught := sqlerrm;
+  end;
+  if caught not like '%demo%' then
+    raise exception 'a demo row refused a sync without saying it was demo data: %', caught;
+  end if;
+
+  -- 6. someone else's machine, and one that no longer exists
+  set local role postgres;
+  update public.nodes set is_demo = false where id = v_node;
+  set local role authenticated;
+  perform set_config('test.uid', '22222222-2222-2222-2222-222222222222', true);
+  caught := '';
+  begin
+    perform public.hyn_request_node_command(v_node, 'sync');
+  exception when others then caught := sqlerrm;
+  end;
+  if caught not like '%another account%' then
+    raise exception 'another account''s machine was refused with the wrong reason: %', caught;
+  end if;
+  caught := '';
+  begin
+    perform public.hyn_request_node_command('00000000-0000-4000-8000-000000000000', 'sync');
+  exception when others then caught := sqlerrm;
+  end;
+  if caught not like '%no longer exists%' then
+    raise exception 'an unknown machine was refused with the wrong reason: %', caught;
+  end if;
+
+  perform set_config('test.uid', '11111111-1111-1111-1111-111111111111', true);
+  raise notice 'PASS  a refused command names the state that refused it, and an expired pause does not refuse';
+end $$;
+
+-- The admin entry point must agree with the owner one: an administrator clicking
+-- Sync in the per-client view on a paused machine used to get the same
+-- `active node not found`.
+do $$
+declare caught text := ''; r json;
+begin
+  set local role postgres;
+  update public.nodes set status = 'paused', paused_until = null, status_reason = 'operator hold'
+   where id = (select v from t where k = 'cmd_node')::uuid;
+  set local role authenticated;
+  perform set_config('test.uid', '33333333-3333-3333-3333-333333333333', true);
+  begin
+    perform public.hyn_admin_request_node_command(
+      (select v from t where k = 'cmd_node')::uuid, 'update');
+  exception when others then caught := sqlerrm;
+  end;
+  if caught not like '%paused%' or caught not like '%operator hold%' then
+    raise exception 'the admin command RPC hid the pause behind a not-found: %', caught;
+  end if;
+
+  set local role postgres;
+  update public.nodes set status = 'active', status_reason = null
+   where id = (select v from t where k = 'cmd_node')::uuid;
+  set local role authenticated;
+  r := public.hyn_admin_request_node_command(
+    (select v from t where k = 'cmd_node')::uuid, 'update');
+  if r->>'created' <> 'true' then
+    raise exception 'an active machine refused an administrator update: %', r;
+  end if;
+  raise notice 'PASS  the admin command RPC refuses for the same stated reasons, and works otherwise';
 end $$;
 
 rollback;

@@ -302,7 +302,20 @@ live stat cards and telemetry charts without leaving the control panel.
 | **Pause** | Stops accepting readings. Optionally for N minutes, after which it resumes by itself. |
 | **Suspend** | Stops accepting readings until an administrator lifts it. |
 | **Revoke** | Invalidates the node token. Not reversible from the portal — the machine must be paired again. |
+| **Delete** | Removes the machine and every reading, alert and delivery recorded for it, from the client's dashboard as well as the admin's. Not reversible, so it asks for the machine name to be typed, and the audit entry outlives the row. |
 | **Suspend client** | Suspends the account and, with it, every machine the client owns. |
+
+**A machine can exist without ever having linked, and only an administrator can
+remove it.** Approving a pairing code creates the node row immediately, so a
+client who approves a code and never finishes `sudo hyn link` — wrong box, a
+typo, a changed mind — keeps a machine on their dashboard that will never report
+anything. Nothing removed it: the pairing-expiry sweep only reaches one while the
+pairing row survives, and pause, suspend and revoke all deliberately leave the
+row in place because a revoked box is history worth keeping. So the fleet table
+labels those machines `never linked`, filters to just them, and counts them per
+client next to the linked total — `2/3 · 1 never linked` — and Delete is the
+control for them. It works on any machine, not only a phantom; the never-linked
+ones are simply the case where it is the *only* right answer.
 
 A timed pause is preferred over an open-ended one because monitoring you forgot
 to switch back on is worse than none: you believe you still have it. The agent
@@ -569,6 +582,21 @@ If a machine is offline, the command safely waits for it to check in; run
 `sudo hyn doctor --fix` on the server, which rewrites the units, re-enables the
 timers and pushes a reading immediately.
 
+**A machine that is paused, suspended, revoked or demo says so instead of
+failing.** These requests used to be refused with one message — `active node not
+found` — under a fixed "recovery on the server" block telling the operator to run
+`hyn doctor` and restart the push timer. That is the fix for none of those states:
+nothing on the machine can lift a pause, reinstate a suspended node or restore a
+revoked credential, so an operator who ssh'd in found a perfectly healthy agent
+and concluded the portal was lying. The refusal now names the state and the reason
+recorded with it, the control is disabled with that reason rather than offered,
+and the recovery shown is the one that applies — the portal for a pause or a
+suspension, `sudo hyn link` for a revoked credential, `hyn doctor` only for a
+machine that genuinely did not complete the job. `hyn doctor` reports the same
+state on the box, since a pause is invisible to every local check. A timed pause
+that has already expired is treated as active, exactly as ingest and the heartbeat
+already treated it, so a command is never refused by a deadline that has passed.
+
 **The agent has full write access, and that is a deliberate reversal.** These
 units used to run under `ProtectSystem=strict` with `ReadWritePaths` limited to
 one state directory. It read well and it was wrong: `npm install -g` writes under
@@ -648,8 +676,9 @@ at: a single glanceable verdict for the node (running / degraded / not running),
 current throughput next to today's fastest recorded speed test with a braille
 sparkline of the day's tests, CPU temperature against fixed thresholds, what the
 machine is drawing and whether it is on mains or battery, and one line each for
-memory, the tightest disk and load. Set `default_view=simple` to
-open there by default; `hyn net`/`hyn proc`/`hyn node` still override it.
+memory, the tightest disk and load. Set `dashboard_view=simple` to
+open there by default; `hyn net`/`hyn proc`/`hyn node` still override it. On a
+linked machine an administrator can set this from the portal instead.
 
 The network panel header names the connection the way you do — Wi-Fi SSID or
 NetworkManager connection name, not just `enp3s0` — alongside the link speed,
@@ -808,7 +837,7 @@ Keys worth knowing:
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `default_view` | `dash` | `simple` opens the premium glance view (`0`) instead of the full dashboard (`1`) |
+| `dashboard_view` | `dash` | `simple` opens the premium glance view (`0`) instead of the full dashboard (`1`) |
 | `interval` | `1.0` | seconds. `2.0`–`3.0` is lighter still |
 | `net_unit` | `bits` | how links are sold; `bytes` if you prefer |
 | `panels` | `net,cpu,mem,node,proc,disk` | **order is priority** — the last ones are dropped first on a short terminal |

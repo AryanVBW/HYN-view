@@ -243,7 +243,7 @@ _default_of() {
 eq 'notification access details default off' 'off' "${CFG[notify_access_details]:-missing}"
 eq 'cloud telemetry defaults to ten minutes' '10' "${CFG[cloud_push_min]:-missing}"
 eq 'automatic CLI updates are the default' 'install' "$(_default_of auto_update)"
-eq 'default view is the advanced dashboard' 'dash' "$(_default_of default_view)"
+eq 'default view is the advanced dashboard' 'dash' "$(_default_of dashboard_view)"
 color_detect
 theme_load hiway || { printf 'theme load failed\n' >&2; exit 1; }
 ui_init
@@ -704,16 +704,27 @@ eq 'baseline is best result' '11000000' "$(st_baseline)"
 
 # Today's high must ignore old history (the rows above, from 2023) and pick the
 # best of only today's runs, not just the latest or the largest ever recorded.
+#
+# Anchored to today's local midnight rather than to "an hour ago": st_today_high_v
+# compares local calendar days, so a fixture placed relative to now straddles
+# midnight when the suite runs in the small hours -- these three rows then landed
+# on two different days and the assertion failed for anyone testing between 00:00
+# and 02:00. A check that only holds for 22 hours a day is worse than no check.
+# 10# on each field for the same reason the calendar test above notes: bash reads
+# 08 and 09 as invalid octal.
 now=${EPOCHSECONDS:-0}
-ST_TS=$((now - 7200)) ST_DOWN=9000000 ST_UP=4000000 ST_NOTE='ok'
+printf -v _hms '%(%H %M %S)T' "$now"
+read -r _h _m _s <<<"$_hms"
+midnight=$((now - (10#$_h * 3600 + 10#$_m * 60 + 10#$_s)))
+ST_TS=$((midnight + 1)) ST_DOWN=9000000 ST_UP=4000000 ST_NOTE='ok'
 st_append eth0
-ST_TS=$((now - 3600)) ST_DOWN=15000000 ST_UP=6000000 ST_NOTE='ok'
+ST_TS=$((midnight + 2)) ST_DOWN=15000000 ST_UP=6000000 ST_NOTE='ok'
 st_append eth0
-ST_TS=$((now - 1800)) ST_DOWN=12000000 ST_UP=5500000 ST_NOTE='ok'
+ST_TS=$((midnight + 3)) ST_DOWN=12000000 ST_UP=5500000 ST_NOTE='ok'
 st_append eth0
 st_today_high_v
 eq "today's high picks today's best, not the all-time or latest" '15000000' "$ST_TODAY_HIGH"
-eq "today's high timestamp matches the winning run" "$((now - 3600))" "$ST_TODAY_HIGH_TS"
+eq "today's high timestamp matches the winning run" "$((midnight + 2))" "$ST_TODAY_HIGH_TS"
 
 # ---------------------------------------------------------------------------
 section 'highway tracker'
@@ -2253,7 +2264,7 @@ _schema="$ROOT/supabase/schema.sql"
 _nodecfg="$ROOT/web-portal/lib/node-config.ts"
 _agent_keys=$(sed -n '/^_cfg_cloud_allowed()/,/^}/p' "$HYN_LIB/core.sh" |
   grep -oE '[a-z_]+ \||[a-z_]+\)' | tr -d ' |)' | grep -v '^$' | sort -u)
-eq 'the agent declares eleven managed settings' 11 "$(printf '%s\n' "$_agent_keys" | grep -c .)"
+eq 'the agent declares twelve managed settings' 12 "$(printf '%s\n' "$_agent_keys" | grep -c .)"
 # The database and portal declarations live in the repository, not in the npm
 # package, so this half of the comparison only runs where they exist. Stated as a
 # skip rather than silently passing: a check that quietly does nothing is worse
@@ -2287,6 +2298,10 @@ falsy 'a threshold past the shared bound is refused' \
 falsy 'zero is not a valid push interval'   '_cfg_cloud_value_allowed cloud_push_min 0'
 falsy 'an empty value never overrides a default' \
   '_cfg_cloud_value_allowed alert_disk_pct "" || _cfg_cloud_value_allowed auto_update ""'
+truthy 'the portal can set dashboard_view to dash or simple' \
+  '_cfg_cloud_allowed dashboard_view && _cfg_cloud_value_allowed dashboard_view dash && _cfg_cloud_value_allowed dashboard_view simple'
+falsy 'dashboard_view rejects anything else' \
+  '_cfg_cloud_value_allowed dashboard_view fancy || _cfg_cloud_value_allowed dashboard_view ""'
 
 # Central management has to be able to give a setting back, not only take it.
 # cfg_load layered values onto whatever CFG already held, so a threshold cleared
@@ -3166,6 +3181,34 @@ contains 'for the heartbeat stamp too'       'heartbeat unknown' "$_corrupt_stat
   _cloud_stamp "$_f" 1700000000 ok active
   [[ $(<"$_f") == $'1700000000\tok\tactive' && ! -e $_f.tmp ]]
 ) && ok || bad 'the status stamp is not written atomically'
+rm -f "$(HYN_VAR=$TMP/var; cloud_heartbeat_stamp)" "$(HYN_VAR=$TMP/var; _cloud_push_stamp)"
+
+# A pause or a suspension lives only in the portal: every local check passes while
+# telemetry and the portal's own "Sync now" are refused. The state already arrives
+# with each beat and each push, so doctor can name it without a network call --
+# without this, an operator sent to run `hyn doctor` after a refused sync finds
+# nothing wrong and concludes the portal is lying.
+_node_state_from() (
+  export HYN_ETC=$TMP/etc HYN_VAR=$TMP/var
+  _cloud_stamp "$(cloud_heartbeat_stamp)" 1700000000 ok "$1"
+  cloud_node_state_v && printf '%s' "$CLOUD_NODE_STATE"
+)
+eq 'the portal node state comes from the heartbeat stamp' 'paused' "$(_node_state_from paused)"
+eq 'an accepted node reads as active'                     'active' "$(_node_state_from active)"
+# `fallback` is the pre-hyn_heartbeat portal path, which reports no state at all;
+# the push stamp still recorded why the last reading was refused.
+eq 'a stateless beat falls back to the push stamp' 'suspended' "$(
+  export HYN_ETC=$TMP/etc HYN_VAR=$TMP/var
+  _cloud_stamp "$(cloud_heartbeat_stamp)" 1700000000 ok fallback
+  _cloud_stamp "$(_cloud_push_stamp)" 1700000000 suspended 'node suspended: non-payment'
+  cloud_node_state_v && printf '%s' "$CLOUD_NODE_STATE"
+)"
+eq 'and no stamp at all is unknown, never active' '' "$(
+  export HYN_ETC=$TMP/etc HYN_VAR=$TMP/var
+  rm -f "$(cloud_heartbeat_stamp)" "$(_cloud_push_stamp)"
+  cloud_node_state_v
+  printf '%s' "$CLOUD_NODE_STATE"
+)"
 rm -f "$(HYN_VAR=$TMP/var; cloud_heartbeat_stamp)" "$(HYN_VAR=$TMP/var; _cloud_push_stamp)"
 
 # Self-heal, which is the other half: a loop that stopped beating gets restarted,

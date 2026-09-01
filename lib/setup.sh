@@ -212,7 +212,7 @@ theme=${CFG[theme]}
 # dash (default, the full multi-panel dashboard) or simple (the premium
 # glance view: node status, speed now + today's high, cpu temp, essentials).
 # hyn net/proc/node still override this on launch.
-default_view=${CFG[default_view]}
+dashboard_view=${CFG[dashboard_view]}
 # refresh interval in seconds. 1.0 is comfortable; 2.0 or 3.0 is lighter still
 # on a box where you care about every last cycle.
 interval=${CFG[interval]}

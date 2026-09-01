@@ -1074,6 +1074,8 @@ begin
         if v not in ('crit', 'warn', 'info') then return false; end if;
       when e.key = 'auto_update' then
         if v not in ('install', 'check', 'off') then return false; end if;
+      when e.key = 'dashboard_view' then
+        if v not in ('dash', 'simple') then return false; end if;
       when e.key = 'report_at' then
         if v !~ '^([01][0-9]|2[0-3]):[0-5][0-9]$' then return false; end if;
       else return false;
@@ -1093,7 +1095,7 @@ update public.nodes n
         'alert_mem_pct', 'alert_disk_pct', 'alert_temp_c',
         'alert_load_per_core', 'alert_latency_ms', 'alert_min_severity',
         'alert_repeat_hours', 'report_at', 'notify_max_per_day', 'cloud_push_min',
-        'auto_update'
+        'auto_update', 'dashboard_view'
       ]::text[])
         and public._hyn_portal_config_valid(jsonb_build_object(e.key, e.value))
    ), '{}'::jsonb);
@@ -1965,6 +1967,38 @@ begin
 end;
 $$;
 
+-- An administrator sets the same managed settings a client can set for their
+-- own node (thresholds, schedule, update policy, dashboard view) -- the RPC a
+-- client calls is owner-scoped and refuses everyone else, so this is a
+-- deliberate second entry point rather than a bypass of it. It is restricted
+-- to the exact same allowlist for the exact same reason: an admin console is
+-- not a bigger trust boundary than the account page, just a different caller.
+create or replace function public.hyn_admin_set_node_config(
+  p_node_id uuid,
+  p_config jsonb
+)
+returns json
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare v_config jsonb;
+begin
+  perform public._hyn_require_admin();
+  if not public._hyn_portal_config_valid(p_config) then
+    raise exception 'invalid portal configuration';
+  end if;
+  update public.nodes set config = p_config
+   where id = p_node_id and revoked = false and is_demo = false
+  returning config into v_config;
+  if not found then
+    raise exception 'no such node';
+  end if;
+  perform public._hyn_audit('node.config', null, p_node_id, p_config);
+  return json_build_object('status', 'ok', 'config', v_config);
+end;
+$$;
+
 -- Suspend or reinstate a whole client account.
 create or replace function public.hyn_admin_set_user_status(
   p_user_id uuid,
@@ -2232,6 +2266,7 @@ revoke all on function public.hyn_admin_templates() from public;
 revoke all on function public.hyn_admin_save_template(text, text) from public;
 revoke all on function public.hyn_admin_set_node_status(uuid, text, integer, text) from public;
 revoke all on function public.hyn_admin_set_node_revoked(uuid, boolean, text) from public;
+revoke all on function public.hyn_admin_set_node_config(uuid, jsonb) from public;
 revoke all on function public.hyn_admin_set_user_status(uuid, text, text) from public;
 revoke all on function public.hyn_admin_set_role(uuid, text) from public;
 
@@ -2244,6 +2279,7 @@ grant execute on function public.hyn_admin_templates() to authenticated;
 grant execute on function public.hyn_admin_save_template(text, text) to authenticated;
 grant execute on function public.hyn_admin_set_node_status(uuid, text, integer, text) to authenticated;
 grant execute on function public.hyn_admin_set_node_revoked(uuid, boolean, text) to authenticated;
+grant execute on function public.hyn_admin_set_node_config(uuid, jsonb) to authenticated;
 grant execute on function public.hyn_admin_set_user_status(uuid, text, text) to authenticated;
 grant execute on function public.hyn_admin_set_role(uuid, text) to authenticated;
 
@@ -3045,3 +3081,357 @@ $$;
 
 revoke all on function public.hyn_heartbeat(text, text) from public;
 grant execute on function public.hyn_heartbeat(text, text) to anon, authenticated;
+
+-- ===========================================================================
+-- an administrator can delete one machine, and can see which never linked
+-- ===========================================================================
+-- Pause, suspend and revoke all leave the row in place, which is correct for a
+-- machine that exists: a revoked box is history worth keeping. It is wrong for a
+-- machine that never existed. Approving a pairing code creates the node row
+-- immediately, so a client who approves a code and then never finishes
+-- `sudo hyn link` -- wrong box, a typo, a changed mind -- keeps a machine on
+-- their dashboard that will never report anything. The only thing that ever
+-- removed one was the pairing-expiry sweep, and only while the pairing row
+-- survived; after that the phantom was permanent and nobody, client or
+-- administrator, had a button for it.
+
+-- "Never connected" is a different fact from "gone quiet", and the two must not
+-- be conflated: quiet means go and look at the box, never connected means the
+-- row was created by an approval the agent never completed. Defined once and
+-- called from both admin views, because a duplicated definition of this drifts
+-- and then the count and the badge disagree.
+--
+-- last_heartbeat_at is compared against created_at rather than tested for null:
+-- migration 20260824023000 backfilled it to coalesce(..., created_at) for every
+-- pre-existing row, so a never-connected node from before that migration has a
+-- non-null heartbeat equal to its creation time. A real beat is always later.
+create or replace function public._hyn_node_ever_connected(p_node public.nodes)
+returns boolean
+language sql
+immutable
+set search_path = public
+as $$
+  select p_node.last_seen_at is not null
+      or p_node.last_config_pull_at is not null
+      or coalesce(p_node.last_heartbeat_at > p_node.created_at, false);
+$$;
+
+revoke all on function public._hyn_node_ever_connected(public.nodes) from public;
+
+-- Delete one machine and everything recorded for it. Irreversible, and the
+-- audit entry is written first: admin_audit.target_node is ON DELETE SET NULL,
+-- so the row survives the delete but loses its reference -- the detail is what
+-- keeps the trail readable afterwards.
+create or replace function public.hyn_admin_delete_node(
+  p_node_id uuid,
+  p_reason text default null
+)
+returns json
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_node public.nodes;
+  v_owner_email text;
+begin
+  perform public._hyn_require_admin();
+
+  select * into v_node from public.nodes where id = p_node_id;
+  if not found then
+    raise exception 'no such node';
+  end if;
+  select email into v_owner_email from public.profiles where id = v_node.owner;
+
+  perform public._hyn_audit('node.delete', v_node.owner, p_node_id,
+    jsonb_build_object(
+      'reason', p_reason,
+      'name', v_node.name,
+      'hostname', v_node.hostname,
+      'owner_email', v_owner_email,
+      'ever_connected', public._hyn_node_ever_connected(v_node),
+      'agent_version', v_node.agent_version
+    ));
+
+  -- An unclaimed pairing row points here with ON DELETE SET NULL, and a code
+  -- whose node_id is null reads as 'pending' to the polling agent: it would sit
+  -- there until expiry waiting for an approval that already happened.
+  delete from public.device_codes where node_id = p_node_id;
+  -- metrics, speedtests, alert_events, node_commands, watchdogs, web jobs and
+  -- email preferences are all ON DELETE CASCADE from nodes.
+  delete from public.nodes where id = p_node_id;
+
+  return json_build_object('status', 'ok', 'deleted', p_node_id, 'name', v_node.name);
+end;
+$$;
+
+revoke all on function public.hyn_admin_delete_node(uuid, text) from public;
+grant execute on function public.hyn_admin_delete_node(uuid, text) to authenticated;
+
+-- ever_connected joins the fleet list so a phantom is visible as one rather than
+-- looking like a machine that has been quiet since it was created.
+create or replace function public.hyn_admin_nodes()
+returns json language plpgsql security definer set search_path = public as $$
+declare v json;
+begin
+  perform public._hyn_require_admin();
+  select coalesce(json_agg(row_to_json(x) order by x.last_heartbeat_at desc nulls last), '[]'::json)
+    into v from (
+      select n.id, n.name, n.hostname, n.os, n.agent_version, n.status,
+             n.paused_until, n.status_reason, n.revoked, n.is_demo,
+             n.created_at, n.last_seen_at, n.last_config_pull_at, n.last_heartbeat_at, n.config,
+             p.id as owner_id, p.email as owner_email, p.status as owner_status, p.role as owner_role,
+             public._hyn_node_ever_connected(n) as ever_connected,
+             (select count(*) from public.notification_log l where l.node_id = n.id and l.ts > now() - interval '24 hours') as notifications_24h,
+             (select count(*) from public.notification_log l where l.node_id = n.id and l.ts > now() - interval '24 hours' and l.status = 'failed') as notifications_failed_24h,
+             (select count(*) from public.alert_events a where a.node_id = n.id and a.resolved = false and a.ts > now() - interval '7 days') as alerts_open,
+             (select m.cpu_pct from public.metrics m where m.node_id = n.id order by m.ts desc limit 1) as last_cpu_pct,
+             (select m.cpu_temp_c from public.metrics m where m.node_id = n.id order by m.ts desc limit 1) as last_temp_c,
+             (select m.mem_pct from public.metrics m where m.node_id = n.id order by m.ts desc limit 1) as last_mem_pct,
+             (select m.disk_pct from public.metrics m where m.node_id = n.id order by m.ts desc limit 1) as last_disk_pct,
+             (select m.payload #>> '{agent_update,latest}' from public.metrics m where m.node_id = n.id order by m.ts desc limit 1) as latest_agent_version,
+             coalesce((select m.payload #>> '{agent_update,available}' in ('true', '1') from public.metrics m where m.node_id = n.id order by m.ts desc limit 1), false) as update_available
+        from public.nodes n left join public.profiles p on p.id = n.owner
+    ) x;
+  return v;
+end;
+$$;
+
+-- How many machines a client has, how many are enabled, and how many are
+-- phantoms -- which is the number an administrator is asked about, because it is
+-- the one the client can see and cannot explain.
+create or replace function public.hyn_admin_clients()
+returns json language plpgsql security definer set search_path = public as $$
+declare v json;
+begin
+  perform public._hyn_require_admin();
+  select coalesce(json_agg(row_to_json(x) order by x.created_at desc), '[]'::json)
+    into v from (
+      select p.id, p.email, p.full_name, p.role, p.status, p.suspended_reason, p.created_at,
+             (select count(*) from public.nodes n where n.owner = p.id and n.is_demo = false) as nodes,
+             (select count(*) from public.nodes n where n.owner = p.id and n.status = 'active'
+                and n.revoked = false and n.is_demo = false) as nodes_active,
+             (select count(*) from public.nodes n where n.owner = p.id and n.is_demo = false
+                and not public._hyn_node_ever_connected(n)) as nodes_unlinked,
+             (select count(*) from public.notification_log l where l.owner = p.id
+                and l.ts > now() - interval '30 days') as notifications_30d,
+             (select count(*) from public.notification_log l where l.owner = p.id
+                and l.ts > now() - interval '30 days' and l.status = 'failed') as notifications_failed_30d,
+             (select max(n.last_seen_at) from public.nodes n where n.owner = p.id) as last_seen_at
+        from public.profiles p
+    ) x;
+  return v;
+end;
+$$;
+
+-- ===========================================================================
+-- a refused machine command says which state refused it
+-- ===========================================================================
+-- `active node not found` was one message for six different situations: a paused
+-- machine, one whose pause deadline had already passed, one suspended by an
+-- administrator, one whose credential was revoked, a demo row, and a node id
+-- belonging to another account. The portal printed it verbatim under "Recovery
+-- on the server: sudo hyn doctor", which is the fix for none of them -- no amount
+-- of doctoring on the box clears a pause that is held in the portal.
+--
+-- One of those cases was a refusal that should have succeeded. Ingest, the
+-- settings pull and the heartbeat all resolve an elapsed `paused_until` lazily,
+-- because a timed pause is meant to expire by itself; the command RPCs tested
+-- `status = 'active'` without doing so. On a machine whose agent is not beating
+-- -- exactly when someone reaches for "Sync now" -- nothing else would ever
+-- clear it, so the button stayed broken permanently.
+
+-- Resolves the node a command is aimed at, or raises the reason it cannot be.
+-- Shared by the owner-scoped and admin RPCs so the two cannot drift into
+-- disagreeing about what a paused machine means. p_owner null means "an
+-- administrator is asking", which skips only the ownership test.
+create or replace function public._hyn_command_node(p_node_id uuid, p_owner uuid)
+returns public.nodes
+language plpgsql
+volatile
+security definer
+set search_path = public
+as $$
+declare v_node public.nodes;
+begin
+  select * into v_node from public.nodes where id = p_node_id;
+  if not found then
+    raise exception 'that machine no longer exists in the portal';
+  end if;
+  if p_owner is not null and v_node.owner <> p_owner then
+    raise exception 'that machine belongs to another account';
+  end if;
+  if v_node.revoked then
+    raise exception 'this machine''s credential was revoked, so the portal can no longer reach it. Pair it again on the server: sudo hyn link';
+  end if;
+  if v_node.is_demo then
+    raise exception 'this is demo data rather than a real server, so there is nothing to collect from it';
+  end if;
+
+  -- Same lazy rule as ingest and the heartbeat: a timed pause that outlived its
+  -- deadline is not a refusal, it is a pause nobody has cleared yet.
+  if v_node.status = 'paused' and v_node.paused_until is not null
+     and v_node.paused_until <= now() then
+    update public.nodes
+       set status = 'active', paused_until = null, status_reason = null
+     where id = v_node.id
+    returning * into v_node;
+  end if;
+
+  if v_node.status = 'paused' then
+    raise exception 'monitoring is paused for this machine%, so it is not accepting readings or commands. Resume it in the portal.%',
+      case when v_node.paused_until is not null
+        then ' until ' || to_char(v_node.paused_until at time zone 'UTC', 'YYYY-MM-DD HH24:MI') || ' UTC'
+        else '' end,
+      case when v_node.status_reason is not null
+        then ' Reason: ' || v_node.status_reason || '.' else '' end;
+  end if;
+  if v_node.status = 'suspended' then
+    raise exception 'this machine is suspended, so it is not accepting readings or commands. An administrator has to lift it.%',
+      case when v_node.status_reason is not null
+        then ' Reason: ' || v_node.status_reason || '.' else '' end;
+  end if;
+
+  return v_node;
+end;
+$$;
+
+revoke all on function public._hyn_command_node(uuid, uuid) from public;
+
+create or replace function public.hyn_request_node_command(
+  p_node_id uuid,
+  p_command text
+)
+returns json language plpgsql security definer set search_path = public as $$
+declare v_command public.node_commands; v_created boolean := false;
+begin
+  if auth.uid() is null then raise exception 'not authenticated'; end if;
+  -- Separated from the authentication check: "not authenticated" sent a signed-in
+  -- customer whose account had been suspended to look for a login problem.
+  if not public.hyn_is_active() then
+    raise exception 'this account is suspended, so it cannot send commands to its machines';
+  end if;
+  if p_command not in ('update', 'sync') then raise exception 'invalid command'; end if;
+  perform public._hyn_command_node(p_node_id, auth.uid());
+  select * into v_command from public.node_commands
+   where node_id = p_node_id and command = p_command and status in ('queued', 'running')
+   order by requested_at desc limit 1;
+  if not found then
+    insert into public.node_commands (node_id, requested_by, command, message)
+    values (
+      p_node_id, auth.uid(), p_command,
+      case when p_command = 'sync' then 'Waiting for the machine to synchronize'
+           else 'Waiting for the machine to check in' end
+    ) returning * into v_command;
+    v_created := true;
+  end if;
+  return json_build_object(
+    'id', v_command.id, 'node_id', v_command.node_id,
+    'action', v_command.command, 'status', v_command.status,
+    'stage', v_command.stage, 'message', v_command.message,
+    'target_version', v_command.target_version, 'result_version', v_command.result_version,
+    'requested_at', v_command.requested_at, 'started_at', v_command.started_at,
+    'finished_at', v_command.finished_at, 'updated_at', v_command.updated_at,
+    'created', v_created
+  );
+end;
+$$;
+
+create or replace function public.hyn_admin_request_node_command(p_node_id uuid, p_command text)
+returns json language plpgsql security definer set search_path = public as $$
+declare v_command public.node_commands; v_node public.nodes; v_created boolean := false;
+begin
+  perform public._hyn_require_admin();
+  if p_command not in ('update', 'sync') then raise exception 'invalid command'; end if;
+  v_node := public._hyn_command_node(p_node_id, null);
+  select * into v_command from public.node_commands
+   where node_id = p_node_id and command = p_command and status in ('queued', 'running')
+   order by requested_at desc limit 1;
+  if not found then
+    insert into public.node_commands (node_id, requested_by, command, message)
+    values (
+      p_node_id, auth.uid(), p_command,
+      case when p_command = 'sync' then 'Administrator requested a complete synchronization'
+           else 'Administrator requested an agent update' end
+    ) returning * into v_command;
+    v_created := true;
+  end if;
+  perform public._hyn_audit(
+    'node.command.' || p_command, v_node.owner, p_node_id,
+    jsonb_build_object('command_id', v_command.id, 'created', v_created)
+  );
+  return json_build_object(
+    'id', v_command.id, 'node_id', v_command.node_id,
+    'action', v_command.command, 'status', v_command.status,
+    'stage', v_command.stage, 'message', v_command.message,
+    'target_version', v_command.target_version, 'result_version', v_command.result_version,
+    'requested_at', v_command.requested_at, 'started_at', v_command.started_at,
+    'finished_at', v_command.finished_at, 'updated_at', v_command.updated_at,
+    'created', v_created
+  );
+end;
+$$;
+
+-- ===========================================================================
+-- the internal helpers are actually unreachable, not merely revoked from PUBLIC
+-- ===========================================================================
+-- Every internal in this schema is followed by `revoke all on function ... from
+-- public`, and on a plain PostgreSQL install that is the whole story: the only
+-- grant a new function carries is the implicit one to PUBLIC. On a Supabase
+-- project it is not. The project's default privileges grant EXECUTE on every new
+-- function to `anon`, `authenticated` and `service_role` **by name**, and
+-- revoking PUBLIC does not touch a grant made to a role. So each of these was
+-- callable over /rest/v1/rpc with nothing but the public anon key.
+--
+-- Measured, not theorised. Against the live project:
+--
+--   POST /rest/v1/rpc/_hyn_audit  ->  204, and a row in admin_audit
+--
+-- which is an unauthenticated write into the one table whose entire value is
+-- being trustworthy after the fact. `_hyn_command_node` answered
+-- `_hyn_sha256` computed hashes, and `_hyn_require_admin` was reachable too.
+-- The probe row is removed below.
+--
+-- The test harness never caught it because it was stricter than production: it
+-- created anon and authenticated but not Supabase's default privileges, so
+-- "revoked from PUBLIC" really was unreachable there. supabase/test-harness.sql
+-- now sets those defaults, and supabase/flow-test.sql asserts this property for
+-- every `_hyn_` function, so the next helper cannot reintroduce it quietly.
+--
+-- _hyn_portal_config_valid is deliberately left reachable: it backs a CHECK
+-- constraint on public.nodes, and a check constraint is evaluated as the role
+-- performing the write, so revoking it from `authenticated` would break the
+-- direct `grant update (config) on nodes` path with "permission denied for
+-- function". Reading it back tells a caller nothing it did not already supply.
+
+delete from public.admin_audit where action = 'probe.anon';
+
+do $$
+declare
+  v_sig text;
+  v_role text;
+begin
+  foreach v_sig in array array[
+    'public._hyn_audit(text, uuid, uuid, jsonb)',
+    'public._hyn_require_admin()',
+    'public._hyn_sha256(text)',
+    'public._hyn_command_node(uuid, uuid)',
+    'public._hyn_node_ever_connected(public.nodes)',
+    'public._hyn_delete_expired_device_code(uuid)',
+    'public._hyn_purge_expired_device_codes()',
+    -- Trigger functions and the pairing-code generator: reachable is reachable,
+    -- even where calling one outside its trigger only produces an error.
+    'public._hyn_user_code()',
+    'public._hyn_on_auth_user_created()',
+    'public._hyn_create_email_preferences()'
+  ] loop
+    if to_regprocedure(v_sig) is null then continue; end if;
+    foreach v_role in array array['anon', 'authenticated', 'service_role'] loop
+      if exists (select 1 from pg_roles where rolname = v_role) then
+        execute format('revoke all on function %s from %I', v_sig, v_role);
+      end if;
+    end loop;
+    execute format('revoke all on function %s from public', v_sig);
+  end loop;
+end;
+$$;
