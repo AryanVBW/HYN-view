@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { GL } from "./gl";
-import { AuraBackground } from "./aura-background";
 import { Pill } from "./pill";
 import { Button } from "./ui/button";
 import { useEffect, useState } from "react";
@@ -38,16 +37,8 @@ export function Hero() {
   const ready = signedIn !== undefined;
 
   return (
-    <div className="relative flex flex-col h-svh justify-between">
+    <div className="flex flex-col h-svh justify-between">
       <GL hovering={hovering} />
-      {/* Layered above GL's canvas, behind the copy below -- see
-          AuraBackground for why this is light-theme only. GL already paints
-          an opaque near-white fill for light mode, so the aura has to sit in
-          front of it (not merely behind the text) to be visible at all; DOM
-          order between two z-index:auto elements is what does that here,
-          the same reason the text further down already reads over GL
-          without needing its own z-index. */}
-      <AuraBackground />
 
       <div className="pb-16 mt-auto text-center relative">
         <Pill className="mb-6 max-sm:text-xs">MONITOR SERVERS FROM ANYWHERE</Pill>

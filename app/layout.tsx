@@ -3,6 +3,7 @@ import { Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Header } from "@/components/header";
 import { ThemeProvider } from "@/components/theme-provider";
+import { SiteCursorGrid } from "@/components/site-cursor-grid";
 
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
@@ -24,6 +25,7 @@ export default function RootLayout({
     <html lang="en" className="bg-background" suppressHydrationWarning>
       <body className={`${geistMono.variable} antialiased`} suppressHydrationWarning>
         <ThemeProvider attribute="class" defaultTheme="dark">
+          <SiteCursorGrid />
           <Header />
           {children}
         </ThemeProvider>
