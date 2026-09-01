@@ -3,6 +3,7 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { ParticleField } from "@/components/particle-field";
+import { AuraBackground } from "@/components/aura-background";
 import { StatCards, ThroughputCard } from "@/components/dashboard/stat-cards";
 import { HighwayPanel } from "@/components/dashboard/highway-panel";
 import { SimpleDashboard } from "@/components/dashboard/simple-dashboard";
@@ -174,9 +175,12 @@ export default async function DashboardPage({
   // page picked for this node; the header's DashboardViewToggle is a personal,
   // client-side override that wins when present, stored in a cookie (not
   // localStorage) precisely so this server component can read it on every
-  // render without a client round-trip. Absent the cookie, behaviour is
-  // unchanged from before the toggle existed.
-  const dbDefaultView = node.config?.dashboard_view === "simple" ? "simple" : "dash";
+  // render without a client round-trip. Simple is the platform default for
+  // every node that hasn't been explicitly set to "dash" -- a node whose
+  // config never mentions the key, or mentions anything other than "dash",
+  // lands on simple; an admin who has deliberately chosen "dash" for a node
+  // keeps that choice.
+  const dbDefaultView = node.config?.dashboard_view === "dash" ? "dash" : "simple";
   const viewOverride = (await cookies()).get("hyn_view_mode")?.value;
   const dashboardView =
     viewOverride === "simple" || viewOverride === "dash" ? viewOverride : dbDefaultView;
@@ -253,7 +257,7 @@ export default async function DashboardPage({
         ) : null}
 
         {dashboardView === "simple" ? (
-          <SimpleDashboard node={node} latest={latest} speedtests={speedtests} />
+          <SimpleDashboard node={node} latest={latest} speedtests={speedtests} metrics={metrics} />
         ) : (
           <>
             <StatCards latest={latest} />
@@ -374,6 +378,9 @@ function Shell({
     <div className="min-h-screen bg-background">
       {email ? <LiveRefresh /> : null}
       <ParticleField blur="subtle" />
+      {/* Light-theme-only aura, painted above the particle field and below
+          `main` -- see AuraBackground and the hero's identical placement. */}
+      <AuraBackground />
       <main className="container pt-32 pb-10 md:pt-44">
         {nodes && nodes.length > 1 ? (
           <nav className="mb-8 flex flex-wrap gap-2" aria-label="Linked nodes">

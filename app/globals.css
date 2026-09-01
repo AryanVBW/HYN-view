@@ -249,6 +249,65 @@ nav {
   }
 }
 
+/* Live pulse ring at a gauge needle's tip -- see SpeedGauge. Scale + opacity
+   only (no layout properties). It exists to signal "this number is actively
+   refreshing", but that is still decorative motion by the same test as
+   anything else on the page, so it stops under reduced motion like every
+   other animation here -- the ring itself only mounts while `live` is true,
+   so removing the animation still leaves a static ring at the needle tip as
+   the non-animated equivalent, not nothing. */
+@keyframes gauge-pulse {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.9;
+  }
+  70% {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+
+.gauge-live-pulse {
+  animation: gauge-pulse 1.8s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gauge-live-pulse {
+    animation: none;
+  }
+}
+
+/* The "Running" verdict pill's heartbeat -- see RunningDot in
+   simple-dashboard.tsx. Same scale+opacity ring as the gauge pulse above, on
+   a longer period (a status that changes once in a while, not a value
+   refreshing every tick, reads calmer at a slower beat). Static dot under
+   reduced motion, per the same rule as every other animation in this file. */
+@keyframes node-heartbeat {
+  0% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+.node-heartbeat-ring {
+  animation: node-heartbeat 2.2s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .node-heartbeat-ring {
+    animation: none;
+    display: none;
+  }
+}
+
 .section-pad {
   padding-block: clamp(4.5rem, 10vw, 9rem);
 }

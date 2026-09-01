@@ -26,7 +26,11 @@ export function readViewModeCookie(): DashboardViewMode | null {
   return (match?.[1] as DashboardViewMode) ?? null;
 }
 
-function writeViewMode(mode: DashboardViewMode) {
+// Exported so a button anywhere in the simple dashboard (e.g. the Highway
+// services detail toggle) can jump straight to Advanced through the same
+// cookie + localStorage write this file's own pill uses, rather than a second
+// mechanism for the same "which view renders" decision.
+export function writeViewMode(mode: DashboardViewMode) {
   document.cookie = `${COOKIE_NAME}=${mode}; path=/; max-age=${COOKIE_MAX_AGE}; SameSite=Lax`;
   try {
     window.localStorage.setItem(COOKIE_NAME, mode);
@@ -59,13 +63,13 @@ export function DashboardViewToggle({ className }: { className?: string }) {
 
   useEffect(() => {
     const stored = readViewModeCookie() ?? (window.localStorage.getItem(COOKIE_NAME) as DashboardViewMode | null);
-    // No cookie yet means the user has never touched this control, so the pill
-    // guesses the system-wide default ("dash") rather than reading the
+    // No cookie yet means the user has never touched this control, so the
+    // pill guesses the platform default ("simple") rather than reading the
     // per-node DB setting the header has no access to. dashboard/page.tsx
     // still renders from that DB setting regardless -- this only affects
     // which pill looks pressed before the first click, and self-corrects the
     // moment either option is chosen.
-    setMode(stored === "simple" || stored === "dash" ? stored : "dash");
+    setMode(stored === "simple" || stored === "dash" ? stored : "simple");
   }, []);
 
   if (!pathname?.startsWith("/dashboard")) return null;

@@ -68,6 +68,23 @@ export function toTempSeries(rows: Metric[]): TempPoint[] {
   return rows.map((r) => ({ time: clockLabel(r.ts), celsius: r.cpu_temp_c }));
 }
 
+// Every temperature sensor the platform exposes (lib/cloud.sh's SENSORS map) —
+// CPU package, NVMe, motherboard, whatever hwmon publishes — as label/celsius
+// pairs sorted hottest first, so the reading that most needs attention is
+// always the one on top. Per-core clock speed already has a reader
+// (lib/telemetry.ts's readCpuClocks); this is its temperature counterpart, and
+// lives here rather than there because everything else in telemetry.ts reads
+// the *advanced* panels' fields (filesystems, processes, network detail) while
+// this file is where the simple dashboard's own series helpers already are.
+export function readSensors(payload: Record<string, unknown> | null): { label: string; celsius: number }[] {
+  const raw = payload?.["sensors"];
+  if (!raw || typeof raw !== "object") return [];
+  return Object.entries(raw as Record<string, unknown>)
+    .map(([label, v]) => ({ label, celsius: typeof v === "number" ? v : Number(v) }))
+    .filter((s) => Number.isFinite(s.celsius))
+    .sort((a, b) => b.celsius - a.celsius);
+}
+
 export function toNetSeries(rows: Metric[]): NetPoint[] {
   return rows.map((r) => ({
     time: clockLabel(r.ts),

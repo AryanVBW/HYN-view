@@ -46,6 +46,7 @@ const eslintConfig = defineConfig([
       "components/hero.tsx",
       "components/theme-toggle.tsx",
       "components/dashboard-view-toggle.tsx",
+      "components/aura-background.tsx",
     ],
     // These legacy auth/theme hydration guards intentionally synchronize
     // client-only state after mount.
