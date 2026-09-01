@@ -3,7 +3,6 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { ParticleField } from "@/components/particle-field";
-import { AuraBackground } from "@/components/aura-background";
 import { StatCards, ThroughputCard } from "@/components/dashboard/stat-cards";
 import { HighwayPanel } from "@/components/dashboard/highway-panel";
 import { SimpleDashboard } from "@/components/dashboard/simple-dashboard";
@@ -40,7 +39,7 @@ import {
   toTempSeries,
 } from "@/lib/dashboard-data";
 import { heartbeatState } from "@/lib/heartbeat";
-import { readAgentRelease } from "@/lib/node-command";
+import { commandBlockedReason, readAgentRelease } from "@/lib/node-command";
 
 export const metadata: Metadata = {
   title: "Dashboard / HYN-view",
@@ -342,6 +341,7 @@ export default async function DashboardPage({
             currentVersion={node.agent_version}
             release={agentRelease}
             automatic={node.config?.auto_update === "install"}
+            blocked={commandBlockedReason(node)}
           />
         ) : null}
       </div>
@@ -378,9 +378,6 @@ function Shell({
     <div className="min-h-screen bg-background">
       {email ? <LiveRefresh /> : null}
       <ParticleField blur="subtle" />
-      {/* Light-theme-only aura, painted above the particle field and below
-          `main` -- see AuraBackground and the hero's identical placement. */}
-      <AuraBackground />
       <main className="container pt-32 pb-10 md:pt-44">
         {nodes && nodes.length > 1 ? (
           <nav className="mb-8 flex flex-wrap gap-2" aria-label="Linked nodes">

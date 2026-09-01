@@ -128,3 +128,98 @@ export function commandStageIndex(kind: CommandKind, stage: NodeCommandStage): n
 export function commandIsActive(command: NodeCommand | null): boolean {
   return command?.status === "queued" || command?.status === "running";
 }
+
+export type CommandTargetState = {
+  status: "active" | "paused" | "suspended";
+  revoked: boolean;
+  is_demo: boolean;
+};
+
+// Why this machine cannot accept a command right now, or null when it can. These
+// are the same states the database refuses on (_hyn_command_node), checked before
+// the button is offered rather than only after it is clicked: a dialog explaining
+// why a click could never have worked is a worse answer than a disabled control
+// that says so up front. The database check stays -- this one is a courtesy, and
+// the row could change between render and click.
+export function commandBlockedReason(node: CommandTargetState): string | null {
+  if (node.is_demo) return "Demo data has no machine behind it to command.";
+  if (node.revoked) {
+    return "The credential was revoked, so the portal cannot reach this machine. Pair it again with sudo hyn link.";
+  }
+  if (node.status === "suspended") {
+    return "This machine is suspended, so it accepts nothing until an administrator lifts it.";
+  }
+  if (node.status === "paused") {
+    return "Monitoring is paused, so readings and commands are refused until it is resumed.";
+  }
+  return null;
+}
+
+export type CommandRecovery = {
+  /** Where the person reading this has to act. */
+  where: "portal" | "server";
+  hint: string;
+  /** Shell lines to run on the monitored machine; empty when `where` is portal. */
+  commands: string[];
+};
+
+const SERVER_RECOVERY = [
+  "sudo hyn doctor",
+  "systemctl status hyn-agent.service hyn-push.timer",
+  "sudo hyn doctor --fix",
+];
+
+// A failed command used to print one fixed recovery block -- `sudo hyn doctor`,
+// then restart the push timer -- whatever had gone wrong. For every
+// administrative refusal that advice is not merely useless but misleading: no
+// command on the machine can lift a pause, reinstate a suspended machine, or
+// restore a credential the portal revoked, and someone who has just been told to
+// ssh in and run doctor will conclude the agent is broken when it is fine.
+//
+// The refusal texts are the database's own (see _hyn_command_node), so matching
+// on them is matching on our own vocabulary, not on a provider's error strings.
+// Anything unrecognised keeps the server recovery, because that is where an
+// agent-side failure or a timeout genuinely is fixed.
+export function commandRecovery(message: string | null | undefined): CommandRecovery {
+  const text = (message ?? "").toLowerCase();
+  if (text.includes("paused")) {
+    return {
+      where: "portal",
+      hint: "Nothing on the machine can clear this. Resume the machine from the admin panel — a paused machine refuses readings and commands until it is resumed, and a timed pause resumes by itself when it expires.",
+      commands: [],
+    };
+  }
+  if (text.includes("suspended")) {
+    return {
+      where: "portal",
+      hint: "An administrator has to lift the suspension; until then the machine is refused, and the agent treats that as an administrative decision rather than a fault.",
+      commands: [],
+    };
+  }
+  if (text.includes("revoked")) {
+    return {
+      where: "server",
+      hint: "The credential was invalidated in the portal, so the machine has to be paired again. This is the one refusal that is fixed on the machine.",
+      commands: ["sudo hyn link"],
+    };
+  }
+  if (text.includes("demo")) {
+    return {
+      where: "portal",
+      hint: "Demo data is a synthetic node with no machine behind it. Remove it and pair a real server to use these controls.",
+      commands: [],
+    };
+  }
+  if (text.includes("another account") || text.includes("no longer exists")) {
+    return {
+      where: "portal",
+      hint: "Reload the dashboard and pick the machine again — this one is no longer on this account.",
+      commands: [],
+    };
+  }
+  return {
+    where: "server",
+    hint: "The request reached the portal but the machine did not complete it. Check the resident agent and the timers on the machine.",
+    commands: SERVER_RECOVERY,
+  };
+}

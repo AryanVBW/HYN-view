@@ -21,6 +21,7 @@ import {
   formatBytes,
   formatDuration,
   formatRelative,
+  nearestSampleIndex,
   readSensors,
   toTempSeries,
 } from "@/lib/dashboard-data";
@@ -556,15 +557,22 @@ export function SimpleDashboard({
 // Coloured by the *current* reading's zone (thermalColor) rather than a fixed
 // hue, so a history strip under a red gauge reads as urgent at a glance and a
 // history strip under a green one reads calm, matching the needle above it
-// instead of contradicting it in a different colour. recharts' full
-// <ChartContainer>/axis/tooltip apparatus is still deliberately skipped: this
-// strip answers "climbing, flat, or falling" at a glance, not "what was it at
-// 14:32", so it has no interactive surface to justify that machinery.
+// instead of contradicting it in a different colour.
+//
+// It answers "climbing, flat, or falling" at a glance and, on hover, "what was
+// it at 14:32" -- the question people actually ask of a trace once they can see
+// a bump in it. recharts' <ChartContainer>/axis apparatus is still skipped: a
+// crosshair and one readout is the whole interaction, and it costs less than the
+// machinery would. Hover snaps to the nearest real sample, so a gap where the
+// machine sent nothing reads as the reading either side of it rather than as an
+// invented value.
 function TempHistoryCard({ points }: { points: { time: string; celsius: number | null }[] }) {
   // Must run before the early return below -- hooks cannot be called
   // conditionally, and an early `return null` for "not enough points yet"
   // would otherwise skip this call on some renders and not others.
   const glowId = `temphist-${useId().replace(/:/g, "")}`;
+  const readoutId = `${glowId}-readout`;
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const values = points.map((p) => p.celsius).filter((c): c is number => c !== null);
   if (values.length < 2) return null;
 
@@ -580,17 +588,33 @@ function TempHistoryCard({ points }: { points: { time: string; celsius: number |
 
   const color = thermalColor(values[values.length - 1]);
 
-  let x = 0;
-  const linePoints: { x: number; y: number }[] = [];
-  for (const p of points) {
-    if (p.celsius !== null) {
-      linePoints.push({ x, y: padTop + plotH - ((p.celsius - min) / span) * plotH });
-    }
-    x += step;
+  // Sample index is kept alongside the plotted coordinates so a hover can name
+  // the time of the reading it landed on, not just its value.
+  const plotted = points.flatMap((p, i) =>
+    p.celsius === null
+      ? []
+      : [{ i, x: i * step, y: padTop + plotH - ((p.celsius - min) / span) * plotH, celsius: p.celsius }]
+  );
+  const lineStr = plotted.map((p) => `${p.x},${p.y}`).join(" ");
+  const areaStr = `${plotted[0].x},${padTop + plotH} ${lineStr} ${plotted[plotted.length - 1].x},${padTop + plotH}`;
+  const last = plotted[plotted.length - 1];
+  const hovered = hoverIndex === null ? null : plotted[Math.min(hoverIndex, plotted.length - 1)];
+
+  // Pointer, not mouse: the same handler serves a trackpad and a finger dragged
+  // along the strip, which is the only way to read one on a phone.
+  function track(clientX: number, element: HTMLElement) {
+    const rect = element.getBoundingClientRect();
+    if (rect.width === 0) return;
+    const at = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width)) * w;
+    setHoverIndex(nearestSampleIndex(plotted.map((p) => p.x), at));
   }
-  const lineStr = linePoints.map((p) => `${p.x},${p.y}`).join(" ");
-  const areaStr = `${linePoints[0].x},${padTop + plotH} ${lineStr} ${linePoints[linePoints.length - 1].x},${padTop + plotH}`;
-  const last = linePoints[linePoints.length - 1];
+
+  function moveHover(by: number) {
+    setHoverIndex((current) => {
+      const from = current ?? plotted.length - 1;
+      return Math.min(plotted.length - 1, Math.max(0, from + by));
+    });
+  }
 
   return (
     <div className="rounded-lg border border-border/60 bg-card/40 p-3">
@@ -600,38 +624,88 @@ function TempHistoryCard({ points }: { points: { time: string; celsius: number |
           now {values[values.length - 1].toFixed(0)}°
         </p>
       </div>
-      <svg
-        viewBox={`0 0 ${w} ${h}`}
-        className="mt-2 h-24 w-full"
-        preserveAspectRatio="none"
-        role="img"
-        aria-label={`Temperature over the last 24 hours, ${min.toFixed(0)} to ${max.toFixed(0)} degrees, currently ${values[values.length - 1].toFixed(0)} degrees`}
+      <div
+        className="relative mt-2 cursor-crosshair rounded-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        tabIndex={0}
+        aria-describedby={readoutId}
+        onPointerMove={(event) => track(event.clientX, event.currentTarget)}
+        onPointerLeave={() => setHoverIndex(null)}
+        onBlur={() => setHoverIndex(null)}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowLeft") moveHover(-1);
+          else if (event.key === "ArrowRight") moveHover(1);
+          else if (event.key === "Home") setHoverIndex(0);
+          else if (event.key === "End") setHoverIndex(plotted.length - 1);
+          else if (event.key === "Escape") setHoverIndex(null);
+          else return;
+          event.preventDefault();
+        }}
       >
-        <defs>
-          <linearGradient id={glowId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity={0.4} />
-            <stop offset="100%" stopColor={color} stopOpacity={0} />
-          </linearGradient>
-        </defs>
-        {/* Two faint horizontal gridlines (33%/66% of the range) for scale
-            reference -- enough to judge "how much did it move" without the
-            full axis apparatus a labelled grid would need. */}
-        <line x1={0} y1={padTop + plotH / 3} x2={w} y2={padTop + plotH / 3} stroke="var(--border)" strokeWidth={1} opacity={0.3} />
-        <line x1={0} y1={padTop + (plotH * 2) / 3} x2={w} y2={padTop + (plotH * 2) / 3} stroke="var(--border)" strokeWidth={1} opacity={0.3} />
-        <polygon points={areaStr} fill={`url(#${glowId})`} />
-        <polyline points={lineStr} fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
-        {/* Current-value marker: a glowing dot at the most recent reading, the
-            same "this is live" language the speed gauges' needle-tip pulse
-            and the node-status heartbeat use elsewhere on this page. */}
-        <circle cx={last.x} cy={last.y} r={7} fill={color} opacity={0.25} />
-        <circle cx={last.x} cy={last.y} r={3} fill={color} />
-        <text x={0} y={h - 4} fontFamily="var(--font-mono)" fontSize={9} fill="var(--muted-foreground)">
-          24h ago
-        </text>
-        <text x={w} y={h - 4} textAnchor="end" fontFamily="var(--font-mono)" fontSize={9} fill="var(--muted-foreground)">
-          now
-        </text>
-      </svg>
+        <svg
+          viewBox={`0 0 ${w} ${h}`}
+          className="h-24 w-full"
+          preserveAspectRatio="none"
+          role="img"
+          aria-label={`Temperature over the last 24 hours, ${min.toFixed(0)} to ${max.toFixed(0)} degrees, currently ${values[values.length - 1].toFixed(0)} degrees. Hover or use the arrow keys to read one sample.`}
+        >
+          <defs>
+            <linearGradient id={glowId} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={color} stopOpacity={0.4} />
+              <stop offset="100%" stopColor={color} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          {/* Two faint horizontal gridlines (33%/66% of the range) for scale
+              reference -- enough to judge "how much did it move" without the
+              full axis apparatus a labelled grid would need. */}
+          <line x1={0} y1={padTop + plotH / 3} x2={w} y2={padTop + plotH / 3} stroke="var(--border)" strokeWidth={1} opacity={0.3} />
+          <line x1={0} y1={padTop + (plotH * 2) / 3} x2={w} y2={padTop + (plotH * 2) / 3} stroke="var(--border)" strokeWidth={1} opacity={0.3} />
+          <polygon points={areaStr} fill={`url(#${glowId})`} />
+          <polyline points={lineStr} fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+          {/* Current-value marker: a glowing dot at the most recent reading, the
+              same "this is live" language the speed gauges' needle-tip pulse
+              and the node-status heartbeat use elsewhere on this page. */}
+          <circle cx={last.x} cy={last.y} r={7} fill={color} opacity={0.25} />
+          <circle cx={last.x} cy={last.y} r={3} fill={color} />
+          {hovered ? (
+            <>
+              {/* The crosshair is drawn in the hovered sample's own zone colour,
+                  so a hover into a hot stretch of an otherwise green trace says
+                  so rather than repeating the strip's current-reading hue. */}
+              <line
+                x1={hovered.x}
+                y1={padTop - 6}
+                x2={hovered.x}
+                y2={padTop + plotH}
+                stroke={thermalColor(hovered.celsius)}
+                strokeWidth={1}
+                strokeDasharray="3 3"
+                opacity={0.8}
+              />
+              <circle cx={hovered.x} cy={hovered.y} r={4} fill="var(--card)" stroke={thermalColor(hovered.celsius)} strokeWidth={2} />
+            </>
+          ) : null}
+          <text x={0} y={h - 4} fontFamily="var(--font-mono)" fontSize={9} fill="var(--muted-foreground)">
+            24h ago
+          </text>
+          <text x={w} y={h - 4} textAnchor="end" fontFamily="var(--font-mono)" fontSize={9} fill="var(--muted-foreground)">
+            now
+          </text>
+        </svg>
+        {hovered ? (
+          <div
+            className="pointer-events-none absolute top-0 -translate-x-1/2 whitespace-nowrap rounded-sm border border-border bg-card px-2 py-1 font-mono text-[0.65rem] shadow-sm"
+            // Clamped away from both edges so the readout never hangs outside
+            // the card at the ends of the trace, where people hover most.
+            style={{ left: `${Math.min(88, Math.max(12, (hovered.x / w) * 100))}%` }}
+          >
+            <span className="text-muted-foreground">{points[hovered.i].time}</span>{" "}
+            <span style={{ color: thermalColor(hovered.celsius) }}>{hovered.celsius.toFixed(1)}°C</span>
+          </div>
+        ) : null}
+      </div>
+      <p id={readoutId} role="status" className="sr-only">
+        {hovered ? `${points[hovered.i].time}, ${hovered.celsius.toFixed(1)} degrees` : ""}
+      </p>
       <div className="mt-1 flex justify-between font-mono text-[0.6rem] text-muted-foreground">
         <span>low {min.toFixed(0)}°</span>
         <span>high {max.toFixed(0)}°</span>

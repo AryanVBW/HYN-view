@@ -12,7 +12,10 @@ import {
   ProcessesPanel,
 } from "@/components/dashboard/telemetry-detail";
 import { AdminClientActions } from "@/components/admin/client-actions";
-import { formatRelative, toCpuSeries, toNetSeries } from "@/lib/dashboard-data";
+import { DeleteNodeButton } from "@/components/admin/delete-node-button";
+import { TemperatureChart } from "@/components/dashboard/temperature-chart";
+import { neverLinked } from "@/lib/admin-data";
+import { formatRelative, toCpuSeries, toNetSeries, toTempSeries } from "@/lib/dashboard-data";
 import type { AdminClient, AdminNode, Metric } from "@/lib/types";
 
 export function AdminClientDashboard({
@@ -49,6 +52,9 @@ export function AdminClientDashboard({
             <div className="flex items-center gap-2 bg-card px-4 py-3">
               <Server className="size-3.5 text-primary" aria-hidden />
               {client.nodes_active}/{client.nodes} active
+              {client.nodes_unlinked > 0 ? (
+                <span className="text-[#e8a400]">· {client.nodes_unlinked} never linked</span>
+              ) : null}
             </div>
             <div className="flex items-center gap-2 bg-card px-4 py-3">
               <Bell className="size-3.5 text-primary" aria-hidden />
@@ -71,6 +77,7 @@ export function AdminClientDashboard({
               >
                 {node.name}
                 {node.status !== "active" ? ` · ${node.status}` : ""}
+                {neverLinked(node) ? " · never linked" : ""}
               </Link>
             ))
           ) : (
@@ -90,9 +97,18 @@ export function AdminClientDashboard({
               <p className="section-kicker">// embedded machine dashboard</p>
               <h3 className="mt-2 font-sentient text-2xl text-foreground">{current.name}</h3>
             </div>
-            <p className="font-mono text-xs text-muted-foreground">
-              {current.hostname ?? "unknown host"} · last push {formatRelative(current.last_seen_at)}
-            </p>
+            <div className="flex flex-col items-start gap-1 md:items-end">
+              <p className="font-mono text-xs text-muted-foreground">
+                {current.hostname ?? "unknown host"} · last push {formatRelative(current.last_seen_at)}
+              </p>
+              {neverLinked(current) ? (
+                <p className="font-mono text-xs text-[#e8a400]">
+                  never linked · approved {formatRelative(current.created_at)}, the agent never
+                  checked in
+                </p>
+              ) : null}
+              <DeleteNodeButton node={current} />
+            </div>
           </div>
 
           {metrics.length > 0 ? (
@@ -102,6 +118,10 @@ export function AdminClientDashboard({
                 <CpuUsageChart data={toCpuSeries(metrics)} />
                 <NetworkChart data={toNetSeries(metrics)} />
               </div>
+              {/* The same thermal trace the client gets, hover readout included:
+                  an administrator asked "was it hot at 04:00" needs the value at
+                  a point, not the shape of the curve. */}
+              <TemperatureChart data={toTempSeries(metrics)} />
               {/* Same detail the client sees on their own dashboard. An
                   administrator diagnosing a machine for someone who cannot reach
                   it needs the filesystems, the link counters and the process

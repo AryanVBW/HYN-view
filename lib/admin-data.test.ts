@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fleetFreshness, toFleetTrend } from "./admin-data.ts";
+import { fleetFreshness, neverLinked, toFleetTrend } from "./admin-data.ts";
 
 test("fleet trend buckets real samples and averages CPU and transfer rates", () => {
   const points = toFleetTrend([
@@ -91,4 +91,14 @@ test("heartbeat-capable agents go quiet after three missed one-minute heartbeats
     fleetFreshness({ ...base, last_heartbeat_at: "2026-08-24T11:57:00.000Z" }, now).key,
     "quiet",
   );
+});
+
+test("a machine that never checked in is named as such, and demo data is not", () => {
+  // The phantom this exists for: approving a pairing code creates the node row,
+  // so a client who never finished `sudo hyn link` keeps a machine that will
+  // never report. It must not be confused with one that has merely gone quiet,
+  // and the seeded demo node must never be offered up for deletion as one.
+  assert.equal(neverLinked({ is_demo: false, ever_connected: false }), true);
+  assert.equal(neverLinked({ is_demo: false, ever_connected: true }), false);
+  assert.equal(neverLinked({ is_demo: true, ever_connected: false }), false);
 });

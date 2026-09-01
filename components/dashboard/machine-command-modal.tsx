@@ -9,6 +9,7 @@ import {
   type CommandKind,
   type NodeCommand,
   commandIsActive,
+  commandRecovery,
   commandStageIndex,
   commandSteps,
   normalizeNodeCommand,
@@ -178,12 +179,24 @@ export function MachineCommandModal({
             ) : null}
           </div>
 
-          {(failed || error) ? (
-            <div className="mt-5 border border-destructive/30 bg-destructive/5 p-4">
-              <p className="font-mono text-xs font-semibold uppercase text-destructive">Recovery on the server</p>
-              <pre className="mt-3 overflow-x-auto font-mono text-xs leading-6 text-card-foreground">sudo hyn doctor{"\n"}systemctl status hyn-push.timer{"\n"}sudo systemctl restart hyn-push.timer</pre>
-            </div>
-          ) : null}
+          {(failed || error) ? (() => {
+            // The failure text decides the advice. An administrative refusal is
+            // fixed in the portal, not by ssh-ing into a machine that is working.
+            const recovery = commandRecovery(error ?? command?.message);
+            return (
+              <div className="mt-5 border border-destructive/30 bg-destructive/5 p-4">
+                <p className="font-mono text-xs font-semibold uppercase text-destructive">
+                  {recovery.where === "portal" ? "How to clear this" : "Recovery on the server"}
+                </p>
+                <p className="mt-2 font-mono text-xs leading-6 text-card-foreground">{recovery.hint}</p>
+                {recovery.commands.length > 0 ? (
+                  <pre className="mt-3 overflow-x-auto font-mono text-xs leading-6 text-card-foreground">
+                    {recovery.commands.join("\n")}
+                  </pre>
+                ) : null}
+              </div>
+            );
+          })() : null}
 
           <div className="mt-6 flex flex-wrap justify-end gap-3">
             {active ? (

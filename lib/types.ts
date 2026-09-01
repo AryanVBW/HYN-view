@@ -178,6 +178,10 @@ export type AdminNode = {
   last_seen_at: string | null;
   last_config_pull_at: string | null;
   last_heartbeat_at: string | null;
+  // False means the agent never once reached the portal: the client approved a
+  // pairing code and `sudo hyn link` never finished. Distinct from a machine
+  // that has gone quiet, and the reason a delete button exists.
+  ever_connected: boolean;
   config: Record<string, unknown>;
   owner_id: string | null;
   owner_email: string | null;
@@ -204,6 +208,7 @@ export type AdminClient = {
   created_at: string;
   nodes: number;
   nodes_active: number;
+  nodes_unlinked: number;
   notifications_30d: number;
   notifications_failed_30d: number;
   last_seen_at: string | null;

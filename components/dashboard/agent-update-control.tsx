@@ -9,12 +9,15 @@ export function AgentUpdateControl({
   currentVersion,
   release,
   automatic,
+  blocked = null,
 }: {
   nodeId: string;
   nodeName: string;
   currentVersion: string | null;
   release: AgentRelease;
   automatic: boolean;
+  /** Why these controls cannot work right now, from commandBlockedReason. */
+  blocked?: string | null;
 }) {
   const updateLabel = release.available && release.latest
     ? `Update to hyn ${release.latest}`
@@ -40,21 +43,30 @@ export function AgentUpdateControl({
             Automatic updates are {automatic ? "enabled" : "disabled in Account"}; these are one-time requests.
           </p>
         </div>
-        <div className="flex flex-wrap gap-3">
-          <MachineCommandModal
-            nodeId={nodeId}
-            nodeName={nodeName}
-            commandKind="sync"
-            triggerLabel="Sync now"
-          />
-          <MachineCommandModal
-            nodeId={nodeId}
-            nodeName={nodeName}
-            commandKind="update"
-            triggerLabel={updateLabel}
-            currentVersion={currentVersion}
-            release={release}
-          />
+        <div className="flex flex-col items-start gap-2">
+          <div className="flex flex-wrap gap-3">
+            <MachineCommandModal
+              nodeId={nodeId}
+              nodeName={nodeName}
+              commandKind="sync"
+              triggerLabel="Sync now"
+              disabled={Boolean(blocked)}
+            />
+            <MachineCommandModal
+              nodeId={nodeId}
+              nodeName={nodeName}
+              commandKind="update"
+              triggerLabel={updateLabel}
+              currentVersion={currentVersion}
+              release={release}
+              disabled={Boolean(blocked)}
+            />
+          </div>
+          {blocked ? (
+            <p role="note" className="max-w-sm font-mono text-[0.65rem] leading-5 text-[#e8a400]">
+              {blocked}
+            </p>
+          ) : null}
         </div>
       </div>
     </section>

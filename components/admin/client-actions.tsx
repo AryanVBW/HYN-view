@@ -6,6 +6,7 @@ import { LoaderCircle, Mail, RefreshCw } from "lucide-react";
 import { MachineCommandModal } from "@/components/dashboard/machine-command-modal";
 import { requestAdminNodeUpdates, sendAdminClientReport } from "@/app/admin/actions";
 import { compareVersions } from "@/lib/dashboard-data";
+import { commandBlockedReason } from "@/lib/node-command";
 import { mergePortalConfig } from "@/lib/node-config";
 import { createClient } from "@/lib/supabase/client";
 import type { AdminClient, AdminNode } from "@/lib/types";
@@ -83,6 +84,10 @@ export function AdminClientActions({
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const outdated = nodes.filter(needsUpdate);
+  // Why the two per-machine buttons cannot work on the selected machine, if they
+  // cannot. The database refuses these states with a stated reason; saying it
+  // beside a disabled button spares the administrator the dialog.
+  const blocked = current ? commandBlockedReason(current) : null;
 
   function reportNow() {
     setMessage(null);
@@ -143,6 +148,7 @@ export function AdminClientActions({
                 commandKind="sync"
                 triggerLabel="Sync selected"
                 scope="admin"
+                disabled={Boolean(blocked)}
               />
               <MachineCommandModal
                 nodeId={current.id}
@@ -158,6 +164,7 @@ export function AdminClientActions({
                   checkedAt: null,
                 }}
                 scope="admin"
+                disabled={Boolean(blocked)}
               />
             </>
           ) : null}
@@ -176,6 +183,11 @@ export function AdminClientActions({
         <div className="mt-6 max-w-sm border-t border-border pt-5">
           <AdminDashboardViewControl node={current} />
         </div>
+      ) : null}
+      {blocked ? (
+        <p role="note" className="mt-5 border border-[#e8a400]/40 bg-[#e8a400]/5 p-3 font-mono text-xs leading-6 text-[#e8a400]">
+          {current?.name}: {blocked}
+        </p>
       ) : null}
       {message ? (
         <p role="status" className="mt-5 border border-primary/40 bg-primary/5 p-3 font-mono text-xs text-primary">

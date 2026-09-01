@@ -4,9 +4,10 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Loader2, Pause, Play, ShieldOff, Unplug } from "lucide-react";
+import { DeleteNodeButton } from "@/components/admin/delete-node-button";
 import { createClient } from "@/lib/supabase/client";
 import { compareVersions, formatRelative, newestVersion } from "@/lib/dashboard-data";
-import { fleetFreshness } from "@/lib/admin-data";
+import { fleetFreshness, neverLinked } from "@/lib/admin-data";
 import type { AdminClient, AdminNode } from "@/lib/types";
 
 function pct(v: number | null, suffix = "%") {
@@ -34,6 +35,9 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
   const [pending, startTransition] = useTransition();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [onlyUnlinked, setOnlyUnlinked] = useState(false);
+  const unlinkedCount = nodes.filter(neverLinked).length;
+  const rows = onlyUnlinked ? nodes.filter(neverLinked) : nodes;
   const newestAgent = newestVersion(
     nodes.filter((n) => !n.is_demo).map((n) => n.agent_version)
   );
@@ -118,8 +122,23 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
         <div>
           <p className="section-kicker">// every machine</p>
           <p className="mt-2 font-sentient text-2xl text-card-foreground">
-            Fleet ({nodes.length})
+            Fleet ({rows.length}
+            {onlyUnlinked ? ` of ${nodes.length}` : ""})
           </p>
+          {unlinkedCount > 0 ? (
+            <button
+              type="button"
+              onClick={() => setOnlyUnlinked((v) => !v)}
+              aria-pressed={onlyUnlinked}
+              className={`mt-3 border px-2 py-1 font-mono text-xs uppercase transition-colors ${
+                onlyUnlinked
+                  ? "border-[#e8a400] bg-[#e8a400]/10 text-[#e8a400]"
+                  : "border-border text-muted-foreground hover:border-[#e8a400]/60 hover:text-[#e8a400]"
+              }`}
+            >
+              {onlyUnlinked ? "show all machines" : `never linked (${unlinkedCount})`}
+            </button>
+          ) : null}
         </div>
         {pending ? <Loader2 className="size-4 animate-spin text-primary" /> : null}
       </div>
@@ -147,7 +166,7 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
             </tr>
           </thead>
           <tbody>
-            {nodes.map((node) => {
+            {rows.map((node) => {
               const s = staleness(node);
               const busy = busyId === node.id;
               return (
@@ -169,6 +188,11 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                     {isBehind(node, newestAgent) ? (
                       <span className="block text-[#e8a400]">
                         behind {newestAgent}
+                      </span>
+                    ) : null}
+                    {neverLinked(node) ? (
+                      <span className="block text-[#e8a400]">
+                        never linked · approved {formatRelative(node.created_at)}
                       </span>
                     ) : null}
                   </td>
@@ -265,6 +289,7 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                               <Unplug className="size-3" /> revoke
                             </button>
                           ) : null}
+                          <DeleteNodeButton node={node} />
                         </>
                       )}
                     </div>
@@ -352,6 +377,11 @@ export function ClientTable({ clients, selfId }: { clients: AdminClient[]; selfI
                 </td>
                 <td className="py-3 pr-4 text-card-foreground/80">
                   {c.nodes_active}/{c.nodes}
+                  {c.nodes_unlinked > 0 ? (
+                    <span className="block text-[#e8a400]">
+                      {c.nodes_unlinked} never linked
+                    </span>
+                  ) : null}
                 </td>
                 <td className="py-3 pr-4 text-card-foreground/80">
                   {c.notifications_30d}

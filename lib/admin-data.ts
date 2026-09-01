@@ -1,6 +1,15 @@
 import { bytesPerSecToMbit, compareVersions } from "./dashboard-data.ts";
 import { heartbeatState } from "./heartbeat.ts";
-import type { AdminTrendPoint, Metric } from "./types.ts";
+import type { AdminNode, AdminTrendPoint, Metric } from "./types.ts";
+
+// A machine whose agent never once reached the portal. Approving a pairing code
+// creates the row, so a client who never finished `sudo hyn link` keeps a machine
+// on their dashboard that will never report anything -- and which otherwise reads
+// as "quiet since it was created", sending someone to look at a box that was
+// never talking in the first place.
+export function neverLinked(node: Pick<AdminNode, "is_demo" | "ever_connected">): boolean {
+  return !node.is_demo && !node.ever_connected;
+}
 
 type FleetMetric = Pick<Metric, "ts" | "cpu_pct" | "net_rx_bps" | "net_tx_bps">;
 

@@ -68,6 +68,19 @@ export function toTempSeries(rows: Metric[]): TempPoint[] {
   return rows.map((r) => ({ time: clockLabel(r.ts), celsius: r.cpu_temp_c }));
 }
 
+// Which plotted sample a pointer resting at `at` (in the trace's own x units) is
+// asking about. Nearest rather than the one before it: hovering a pixel past a
+// sample should read that sample, and a gap where the machine sent nothing snaps
+// to the real reading either side of it instead of interpolating a value that was
+// never measured. Callers pass only the x of samples they actually plotted.
+export function nearestSampleIndex(xs: number[], at: number): number {
+  let nearest = 0;
+  for (let i = 1; i < xs.length; i++) {
+    if (Math.abs(xs[i] - at) < Math.abs(xs[nearest] - at)) nearest = i;
+  }
+  return nearest;
+}
+
 // Every temperature sensor the platform exposes (lib/cloud.sh's SENSORS map) —
 // CPU package, NVMe, motherboard, whatever hwmon publishes — as label/celsius
 // pairs sorted hottest first, so the reading that most needs attention is
