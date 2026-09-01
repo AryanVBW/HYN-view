@@ -32,3 +32,14 @@ test("editing one field drops invalid legacy values that would violate the node 
     { auto_update: "install", alert_mem_pct: "85" },
   );
 });
+
+test("dashboard_view only accepts dash or simple", () => {
+  assert.deepEqual(
+    mergePortalConfig({}, { dashboard_view: "simple" }),
+    { dashboard_view: "simple" },
+  );
+  assert.deepEqual(
+    mergePortalConfig({ dashboard_view: "fancy" }, {}),
+    {},
+  );
+});

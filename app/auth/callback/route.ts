@@ -59,7 +59,7 @@ export async function GET(request: NextRequest) {
       // verified", a quota refusal -- because that string is the whole diagnosis.
       const delivery = await sendResendEmail({
         apiKey: process.env.RESEND_API_KEY ?? "",
-        from: process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.in>",
+        from: process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>",
         to: email,
         subject,
         html: renderHynEmailShell({

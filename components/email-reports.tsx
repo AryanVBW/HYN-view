@@ -77,7 +77,7 @@ export function EmailReports() {
           </div>
           <div className="space-y-1 border-b border-border px-5 py-4 font-mono text-xs text-foreground/50">
             <p>
-              <span className="text-foreground/70">From:</span> reports@hyn-view.dev
+              <span className="text-foreground/70">From:</span> reports@hyn-view.info
             </p>
             <p>
               <span className="text-foreground/70">To:</span> ops@yourcompany.com

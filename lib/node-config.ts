@@ -10,6 +10,7 @@ export const PORTAL_CONFIG_KEYS = new Set([
   "notify_max_per_day",
   "cloud_push_min",
   "auto_update",
+  "dashboard_view",
 ]);
 
 function integer(value: string, max: number, allowZero = true) {
@@ -29,6 +30,7 @@ function validExistingValue(key: string, value: string) {
     case "cloud_push_min": return integer(value, 1_440, false);
     case "alert_min_severity": return value === "crit" || value === "warn" || value === "info";
     case "auto_update": return value === "install" || value === "check" || value === "off";
+    case "dashboard_view": return value === "dash" || value === "simple";
     case "report_at": return /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(value);
     default: return false;
   }

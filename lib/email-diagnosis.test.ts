@@ -15,12 +15,12 @@ const respondWith = (body: unknown, status = 200) =>
 
 test("the sender domain is read from either legal EMAIL_FROM form", () => {
   // Both of these are valid and both are used in practice, including the
-  // built-in default "HYN-view <reports@hyn-view.in>".
-  assert.equal(senderDomainOf("HYN-view <reports@hyn-view.in>"), "hyn-view.in");
-  assert.equal(senderDomainOf("reports@hyn-view.in"), "hyn-view.in");
+  // built-in default "HYN-view <reports@hyn-view.info>".
+  assert.equal(senderDomainOf("HYN-view <reports@hyn-view.info>"), "hyn-view.info");
+  assert.equal(senderDomainOf("reports@hyn-view.info"), "hyn-view.info");
   // Resend compares domains case-insensitively; so must we, or a capitalised
   // EMAIL_FROM would be reported as an unknown domain.
-  assert.equal(senderDomainOf("HYN-view <REPORTS@HYN-VIEW.IN>"), "hyn-view.in");
+  assert.equal(senderDomainOf("HYN-view <REPORTS@HYN-VIEW.INFO>"), "hyn-view.info");
   assert.equal(senderDomainOf("not-an-address"), null);
   assert.equal(senderDomainOf("trailing@"), null);
   assert.equal(senderDomainOf(""), null);
@@ -29,7 +29,7 @@ test("the sender domain is read from either legal EMAIL_FROM form", () => {
 
 test("a missing key and a missing sender are told apart", async () => {
   const noKey = await diagnoseEmailDelivery({
-    apiKey: undefined, from: "reports@hyn-view.in", fetchImpl: respondWith({}),
+    apiKey: undefined, from: "reports@hyn-view.info", fetchImpl: respondWith({}),
   });
   assert.equal(noKey.cause, "missing-key");
   assert.equal(noKey.ok, false);
@@ -41,7 +41,7 @@ test("a missing key and a missing sender are told apart", async () => {
 
   // Set but unusable is a different mistake from unset, and the message says so.
   const badFrom = await diagnoseEmailDelivery({
-    apiKey: "re_x", from: "reports-at-hyn-view.in", fetchImpl: respondWith({}),
+    apiKey: "re_x", from: "reports-at-hyn-view.info", fetchImpl: respondWith({}),
   });
   assert.equal(badFrom.cause, "missing-from");
   assert.match(badFrom.detail, /no usable domain/);
@@ -49,7 +49,7 @@ test("a missing key and a missing sender are told apart", async () => {
 
 test("a rejected key is named as a rejected key", async () => {
   const d = await diagnoseEmailDelivery({
-    apiKey: "re_revoked", from: "reports@hyn-view.in",
+    apiKey: "re_revoked", from: "reports@hyn-view.info",
     fetchImpl: respondWith({ name: "validation_error", message: "API key is invalid" }, 400),
   });
   assert.equal(d.cause, "invalid-key");
@@ -62,8 +62,8 @@ test("an unverified sending domain is the difference between silence and mail", 
   // an operator would ever see: Resend refuses every send from an unverified
   // domain, so mail simply never arrives.
   const pending = await diagnoseEmailDelivery({
-    apiKey: "re_x", from: "HYN-view <reports@hyn-view.in>",
-    fetchImpl: respondWith({ data: [{ name: "hyn-view.in", status: "pending" }] }),
+    apiKey: "re_x", from: "HYN-view <reports@hyn-view.info>",
+    fetchImpl: respondWith({ data: [{ name: "hyn-view.info", status: "pending" }] }),
   });
   assert.equal(pending.cause, "sender-domain-unverified");
   assert.match(pending.detail, /"pending"/);
@@ -72,13 +72,13 @@ test("an unverified sending domain is the difference between silence and mail", 
   // needs a different fix, so it gets a different cause and lists what IS usable.
   const unknown = await diagnoseEmailDelivery({
     apiKey: "re_x", from: "reports@typo-domain.in",
-    fetchImpl: respondWith({ data: [{ name: "hyn-view.in", status: "verified" }] }),
+    fetchImpl: respondWith({ data: [{ name: "hyn-view.info", status: "verified" }] }),
   });
   assert.equal(unknown.cause, "sender-domain-unknown");
-  assert.match(unknown.detail, /hyn-view\.in \(verified\)/);
+  assert.match(unknown.detail, /hyn-view\.info \(verified\)/);
 
   const none = await diagnoseEmailDelivery({
-    apiKey: "re_x", from: "reports@hyn-view.in", fetchImpl: respondWith({ data: [] }),
+    apiKey: "re_x", from: "reports@hyn-view.info", fetchImpl: respondWith({ data: [] }),
   });
   assert.equal(none.cause, "sender-domain-unknown");
   assert.match(none.detail, /no domains configured at all/);
@@ -86,26 +86,26 @@ test("an unverified sending domain is the difference between silence and mail", 
 
 test("a healthy configuration is reported as healthy", async () => {
   const d = await diagnoseEmailDelivery({
-    apiKey: "re_x", from: "HYN-view <reports@hyn-view.in>",
-    fetchImpl: respondWith({ data: [{ name: "hyn-view.in", status: "verified" }] }),
+    apiKey: "re_x", from: "HYN-view <reports@hyn-view.info>",
+    fetchImpl: respondWith({ data: [{ name: "hyn-view.info", status: "verified" }] }),
   });
   assert.equal(d.ok, true);
   assert.equal(d.cause, "ok");
-  assert.deepEqual(d.domains, [{ name: "hyn-view.in", status: "verified" }]);
+  assert.deepEqual(d.domains, [{ name: "hyn-view.info", status: "verified" }]);
 });
 
 test("an unreachable provider is not blamed on the key", async () => {
   // Misreporting a network fault as a bad credential sends the operator to
   // rotate a key that was fine, which is worse than saying nothing.
   const d = await diagnoseEmailDelivery({
-    apiKey: "re_x", from: "reports@hyn-view.in",
+    apiKey: "re_x", from: "reports@hyn-view.info",
     fetchImpl: (async () => { throw new Error("getaddrinfo ENOTFOUND api.resend.com"); }) as unknown as typeof fetch,
   });
   assert.equal(d.cause, "provider-unreachable");
   assert.match(d.detail, /ENOTFOUND/);
 
   const serverError = await diagnoseEmailDelivery({
-    apiKey: "re_x", from: "reports@hyn-view.in",
+    apiKey: "re_x", from: "reports@hyn-view.info",
     fetchImpl: respondWith({ message: "internal server error" }, 500),
   });
   assert.equal(serverError.cause, "provider-unreachable");

@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   const resendKey = process.env.RESEND_API_KEY ?? "";
-  const from = process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.in>";
+  const from = process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>";
   if (!resendKey) {
     return NextResponse.json({ message: "managed email is not configured" }, { status: 503 });
   }

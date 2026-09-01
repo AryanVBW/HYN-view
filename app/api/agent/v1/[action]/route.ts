@@ -167,7 +167,7 @@ export async function POST(
           const subject = `Your first HYN system report · ${email.node_name ?? "linked machine"}`;
           const delivery = await sendResendEmail({
             apiKey: process.env.RESEND_API_KEY ?? "",
-            from: process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.in>",
+            from: process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>",
             to: email.recipient,
             subject,
             html: renderHynEmailShell({

@@ -81,7 +81,7 @@ export async function sendAdminClientReport(clientId: string): Promise<AdminActi
 
     const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
     const resendKey = process.env.RESEND_API_KEY ?? "";
-    const from = process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.in>";
+    const from = process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>";
     if (!SUPABASE_URL || !serviceKey || !resendKey) {
       throw new Error("Managed email delivery is not configured on the portal.");
     }

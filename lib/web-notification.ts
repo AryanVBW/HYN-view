@@ -86,7 +86,7 @@ export async function dispatchWebNotificationJob(
 export async function dispatchQueuedWebNotification(jobId: string | null = null) {
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
   const resendKey = process.env.RESEND_API_KEY ?? "";
-  const from = process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.in>";
+  const from = process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>";
   if (!SUPABASE_URL || !serviceKey) throw new Error("Supabase service credentials are not configured");
   const supabase = createClient(SUPABASE_URL, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
@@ -155,7 +155,7 @@ export async function dispatchQueuedWebNotification(jobId: string | null = null)
 export async function dispatchCommandNotification(commandId: string) {
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
   const resendKey = process.env.RESEND_API_KEY ?? "";
-  const from = process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.in>";
+  const from = process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>";
   if (!SUPABASE_URL || !serviceKey) throw new Error("Supabase service credentials are not configured");
   const supabase = createClient(SUPABASE_URL, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },

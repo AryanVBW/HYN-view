@@ -47,6 +47,16 @@ const FIELDS: {
       { value: "off", label: "Manual only" },
     ],
   },
+  {
+    key: "dashboard_view",
+    label: "Terminal dashboard view",
+    hint: "what opens on the server's own screen with no key pressed",
+    type: "select",
+    choices: [
+      { value: "dash", label: "Advanced (full dashboard)" },
+      { value: "simple", label: "Simple (status, speed, temp only)" },
+    ],
+  },
 ];
 
 export function NodeSettings({ nodes }: { nodes: Node[] }) {

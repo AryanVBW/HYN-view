@@ -267,7 +267,7 @@ export type EmailDiagnosis = {
   domains: { name: string; status: string }[];
 };
 
-// "HYN-view <reports@hyn-view.in>" and "reports@hyn-view.in" both yield the
+// "HYN-view <reports@hyn-view.info>" and "reports@hyn-view.info" both yield the
 // domain, because either form is a legal EMAIL_FROM and both are used in practice.
 export function senderDomainOf(from: string | null | undefined): string | null {
   if (!from) return null;

@@ -80,7 +80,7 @@ const peak = (values: Array<number | null>) => {
 export async function dispatchScheduledEmails(nodeId?: string): Promise<ScheduledEmailResult> {
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
   const resendKey = process.env.RESEND_API_KEY ?? "";
-  const from = process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.in>";
+  const from = process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>";
   if (!SUPABASE_URL || !serviceKey || !resendKey) {
     throw new Error("email automation is not configured");
   }

@@ -110,7 +110,7 @@ async function sendHeartbeatTransition(check: HeartbeatCheck) {
   });
   const delivery = await sendResendEmail({
     apiKey: process.env.RESEND_API_KEY ?? "",
-    from: process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.in>",
+    from: process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>",
     to: preference.recipient,
     subject,
     html,

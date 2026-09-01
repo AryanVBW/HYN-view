@@ -45,7 +45,7 @@ export async function GET() {
   const fix: Record<typeof diagnosis.cause, string> = {
     ok: "Nothing to fix. If mail still does not arrive, check the recipient in Account and the delivery log.",
     "missing-key": "Set RESEND_API_KEY in the deployment environment (Production and Preview), then redeploy.",
-    "missing-from": 'Set EMAIL_FROM to a verified sender, for example "HYN-view <reports@your-domain>".',
+    "missing-from": 'Set EMAIL_FROM to a verified sender, for example "HYN-view <reports@hyn-view.info>".',
     "invalid-key": "The key was rejected. Create a new API key in Resend, replace RESEND_API_KEY, then redeploy.",
     "sender-domain-unverified": "Finish DNS verification for this domain in Resend, or set EMAIL_FROM to a domain that is already verified.",
     "sender-domain-unknown": "Add and verify this domain in Resend, or set EMAIL_FROM to one of the verified domains listed here.",

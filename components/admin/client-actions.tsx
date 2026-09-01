@@ -1,10 +1,13 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import { LoaderCircle, Mail, RefreshCw } from "lucide-react";
 import { MachineCommandModal } from "@/components/dashboard/machine-command-modal";
 import { requestAdminNodeUpdates, sendAdminClientReport } from "@/app/admin/actions";
 import { compareVersions } from "@/lib/dashboard-data";
+import { mergePortalConfig } from "@/lib/node-config";
+import { createClient } from "@/lib/supabase/client";
 import type { AdminClient, AdminNode } from "@/lib/types";
 
 function needsUpdate(node: AdminNode) {
@@ -13,6 +16,57 @@ function needsUpdate(node: AdminNode) {
   return Boolean(
     node.latest_agent_version &&
     (!node.agent_version || compareVersions(node.agent_version, node.latest_agent_version) < 0)
+  );
+}
+
+// The dashboard view a client's server opens with, out of everything an admin
+// can touch here, gets its own small control rather than living in the bigger
+// action bar: it is a UI preference, not an audited operational command, and a
+// client who cannot read a terminal should not have to ask for one of those to
+// get a screen they can actually use.
+function AdminDashboardViewControl({ node }: { node: AdminNode }) {
+  const router = useRouter();
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const current = String(node.config?.dashboard_view ?? "dash");
+
+  async function setView(value: string) {
+    setPending(true);
+    setError(null);
+    const merged = mergePortalConfig(node.config ?? {}, { dashboard_view: value });
+    const supabase = createClient();
+    const { error } = await supabase.rpc("hyn_admin_set_node_config", {
+      p_node_id: node.id,
+      p_config: merged,
+    });
+    setPending(false);
+    if (error) {
+      setError(error.message);
+      return;
+    }
+    router.refresh();
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label className="font-mono text-[0.65rem] uppercase text-muted-foreground" htmlFor="admin-dashboard-view">
+        Dashboard view for {node.name}
+      </label>
+      <select
+        id="admin-dashboard-view"
+        value={current}
+        disabled={pending}
+        onChange={(event) => setView(event.target.value)}
+        className="border border-input bg-background px-3 py-2 font-mono text-xs text-foreground outline-none focus:border-ring disabled:opacity-50"
+      >
+        <option value="dash">Advanced (full dashboard)</option>
+        <option value="simple">Simple (status, speed, temp only)</option>
+      </select>
+      <p className="font-mono text-[0.6rem] leading-4 text-muted-foreground">
+        Applies to both the terminal and this client&apos;s web dashboard on their next check-in.
+      </p>
+      {error ? <p role="alert" className="font-mono text-[0.6rem] text-destructive">{error}</p> : null}
+    </div>
   );
 }
 
@@ -118,6 +172,11 @@ export function AdminClientActions({
           </button>
         </div>
       </div>
+      {current ? (
+        <div className="mt-6 max-w-sm border-t border-border pt-5">
+          <AdminDashboardViewControl node={current} />
+        </div>
+      ) : null}
       {message ? (
         <p role="status" className="mt-5 border border-primary/40 bg-primary/5 p-3 font-mono text-xs text-primary">
           {message}
