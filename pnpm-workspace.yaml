@@ -1,0 +1,23 @@
+# Which dependencies may execute code at install time, decided once.
+#
+# This lives here rather than under a "pnpm" key in package.json because pnpm 11
+# reads settings only from this file: the key in package.json worked locally on
+# pnpm 10 and was silently ignored by the builder, which then failed the whole
+# deploy with [ERR_PNPM_IGNORED_BUILDS]. One file both versions read is the fix.
+#
+# Nothing unclassified is left, so there is no ignored-build warning for a future
+# pnpm to promote to an error again.
+
+# Must produce a native binary or platform download to be usable at build time.
+onlyBuiltDependencies:
+  - "@swc/core"
+  - esbuild
+  - sharp
+  - unrs-resolver
+
+# Optional accelerators and a dev-only mock worker: each has a working pure-JS
+# path and none is used when building this app, so their scripts stay off.
+ignoredBuiltDependencies:
+  - cbor-extract
+  - msgpackr-extract
+  - msw
