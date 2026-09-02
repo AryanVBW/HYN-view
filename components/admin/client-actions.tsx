@@ -58,7 +58,7 @@ function AdminDashboardViewControl({ node }: { node: AdminNode }) {
         value={current}
         disabled={pending}
         onChange={(event) => setView(event.target.value)}
-        className="border border-input bg-background px-3 py-2 font-mono text-xs text-foreground outline-none focus:border-ring disabled:opacity-50"
+        className="rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-foreground outline-none transition-colors focus:border-ring focus:ring-[3px] focus:ring-ring/50 disabled:opacity-50"
       >
         <option value="dash">Advanced (full dashboard)</option>
         <option value="simple">Simple (status, speed, temp only)</option>
@@ -117,7 +117,7 @@ export function AdminClientActions({
   }
 
   return (
-    <section className="terminal-panel p-6" aria-labelledby="admin-client-actions-title">
+    <section className="terminal-panel rounded-xl p-6 duration-500 animate-in fade-in slide-in-from-bottom-2 md:p-7" aria-labelledby="admin-client-actions-title">
       <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
         <div className="max-w-2xl">
           <p className="section-kicker">// audited client actions</p>
@@ -135,7 +135,7 @@ export function AdminClientActions({
             type="button"
             onClick={reportNow}
             disabled={pending || nodes.filter((node) => !node.revoked && !node.is_demo && node.status === "active").length === 0}
-            className="inline-flex min-w-44 items-center justify-center gap-2 border border-primary bg-primary/10 px-4 py-2.5 font-mono text-xs uppercase text-primary transition-colors hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex min-w-44 items-center justify-center gap-2 rounded-md border border-primary bg-primary/10 px-4 py-2.5 font-mono text-xs uppercase text-primary transition-colors hover:bg-primary/20 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
           >
             {pending ? <LoaderCircle className="size-4 animate-spin" aria-hidden /> : <Mail className="size-4" aria-hidden />}
             Send report now
@@ -172,7 +172,7 @@ export function AdminClientActions({
             type="button"
             onClick={updateOutdated}
             disabled={pending || outdated.length === 0}
-            className="inline-flex min-w-44 items-center justify-center gap-2 border border-[#e8a400]/60 bg-[#e8a400]/5 px-4 py-2.5 font-mono text-xs uppercase text-[#e8a400] transition-colors hover:bg-[#e8a400]/10 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex min-w-44 items-center justify-center gap-2 rounded-md border border-[color:var(--chart-2)]/60 bg-[color:var(--chart-2)]/5 px-4 py-2.5 font-mono text-xs uppercase text-[color:var(--chart-2)] transition-colors hover:bg-[color:var(--chart-2)]/10 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
           >
             {pending ? <LoaderCircle className="size-4 animate-spin" aria-hidden /> : <RefreshCw className="size-4" aria-hidden />}
             Update outdated ({outdated.length})
@@ -185,17 +185,17 @@ export function AdminClientActions({
         </div>
       ) : null}
       {blocked ? (
-        <p role="note" className="mt-5 border border-[#e8a400]/40 bg-[#e8a400]/5 p-3 font-mono text-xs leading-6 text-[#e8a400]">
+        <p role="note" className="mt-5 rounded-md border border-[color:var(--chart-2)]/40 bg-[color:var(--chart-2)]/5 p-3 font-mono text-xs leading-6 text-[color:var(--chart-2)]">
           {current?.name}: {blocked}
         </p>
       ) : null}
       {message ? (
-        <p role="status" className="mt-5 border border-primary/40 bg-primary/5 p-3 font-mono text-xs text-primary">
+        <p role="status" className="mt-5 rounded-md border border-primary/40 bg-primary/5 p-3 font-mono text-xs text-primary">
           {message}
         </p>
       ) : null}
       {error ? (
-        <p role="alert" className="mt-5 border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs text-destructive">
+        <p role="alert" className="mt-5 rounded-md border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs text-destructive">
           {error}
         </p>
       ) : null}
@@ -225,7 +225,7 @@ export function AdminFleetUpdateButton({ nodes }: { nodes: AdminNode[] }) {
             setResult(`${response.queued.length} queued · ${response.skipped.length} already active · ${response.failed.length} failed`);
           });
         }}
-        className="inline-flex items-center gap-2 border border-[#e8a400]/60 bg-[#e8a400]/5 px-4 py-2.5 font-mono text-xs uppercase text-[#e8a400] hover:bg-[#e8a400]/10 disabled:cursor-not-allowed disabled:opacity-50"
+        className="inline-flex items-center gap-2 rounded-md border border-[color:var(--chart-2)]/60 bg-[color:var(--chart-2)]/5 px-4 py-2.5 font-mono text-xs uppercase text-[color:var(--chart-2)] transition-colors hover:bg-[color:var(--chart-2)]/10 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
       >
         {pending ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
         Update all outdated

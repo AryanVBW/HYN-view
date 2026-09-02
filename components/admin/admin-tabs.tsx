@@ -91,7 +91,7 @@ export function AdminTabs({
               type="button"
               aria-selected={isActive}
               onClick={() => setActive(tab.id)}
-              className={`flex shrink-0 items-center gap-2 border px-3 py-2 font-mono text-xs uppercase tracking-wide transition-colors ${
+              className={`flex shrink-0 items-center gap-2 rounded-full border px-3 py-2 font-mono text-xs uppercase tracking-wide transition-colors ${
                 isActive
                   ? "border-primary/60 bg-primary/10 text-primary"
                   : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"

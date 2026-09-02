@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { AlertTriangle, ShieldAlert } from "lucide-react";
+import { AlertTriangle, Mail, ShieldAlert, ShieldCheck } from "lucide-react";
 import { AdminTabs, type AdminTabId } from "@/components/admin/admin-tabs";
 import { AgentVersions } from "@/components/admin/agent-versions";
 import { AdminClientDashboard } from "@/components/admin/client-dashboard";
+import { ClearDeliveryLogButton } from "@/components/admin/clear-delivery-log-button";
 import { EmailTemplateManager } from "@/components/admin/email-template-manager";
 import {
   AnimatedAdminStats,
@@ -15,6 +16,7 @@ import {
 import { PromoteAdminForm } from "@/components/admin/promote-admin-form";
 import { ClientTable, NodeTable } from "@/components/admin/tables";
 import { ParticleField } from "@/components/particle-field";
+import { DashboardMagicRings } from "@/components/dashboard-magic-rings";
 import { LiveRefresh } from "@/components/live-refresh";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
@@ -77,9 +79,11 @@ export default async function AdminPage({
   if (profile?.role !== "admin" || profile?.status !== "active") {
     return (
       <Shell email={auth.user.email}>
-        <div className="terminal-panel p-8 md:p-12">
+        <div className="terminal-panel rounded-xl p-8 duration-500 animate-in fade-in slide-in-from-bottom-2 md:p-12">
           <div className="mx-auto max-w-lg text-center">
-            <ShieldAlert className="mx-auto size-10 text-muted-foreground" aria-hidden />
+            <span className="mx-auto flex size-16 items-center justify-center rounded-full border-2 border-border bg-muted">
+              <ShieldAlert className="size-8 text-muted-foreground" aria-hidden />
+            </span>
             <h1 className="mt-6 font-sentient text-2xl text-card-foreground md:text-3xl">
               Administrators only
             </h1>
@@ -91,10 +95,10 @@ export default async function AdminPage({
               </Link>
               .
             </p>
-            <p className="mt-6 font-mono text-xs leading-6 text-muted-foreground">
+            <p className="mt-6 rounded-lg border border-border/60 bg-card/60 p-4 text-left font-mono text-xs leading-6 text-muted-foreground">
               An existing administrator can promote you from the admin panel. The
               only other way in is the SQL editor, on purpose: add your address to{" "}
-              <code>public.admin_allowlist</code> and sign in again. That table is
+              <code className="text-primary">public.admin_allowlist</code> and sign in again. That table is
               unreadable and unwritable from any browser session, so who may
               become an administrator cannot be changed from the app.
             </p>
@@ -233,17 +237,27 @@ export default async function AdminPage({
   const overviewPanel = (
     <div className="space-y-8">
       {attentionCount > 0 ? (
-        <div className="flex items-start gap-3 border border-destructive/40 bg-destructive/5 p-4">
-          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
-          <p className="font-mono text-xs leading-6 text-destructive">
-            {overview.nodes_stale > 0
-              ? `${overview.nodes_stale} machine${overview.nodes_stale === 1 ? "" : "s"} gone quiet. `
-              : ""}
-            {overview.notifications_failed_24h > 0
-              ? `${overview.notifications_failed_24h} notification${overview.notifications_failed_24h === 1 ? "" : "s"} failed in the last 24h. `
-              : ""}
-            See the Fleet and Deliveries tabs.
-          </p>
+        <div className="flex flex-col gap-3 rounded-lg border border-destructive/40 bg-destructive/5 p-4 duration-500 animate-in fade-in slide-in-from-bottom-2 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
+            <p className="font-mono text-xs leading-6 text-destructive">
+              {overview.nodes_stale > 0
+                ? `${overview.nodes_stale} machine${overview.nodes_stale === 1 ? "" : "s"} gone quiet. `
+                : ""}
+              {overview.notifications_failed_24h > 0
+                ? `${overview.notifications_failed_24h} notification${overview.notifications_failed_24h === 1 ? "" : "s"} failed in the last 24h. `
+                : ""}
+              See the Fleet and Deliveries tabs.
+            </p>
+          </div>
+          {/* Clearing from here defaults to everything: the sentence above is about
+              the last 24 hours, so a 30-day cutoff would report success and leave
+              the banner exactly as it was. It empties the counters this banner and
+              the failed-deliveries card are drawn from -- it does not fix what
+              failed, and a number this size is one broken thing, not 4501. */}
+          {overview.notifications_failed_24h > 0 ? (
+            <ClearDeliveryLogButton defaultScope="all" />
+          ) : null}
         </div>
       ) : null}
 
@@ -265,30 +279,40 @@ export default async function AdminPage({
   );
 
   const notificationsPanel = (
-    <div className="terminal-panel p-6">
-      <p className="section-kicker">// notifications, all clients</p>
-      <p className="mt-2 font-sentient text-2xl text-card-foreground">Delivery log</p>
+    <div className="terminal-panel rounded-xl p-6 duration-500 animate-in fade-in slide-in-from-bottom-2 md:p-7">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <p className="section-kicker">// notifications, all clients</p>
+          <p className="mt-2 font-sentient text-2xl text-card-foreground">Delivery log</p>
+        </div>
+        {notifications.length > 0 ? <ClearDeliveryLogButton /> : null}
+      </div>
       {notifications.length === 0 ? (
-        <p className="mt-6 font-mono text-xs text-muted-foreground">
-          No notifications have been reported yet.
-        </p>
+        <div className="mt-6 flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border/60 px-6 py-14">
+          <span className="flex size-12 items-center justify-center rounded-full border border-border bg-secondary">
+            <Mail className="size-5 text-muted-foreground" aria-hidden />
+          </span>
+          <p className="max-w-md text-center font-mono text-xs leading-6 text-muted-foreground">
+            No notifications have been reported yet across the fleet.
+          </p>
+        </div>
       ) : (
-        <div className="mt-6 overflow-x-auto">
+        <div className="mt-6 overflow-x-auto rounded-lg border border-border/60">
           <table className="w-full min-w-[900px] border-collapse font-mono text-xs">
             <thead>
-              <tr className="border-b border-border text-left uppercase text-muted-foreground">
-                <th className="py-2 pr-4 font-normal">when</th>
-                <th className="py-2 pr-4 font-normal">client</th>
-                <th className="py-2 pr-4 font-normal">machine</th>
-                <th className="py-2 pr-4 font-normal">channel</th>
-                <th className="py-2 pr-4 font-normal">subject</th>
-                <th className="py-2 font-normal">result</th>
+              <tr className="border-b border-border bg-card/60 text-left uppercase text-muted-foreground">
+                <th className="py-3 pr-4 pl-4 font-normal">when</th>
+                <th className="py-3 pr-4 font-normal">client</th>
+                <th className="py-3 pr-4 font-normal">machine</th>
+                <th className="py-3 pr-4 font-normal">channel</th>
+                <th className="py-3 pr-4 font-normal">subject</th>
+                <th className="py-3 pr-4 font-normal">result</th>
               </tr>
             </thead>
             <tbody>
               {notifications.map((n) => (
-                <tr key={n.id} className="border-b border-border/50 align-top">
-                  <td className="py-3 pr-4 whitespace-nowrap text-muted-foreground">
+                <tr key={n.id} className="border-b border-border/40 align-top transition-colors hover:bg-card/40">
+                  <td className="py-3 pr-4 pl-4 whitespace-nowrap text-muted-foreground">
                     {formatRelative(n.ts)}
                   </td>
                   <td className="py-3 pr-4 text-card-foreground/80">{n.owner_email ?? "—"}</td>
@@ -300,12 +324,8 @@ export default async function AdminPage({
                       <span className="mt-1 block leading-5 text-destructive">{n.error}</span>
                     ) : null}
                   </td>
-                  <td
-                    className={`py-3 whitespace-nowrap ${
-                      n.status === "sent" ? "text-primary" : "text-destructive"
-                    }`}
-                  >
-                    {n.status}
+                  <td className="py-3 pr-4 whitespace-nowrap">
+                    <AdminStatusPill status={n.status} />
                   </td>
                 </tr>
               ))}
@@ -317,7 +337,7 @@ export default async function AdminPage({
   );
 
   const auditPanel = (
-    <div className="terminal-panel p-6">
+    <div className="terminal-panel rounded-xl p-6 duration-500 animate-in fade-in slide-in-from-bottom-2 md:p-7">
       <p className="section-kicker">// audit trail</p>
       <p className="mt-2 font-sentient text-2xl text-card-foreground">Who changed what</p>
       <p className="mt-2 font-mono text-xs leading-6 text-muted-foreground">
@@ -325,13 +345,18 @@ export default async function AdminPage({
         database, not the UI, so it cannot be skipped.
       </p>
       {audit.length === 0 ? (
-        <p className="mt-6 font-mono text-xs text-muted-foreground">
-          No administrative actions recorded yet.
-        </p>
+        <div className="mt-6 flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border/60 px-6 py-14">
+          <span className="flex size-12 items-center justify-center rounded-full border border-border bg-secondary">
+            <ShieldCheck className="size-5 text-muted-foreground" aria-hidden />
+          </span>
+          <p className="max-w-md text-center font-mono text-xs leading-6 text-muted-foreground">
+            No administrative actions recorded yet.
+          </p>
+        </div>
       ) : (
-        <ul className="mt-6 divide-y divide-border/60">
+        <ul className="mt-6 divide-y divide-border/60 rounded-lg border border-border/60">
           {audit.map((a) => (
-            <li key={a.id} className="py-3 font-mono text-xs">
+            <li key={a.id} className="px-4 py-3 font-mono text-xs transition-colors hover:bg-card/40">
               <span className="text-card-foreground/90">{a.action}</span>
               <span className="text-muted-foreground">
                 {" "}
@@ -354,37 +379,91 @@ export default async function AdminPage({
 
   return (
     <Shell email={auth.user.email}>
-      <div className="border-b border-border pb-8">
-        <p className="section-kicker">// administration</p>
-        <h1 className="mt-2 font-sentient text-3xl text-foreground md:text-4xl">
-          Every client, every machine
-        </h1>
-      </div>
+      <AdminHeader profile={profile} clientCount={overview.clients_total} nodeCount={overview.nodes_total} />
 
-      <AdminTabs
-        overview={overviewPanel}
-        clients={<ClientTable clients={clients} selfId={auth.user.id} />}
-        client={
-          selectedClient ? (
-            <AdminClientDashboard
-              client={selectedClient}
-              nodes={selectedNodes}
-              current={selectedNode}
-              metrics={selectedMetrics}
-            />
-          ) : undefined
-        }
-        fleet={<NodeTable nodes={nodes} />}
-        templates={<EmailTemplateManager templates={templates} />}
-        notifications={notificationsPanel}
-        audit={auditPanel}
-        initialActive={initialActive}
-        badges={{
-          fleet: overview.nodes_stale || undefined,
-          notifications: overview.notifications_failed_24h || undefined,
-        }}
-      />
+      <div className="mt-10">
+        <AdminTabs
+          overview={overviewPanel}
+          clients={<ClientTable clients={clients} selfId={auth.user.id} />}
+          client={
+            selectedClient ? (
+              <AdminClientDashboard
+                client={selectedClient}
+                nodes={selectedNodes}
+                current={selectedNode}
+                metrics={selectedMetrics}
+              />
+            ) : undefined
+          }
+          fleet={<NodeTable nodes={nodes} />}
+          templates={<EmailTemplateManager templates={templates} />}
+          notifications={notificationsPanel}
+          audit={auditPanel}
+          initialActive={initialActive}
+          badges={{
+            fleet: overview.nodes_stale || undefined,
+            notifications: overview.notifications_failed_24h || undefined,
+          }}
+        />
+      </div>
     </Shell>
+  );
+}
+
+// One function deciding what a fleet-wide delivery status looks like, the
+// same discipline the account page's deliveryStatusTone established for its
+// own delivery history -- a status pill's colour is decided once, here, not
+// re-decided per row.
+function AdminStatusPill({ status }: { status: "sent" | "failed" | "skipped" }) {
+  const color = status === "sent" ? "var(--primary)" : status === "failed" ? "var(--destructive)" : "var(--muted-foreground)";
+  return (
+    <span
+      className="inline-flex items-center rounded-full border px-2.5 py-1 text-[0.7rem]"
+      style={{ borderColor: `color-mix(in oklab, ${color} 40%, transparent)`, backgroundColor: `color-mix(in oklab, ${color} 10%, transparent)`, color }}
+    >
+      {status}
+    </span>
+  );
+}
+
+// The admin page's own identity block -- an accent card matching
+// AccountHeader's treatment (app/account/page.tsx), so the two top-level
+// pages an administrator moves between read as the same product rather than
+// one premium and one plain. The shield-in-a-ring echoes the account page's
+// own admin badge rather than inventing a second "this person is an admin"
+// visual.
+function AdminHeader({
+  profile,
+  clientCount,
+  nodeCount,
+}: {
+  profile: Profile | null;
+  clientCount: number;
+  nodeCount: number;
+}) {
+  return (
+    <div className="terminal-panel relative overflow-hidden rounded-xl p-6 duration-500 animate-in fade-in slide-in-from-bottom-2 md:p-7">
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 -z-10 bg-gradient-to-br from-primary/[0.07] via-transparent to-transparent"
+      />
+      <div className="flex items-start gap-4">
+        <span className="relative hidden size-14 shrink-0 items-center justify-center rounded-full border-2 border-primary/40 bg-primary/10 sm:flex">
+          <ShieldCheck className="size-7 text-primary" aria-hidden />
+        </span>
+        <div>
+          <p className="section-kicker">// administration</p>
+          <h1 className="mt-1 font-sentient text-3xl text-foreground md:text-4xl">
+            Every client, every machine
+          </h1>
+          <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 font-mono text-sm text-muted-foreground">
+            <span>{profile?.full_name || "administrator"}</span>
+            <span>{clientCount} client{clientCount === 1 ? "" : "s"}</span>
+            <span>{nodeCount} machine{nodeCount === 1 ? "" : "s"}</span>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -393,6 +472,7 @@ function Shell({ children, email }: { children: React.ReactNode; email?: string 
     <div className="min-h-screen bg-background">
       {email ? <LiveRefresh /> : null}
       <ParticleField blur="subtle" />
+      <DashboardMagicRings />
       <main className="container pt-32 pb-10 md:pt-44">{children}</main>
       <footer className="container flex flex-col gap-3 border-t border-border py-8 font-mono text-xs text-muted-foreground md:flex-row md:items-center md:justify-between">
         <span className="flex flex-wrap items-center gap-x-4 gap-y-2">

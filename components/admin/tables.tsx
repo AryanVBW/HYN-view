@@ -117,7 +117,7 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
   }
 
   return (
-    <div className="terminal-panel p-6">
+    <div className="terminal-panel rounded-xl p-6 duration-500 animate-in fade-in slide-in-from-bottom-2 md:p-7">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="section-kicker">// every machine</p>
@@ -130,10 +130,10 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
               type="button"
               onClick={() => setOnlyUnlinked((v) => !v)}
               aria-pressed={onlyUnlinked}
-              className={`mt-3 border px-2 py-1 font-mono text-xs uppercase transition-colors ${
+              className={`mt-3 rounded-full border px-2.5 py-1 font-mono text-xs uppercase transition-colors ${
                 onlyUnlinked
-                  ? "border-[#e8a400] bg-[#e8a400]/10 text-[#e8a400]"
-                  : "border-border text-muted-foreground hover:border-[#e8a400]/60 hover:text-[#e8a400]"
+                  ? "border-[color:var(--chart-2)] bg-[color:var(--chart-2)]/10 text-[color:var(--chart-2)]"
+                  : "border-border text-muted-foreground hover:border-[color:var(--chart-2)]/60 hover:text-[color:var(--chart-2)]"
               }`}
             >
               {onlyUnlinked ? "show all machines" : `never linked (${unlinkedCount})`}
@@ -144,25 +144,25 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
       </div>
 
       {error ? (
-        <p role="alert" className="mt-4 border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs text-destructive">
+        <p role="alert" className="mt-4 rounded-md border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs text-destructive">
           {error}
         </p>
       ) : null}
 
-      <div className="mt-6 overflow-x-auto">
+      <div className="mt-6 overflow-x-auto rounded-lg border border-border/60">
         <table className="w-full min-w-[1040px] border-collapse font-mono text-xs">
           <thead>
-            <tr className="border-b border-border text-left uppercase text-muted-foreground">
-              <th className="py-2 pr-4 font-normal">machine</th>
-              <th className="py-2 pr-4 font-normal">client</th>
-              <th className="py-2 pr-4 font-normal">state</th>
-              <th className="py-2 pr-4 font-normal">cpu</th>
-              <th className="py-2 pr-4 font-normal">temp</th>
-              <th className="py-2 pr-4 font-normal">mem</th>
-              <th className="py-2 pr-4 font-normal">disk</th>
-              <th className="py-2 pr-4 font-normal">alerts</th>
-              <th className="py-2 pr-4 font-normal">notifs 24h</th>
-              <th className="py-2 font-normal">control</th>
+            <tr className="border-b border-border bg-card/60 text-left uppercase text-muted-foreground">
+              <th className="py-3 pr-4 pl-4 font-normal">machine</th>
+              <th className="py-3 pr-4 font-normal">client</th>
+              <th className="py-3 pr-4 font-normal">state</th>
+              <th className="py-3 pr-4 font-normal">cpu</th>
+              <th className="py-3 pr-4 font-normal">temp</th>
+              <th className="py-3 pr-4 font-normal">mem</th>
+              <th className="py-3 pr-4 font-normal">disk</th>
+              <th className="py-3 pr-4 font-normal">alerts</th>
+              <th className="py-3 pr-4 font-normal">notifs 24h</th>
+              <th className="py-3 pr-4 font-normal">control</th>
             </tr>
           </thead>
           <tbody>
@@ -170,8 +170,8 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
               const s = staleness(node);
               const busy = busyId === node.id;
               return (
-                <tr key={node.id} className="border-b border-border/50 align-top">
-                  <td className="py-3 pr-4">
+                <tr key={node.id} className="border-b border-border/40 align-top transition-colors hover:bg-card/40">
+                  <td className="py-3 pr-4 pl-4">
                     <Link
                       href={`/admin?tab=client&client=${node.owner_id ?? ""}&node=${node.id}`}
                       className="text-card-foreground hover:text-primary"
@@ -186,12 +186,12 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                       {node.agent_version ? `hyn ${node.agent_version}` : "version unknown"}
                     </span>
                     {isBehind(node, newestAgent) ? (
-                      <span className="block text-[#e8a400]">
+                      <span className="block text-[color:var(--chart-2)]">
                         behind {newestAgent}
                       </span>
                     ) : null}
                     {neverLinked(node) ? (
-                      <span className="block text-[#e8a400]">
+                      <span className="block text-[color:var(--chart-2)]">
                         never linked · approved {formatRelative(node.created_at)}
                       </span>
                     ) : null}
@@ -217,7 +217,7 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                       {formatRelative(node.last_seen_at)}
                     </span>
                     {node.paused_until ? (
-                      <span className="block text-[#e8a400]">
+                      <span className="block text-[color:var(--chart-2)]">
                         until {new Date(node.paused_until).toLocaleTimeString()}
                       </span>
                     ) : null}
@@ -244,7 +244,7 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                       </span>
                     ) : null}
                   </td>
-                  <td className="py-3">
+                  <td className="py-3 pr-4">
                     <div className="flex flex-wrap items-center gap-1.5">
                       {busy ? (
                         <Loader2 className="size-4 animate-spin text-primary" />
@@ -255,7 +255,7 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                               type="button"
                               onClick={() => pause(node)}
                               title="Pause monitoring"
-                              className="flex items-center gap-1 border border-border px-2 py-1 uppercase text-muted-foreground transition-colors hover:border-[#e8a400]/60 hover:text-[#e8a400]"
+                              className="flex items-center gap-1 rounded-full border border-border px-2 py-1 uppercase text-muted-foreground transition-colors hover:border-[color:var(--chart-2)]/60 hover:text-[color:var(--chart-2)]"
                             >
                               <Pause className="size-3" /> pause
                             </button>
@@ -264,7 +264,7 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                               type="button"
                               onClick={() => resume(node)}
                               title="Resume monitoring"
-                              className="flex items-center gap-1 border border-primary/50 px-2 py-1 uppercase text-primary transition-colors hover:bg-primary/10"
+                              className="flex items-center gap-1 rounded-full border border-primary/50 px-2 py-1 uppercase text-primary transition-colors hover:bg-primary/10"
                             >
                               <Play className="size-3" /> resume
                             </button>
@@ -274,7 +274,7 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                               type="button"
                               onClick={() => suspend(node)}
                               title="Suspend this machine"
-                              className="flex items-center gap-1 border border-border px-2 py-1 uppercase text-muted-foreground transition-colors hover:border-destructive/60 hover:text-destructive"
+                              className="flex items-center gap-1 rounded-full border border-border px-2 py-1 uppercase text-muted-foreground transition-colors hover:border-destructive/60 hover:text-destructive"
                             >
                               <ShieldOff className="size-3" /> suspend
                             </button>
@@ -284,7 +284,7 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                               type="button"
                               onClick={() => revoke(node)}
                               title="Revoke the node credential"
-                              className="flex items-center gap-1 border border-border px-2 py-1 uppercase text-muted-foreground transition-colors hover:border-destructive/60 hover:text-destructive"
+                              className="flex items-center gap-1 rounded-full border border-border px-2 py-1 uppercase text-muted-foreground transition-colors hover:border-destructive/60 hover:text-destructive"
                             >
                               <Unplug className="size-3" /> revoke
                             </button>
@@ -323,7 +323,7 @@ export function ClientTable({ clients, selfId }: { clients: AdminClient[]; selfI
   }
 
   return (
-    <div className="terminal-panel p-6">
+    <div className="terminal-panel rounded-xl p-6 duration-500 animate-in fade-in slide-in-from-bottom-2 md:p-7">
       <div>
         <p className="section-kicker">// every client</p>
         <p className="mt-2 font-sentient text-2xl text-card-foreground">
@@ -332,28 +332,28 @@ export function ClientTable({ clients, selfId }: { clients: AdminClient[]; selfI
       </div>
 
       {error ? (
-        <p role="alert" className="mt-4 border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs text-destructive">
+        <p role="alert" className="mt-4 rounded-md border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs text-destructive">
           {error}
         </p>
       ) : null}
 
-      <div className="mt-6 overflow-x-auto">
+      <div className="mt-6 overflow-x-auto rounded-lg border border-border/60">
         <table className="w-full min-w-[860px] border-collapse font-mono text-xs">
           <thead>
-            <tr className="border-b border-border text-left uppercase text-muted-foreground">
-              <th className="py-2 pr-4 font-normal">email</th>
-              <th className="py-2 pr-4 font-normal">role</th>
-              <th className="py-2 pr-4 font-normal">state</th>
-              <th className="py-2 pr-4 font-normal">machines</th>
-              <th className="py-2 pr-4 font-normal">notifs 30d</th>
-              <th className="py-2 pr-4 font-normal">last seen</th>
-              <th className="py-2 font-normal">control</th>
+            <tr className="border-b border-border bg-card/60 text-left uppercase text-muted-foreground">
+              <th className="py-3 pr-4 pl-4 font-normal">email</th>
+              <th className="py-3 pr-4 font-normal">role</th>
+              <th className="py-3 pr-4 font-normal">state</th>
+              <th className="py-3 pr-4 font-normal">machines</th>
+              <th className="py-3 pr-4 font-normal">notifs 30d</th>
+              <th className="py-3 pr-4 font-normal">last seen</th>
+              <th className="py-3 pr-4 font-normal">control</th>
             </tr>
           </thead>
           <tbody>
             {clients.map((c) => (
-              <tr key={c.id} className="border-b border-border/50 align-top">
-                <td className="py-3 pr-4 text-card-foreground/90">
+              <tr key={c.id} className="border-b border-border/40 align-top transition-colors hover:bg-card/40">
+                <td className="py-3 pr-4 pl-4 text-card-foreground/90">
                   <Link
                     href={`/admin?tab=client&client=${c.id}`}
                     className="hover:text-primary"
@@ -378,7 +378,7 @@ export function ClientTable({ clients, selfId }: { clients: AdminClient[]; selfI
                 <td className="py-3 pr-4 text-card-foreground/80">
                   {c.nodes_active}/{c.nodes}
                   {c.nodes_unlinked > 0 ? (
-                    <span className="block text-[#e8a400]">
+                    <span className="block text-[color:var(--chart-2)]">
                       {c.nodes_unlinked} never linked
                     </span>
                   ) : null}
@@ -394,7 +394,7 @@ export function ClientTable({ clients, selfId }: { clients: AdminClient[]; selfI
                 <td className="py-3 pr-4 text-muted-foreground">
                   {formatRelative(c.last_seen_at)}
                 </td>
-                <td className="py-3">
+                <td className="py-3 pr-4">
                   {busyId === c.id ? (
                     <Loader2 className="size-4 animate-spin text-primary" />
                   ) : (
@@ -416,7 +416,7 @@ export function ClientTable({ clients, selfId }: { clients: AdminClient[]; selfI
                             });
                           }}
                           title={c.id === selfId ? "You cannot suspend yourself" : "Suspend this client"}
-                          className="border border-border px-2 py-1 uppercase text-muted-foreground transition-colors hover:border-destructive/60 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
+                          className="rounded-full border border-border px-2.5 py-1 uppercase text-muted-foreground transition-colors hover:border-destructive/60 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           suspend
                         </button>
@@ -430,7 +430,7 @@ export function ClientTable({ clients, selfId }: { clients: AdminClient[]; selfI
                               p_reason: null,
                             })
                           }
-                          className="border border-primary/50 px-2 py-1 uppercase text-primary transition-colors hover:bg-primary/10"
+                          className="rounded-full border border-primary/50 px-2.5 py-1 uppercase text-primary transition-colors hover:bg-primary/10"
                         >
                           reinstate
                         </button>
@@ -443,7 +443,7 @@ export function ClientTable({ clients, selfId }: { clients: AdminClient[]; selfI
                             p_role: c.role === "admin" ? "user" : "admin",
                           })
                         }
-                        className="border border-border px-2 py-1 uppercase text-muted-foreground transition-colors hover:border-primary/60 hover:text-primary"
+                        className="rounded-full border border-border px-2.5 py-1 uppercase text-muted-foreground transition-colors hover:border-primary/60 hover:text-primary"
                       >
                         make {c.role === "admin" ? "user" : "admin"}
                       </button>

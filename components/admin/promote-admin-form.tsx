@@ -45,7 +45,7 @@ export function PromoteAdminForm() {
   }
 
   return (
-    <div className="terminal-panel p-6">
+    <div className="terminal-panel rounded-xl p-6 duration-500 animate-in fade-in slide-in-from-bottom-2 md:p-7">
       <p className="section-kicker">// add another admin</p>
       <p className="mt-2 font-sentient text-2xl text-card-foreground">
         Promote by email
@@ -62,7 +62,7 @@ export function PromoteAdminForm() {
           value={email}
           onChange={(event) => setEmail(event.target.value)}
           placeholder="colleague@example.com"
-          className="min-w-0 flex-1 border border-input bg-background px-3 py-2.5 font-mono text-sm text-foreground outline-none focus:border-ring"
+          className="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-2.5 font-mono text-sm text-foreground outline-none transition-colors focus:border-ring focus:ring-[3px] focus:ring-ring/50"
         />
         <Button type="submit" size="sm" disabled={busy} className="gap-2">
           {busy ? <Loader2 className="size-4 animate-spin" /> : <UserPlus className="size-4" />}

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2 } from "lucide-react";
+import { Loader2, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/client";
 import type { Node } from "@/lib/types";
@@ -12,35 +12,46 @@ import { mergePortalConfig } from "@/lib/node-config";
 // the agent understands: the long tail (theme, graph style, panel order) only
 // matters to someone sitting at the terminal, and putting fifty inputs here
 // would bury the handful that change behaviour people care about.
+//
+// `group` is presentational only -- it decides which sub-heading a field
+// renders under, nothing else. The three groups (thresholds / schedule /
+// update & display) are the natural clusters already implied by the field
+// order below; grouping them visually is the smallest fix for "twelve
+// identical boxes in a row" that doesn't touch what any field does.
+const GROUPS = ["Alert thresholds", "Alerting schedule", "Update & display"] as const;
+type Group = (typeof GROUPS)[number];
+
 const FIELDS: {
   key: string;
   label: string;
   hint: string;
   type: "number" | "text" | "time" | "select";
+  group: Group;
   choices?: { value: string; label: string }[];
 }[] = [
-  { key: "alert_mem_pct", label: "Memory alert %", hint: "0 disables this rule", type: "number" },
-  { key: "alert_disk_pct", label: "Disk alert %", hint: "per mount point", type: "number" },
-  { key: "alert_temp_c", label: "Temperature alert °C", hint: "0 disables", type: "number" },
-  { key: "alert_load_per_core", label: "Load alert, % per core", hint: "400 means load 4.0 per core", type: "number" },
-  { key: "alert_latency_ms", label: "Latency alert, ms", hint: "first-hop and internet", type: "number" },
+  { key: "alert_mem_pct", label: "Memory alert %", hint: "0 disables this rule", type: "number", group: "Alert thresholds" },
+  { key: "alert_disk_pct", label: "Disk alert %", hint: "per mount point", type: "number", group: "Alert thresholds" },
+  { key: "alert_temp_c", label: "Temperature alert °C", hint: "0 disables", type: "number", group: "Alert thresholds" },
+  { key: "alert_load_per_core", label: "Load alert, % per core", hint: "400 means load 4.0 per core", type: "number", group: "Alert thresholds" },
+  { key: "alert_latency_ms", label: "Latency alert, ms", hint: "first-hop and internet", type: "number", group: "Alert thresholds" },
   {
-    key: "alert_min_severity", label: "Minimum severity", hint: "minimum alert level sent", type: "select",
+    key: "alert_min_severity", label: "Minimum severity", hint: "minimum alert level sent", type: "select", group: "Alerting schedule",
     choices: [
       { value: "crit", label: "Critical only" },
       { value: "warn", label: "Warnings and critical" },
       { value: "info", label: "All events" },
     ],
   },
-  { key: "alert_repeat_hours", label: "Repeat interval, hours", hint: "how often a still-firing alert repeats", type: "number" },
-  { key: "report_at", label: "Daily report time", hint: "server local time, HH:MM", type: "time" },
-  { key: "notify_max_per_day", label: "Daily notification cap", hint: "backstop against a flapping rule", type: "number" },
-  { key: "cloud_push_min", label: "Telemetry interval, minutes", hint: "10 recommended; settings still sync every minute", type: "number" },
+  { key: "alert_repeat_hours", label: "Repeat interval, hours", hint: "how often a still-firing alert repeats", type: "number", group: "Alerting schedule" },
+  { key: "report_at", label: "Daily report time", hint: "server local time, HH:MM", type: "time", group: "Alerting schedule" },
+  { key: "notify_max_per_day", label: "Daily notification cap", hint: "backstop against a flapping rule", type: "number", group: "Alerting schedule" },
+  { key: "cloud_push_min", label: "Telemetry interval, minutes", hint: "10 recommended; settings still sync every minute", type: "number", group: "Alerting schedule" },
   {
     key: "auto_update",
     label: "CLI updates",
     hint: "applies on the next server check-in",
     type: "select",
+    group: "Update & display",
     choices: [
       { value: "check", label: "Notify before installing" },
       { value: "install", label: "Install automatically" },
@@ -52,6 +63,7 @@ const FIELDS: {
     label: "Terminal dashboard view",
     hint: "what opens on the server's own screen with no key pressed",
     type: "select",
+    group: "Update & display",
     choices: [
       { value: "dash", label: "Advanced (full dashboard)" },
       { value: "simple", label: "Simple (status, speed, temp only)" },
@@ -71,7 +83,7 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
 
   if (real.length === 0) {
     return (
-      <div className="terminal-panel p-6">
+      <div className="terminal-panel rounded-xl p-6 duration-500 animate-in fade-in slide-in-from-bottom-2 md:p-7">
         <p className="section-kicker">// server settings</p>
         <p className="mt-2 font-sentient text-2xl text-card-foreground">No servers linked</p>
         <p className="mt-3 font-mono text-xs leading-6 text-muted-foreground">
@@ -111,7 +123,7 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
   }
 
   return (
-    <div className="terminal-panel p-6">
+    <div className="terminal-panel rounded-xl p-6 duration-500 animate-in fade-in slide-in-from-bottom-2 md:p-7">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="section-kicker">// server settings</p>
@@ -133,7 +145,7 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
               setDraft({});
               setSaved(false);
             }}
-            className="border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none focus:border-ring"
+            className="rounded-md border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none transition-colors focus:border-ring focus:ring-[3px] focus:ring-ring/50"
           >
             {real.map((n) => (
               <option key={n.id} value={n.id}>
@@ -144,54 +156,59 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
         ) : null}
       </div>
 
-      <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {FIELDS.map((f) => (
-          <label key={f.key} className="block">
-            <span className="mb-1.5 block font-mono text-[0.65rem] uppercase text-muted-foreground">
-              {f.label}
-            </span>
-            {f.type === "select" ? (
-              <select
-                value={current(f.key)}
-                onChange={(event) => {
-                  setDraft({ ...draft, [f.key]: event.target.value });
-                  setSaved(false);
-                }}
-                className="w-full border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none focus:border-ring"
-              >
-                <option value="">Built-in default</option>
-                {f.choices?.map((choice) => (
-                  <option key={choice.value} value={choice.value}>{choice.label}</option>
-                ))}
-              </select>
-            ) : (
-              <input
-                type={f.type === "number" ? "number" : f.type === "time" ? "time" : "text"}
-                value={current(f.key)}
-                placeholder="default"
-                min={f.key === "cloud_push_min" ? 1 : f.type === "number" ? 0 : undefined}
-                max={f.key === "cloud_push_min" ? 1440 : undefined}
-                onChange={(event) => {
-                  setDraft({ ...draft, [f.key]: event.target.value });
-                  setSaved(false);
-                }}
-                className="w-full border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none focus:border-ring placeholder:text-muted-foreground/50"
-              />
-            )}
-            <span className="mt-1 block font-mono text-[0.6rem] leading-4 text-muted-foreground">
-              {f.hint}
-            </span>
-          </label>
-        ))}
-      </div>
+      {GROUPS.map((group, groupIndex) => (
+        <div key={group} className={groupIndex > 0 ? "mt-8 border-t border-border pt-6" : "mt-6"}>
+          <p className="font-mono text-[0.7rem] uppercase tracking-wide text-primary">{group}</p>
+          <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {FIELDS.filter((f) => f.group === group).map((f) => (
+              <label key={f.key} className="block">
+                <span className="mb-1.5 block font-mono text-[0.65rem] uppercase text-muted-foreground">
+                  {f.label}
+                </span>
+                {f.type === "select" ? (
+                  <select
+                    value={current(f.key)}
+                    onChange={(event) => {
+                      setDraft({ ...draft, [f.key]: event.target.value });
+                      setSaved(false);
+                    }}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none transition-colors focus:border-ring focus:ring-[3px] focus:ring-ring/50"
+                  >
+                    <option value="">Built-in default</option>
+                    {f.choices?.map((choice) => (
+                      <option key={choice.value} value={choice.value}>{choice.label}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type={f.type === "number" ? "number" : f.type === "time" ? "time" : "text"}
+                    value={current(f.key)}
+                    placeholder="default"
+                    min={f.key === "cloud_push_min" ? 1 : f.type === "number" ? 0 : undefined}
+                    max={f.key === "cloud_push_min" ? 1440 : undefined}
+                    onChange={(event) => {
+                      setDraft({ ...draft, [f.key]: event.target.value });
+                      setSaved(false);
+                    }}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none transition-colors focus:border-ring focus:ring-[3px] focus:ring-ring/50 placeholder:text-muted-foreground/50"
+                  />
+                )}
+                <span className="mt-1 block font-mono text-[0.6rem] leading-4 text-muted-foreground">
+                  {f.hint}
+                </span>
+              </label>
+            ))}
+          </div>
+        </div>
+      ))}
 
       {error ? (
-        <p role="alert" className="mt-4 font-mono text-xs text-destructive">
+        <p role="alert" className="mt-6 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 font-mono text-xs text-destructive">
           {error}
         </p>
       ) : null}
       {saved ? (
-        <p role="status" className="mt-4 font-mono text-xs text-primary">
+        <p role="status" className="mt-6 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 font-mono text-xs text-primary">
           Saved. {node?.name} will apply this on its next check-in
           {node?.last_config_pull_at
             ? ` (last pulled ${new Date(node.last_config_pull_at).toLocaleString()})`
@@ -207,7 +224,7 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
         disabled={busy || Object.keys(draft).length === 0}
         className="mt-6 gap-2"
       >
-        {busy ? <Loader2 className="size-4 animate-spin" /> : null}
+        {busy ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" aria-hidden />}
         Save settings
       </Button>
     </div>

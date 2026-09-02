@@ -24,7 +24,7 @@ export function AgentVersions({ nodes }: { nodes: AdminNode[] }) {
   )).length;
 
   return (
-    <div className="terminal-panel p-6">
+    <div className="terminal-panel rounded-xl p-6 duration-500 animate-in fade-in slide-in-from-bottom-2 md:p-7">
       <div className="flex flex-col gap-2 md:flex-row md:items-baseline md:justify-between">
         <div>
           <p className="section-kicker">// hyn cli</p>
@@ -36,7 +36,7 @@ export function AgentVersions({ nodes }: { nodes: AdminNode[] }) {
           latest reported release:{" "}
           <span className="text-card-foreground">hyn {newest ?? "unknown"}</span>
           {behind > 0 ? (
-            <span className="text-[#e8a400]">
+            <span className="text-[color:var(--chart-2)]">
               {" "}
               · {behind} machine{behind === 1 ? "" : "s"} behind
             </span>
@@ -46,7 +46,7 @@ export function AgentVersions({ nodes }: { nodes: AdminNode[] }) {
         </p>
       </div>
 
-      <ul className="mt-6 grid gap-px overflow-hidden border border-border bg-border sm:grid-cols-2 lg:grid-cols-4">
+      <ul className="mt-6 grid gap-px overflow-hidden rounded-lg border border-border bg-border sm:grid-cols-2 lg:grid-cols-4">
         {rows.map(([version, count]) => {
           const isNewest =
             version !== "unknown" && newest !== null && compareVersions(version, newest) === 0;
@@ -55,7 +55,7 @@ export function AgentVersions({ nodes }: { nodes: AdminNode[] }) {
               <p className="font-mono text-[0.6rem] uppercase tracking-wide text-muted-foreground">
                 {version === "unknown" ? "not reported" : `hyn ${version}`}
               </p>
-              <p className={`mt-2 font-sentient text-xl ${isNewest ? "text-primary" : "text-[#e8a400]"}`}>
+              <p className={`mt-2 font-sentient text-xl ${isNewest ? "text-primary" : "text-[color:var(--chart-2)]"}`}>
                 {count}
               </p>
               <p className="font-mono text-[0.6rem] text-muted-foreground">

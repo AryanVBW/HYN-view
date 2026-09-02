@@ -15,7 +15,7 @@ import type { AdminNode } from "@/lib/types";
 // administrative action that cannot be undone from the portal.
 export function DeleteNodeButton({
   node,
-  className = "flex items-center gap-1 border border-destructive/40 px-2 py-1 font-mono text-xs uppercase text-destructive transition-colors hover:bg-destructive/10",
+  className = "flex items-center gap-1 rounded-full border border-destructive/40 px-2 py-1 font-mono text-xs uppercase text-destructive transition-colors hover:bg-destructive/10 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none",
 }: {
   node: AdminNode;
   className?: string;

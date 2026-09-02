@@ -198,6 +198,18 @@ nav {
   z-index: 1;
 }
 
+/* Overrides `.particle-field ~ *` above for DashboardMagicRings specifically
+   -- see that component's own comment for the full explanation. It is
+   mounted as ParticleField's very next sibling on the dashboard/account/admin
+   pages, which the rule above would otherwise drop into normal document flow
+   (position: relative) instead of the fixed, viewport-centered box it is
+   meant to be. Declared after that rule, at the same single-class
+   specificity, so this is the one that wins. */
+.magic-rings-fixed {
+  position: fixed;
+  z-index: 1;
+}
+
 .dark .particle-field {
   opacity: 1;
 }

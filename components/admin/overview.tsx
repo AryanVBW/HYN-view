@@ -88,7 +88,7 @@ export function AnimatedAdminStats({ stats }: { stats: AdminStat[] }) {
               stat.tone === "bad"
                 ? "text-destructive"
                 : stat.tone === "warn"
-                  ? "text-[#e8a400]"
+                  ? "text-[color:var(--chart-2)]"
                   : "text-card-foreground"
             }`}
           >

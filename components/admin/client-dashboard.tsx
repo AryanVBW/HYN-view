@@ -31,7 +31,7 @@ export function AdminClientDashboard({
 }) {
   return (
     <div className="space-y-8">
-      <section className="terminal-panel overflow-hidden">
+      <section className="terminal-panel overflow-hidden rounded-xl duration-500 animate-in fade-in slide-in-from-bottom-2">
         <div className="border-b border-border p-6 md:flex md:items-end md:justify-between md:gap-6">
           <div>
             <Link
@@ -48,12 +48,12 @@ export function AdminClientDashboard({
               <p className="mt-2 font-mono text-xs text-muted-foreground">{client.email}</p>
             ) : null}
           </div>
-          <div className="mt-5 grid grid-cols-2 gap-px border border-border bg-border font-mono text-xs md:mt-0">
+          <div className="mt-5 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-border bg-border font-mono text-xs md:mt-0">
             <div className="flex items-center gap-2 bg-card px-4 py-3">
               <Server className="size-3.5 text-primary" aria-hidden />
               {client.nodes_active}/{client.nodes} active
               {client.nodes_unlinked > 0 ? (
-                <span className="text-[#e8a400]">· {client.nodes_unlinked} never linked</span>
+                <span className="text-[color:var(--chart-2)]">· {client.nodes_unlinked} never linked</span>
               ) : null}
             </div>
             <div className="flex items-center gap-2 bg-card px-4 py-3">
@@ -69,7 +69,7 @@ export function AdminClientDashboard({
               <Link
                 key={node.id}
                 href={`/admin?tab=client&client=${client.id}&node=${node.id}`}
-                className={`border px-3 py-2 font-mono text-xs transition-colors ${
+                className={`rounded-full border px-3 py-2 font-mono text-xs transition-colors ${
                   node.id === current?.id
                     ? "border-primary bg-primary/10 text-primary"
                     : "border-border text-muted-foreground hover:text-foreground"
@@ -102,7 +102,7 @@ export function AdminClientDashboard({
                 {current.hostname ?? "unknown host"} · last push {formatRelative(current.last_seen_at)}
               </p>
               {neverLinked(current) ? (
-                <p className="font-mono text-xs text-[#e8a400]">
+                <p className="font-mono text-xs text-[color:var(--chart-2)]">
                   never linked · approved {formatRelative(current.created_at)}, the agent never
                   checked in
                 </p>
@@ -134,7 +134,7 @@ export function AdminClientDashboard({
               <ProcessesPanel latest={metrics[metrics.length - 1]} />
             </>
           ) : (
-            <div className="terminal-panel p-8 font-mono text-xs leading-6 text-muted-foreground">
+            <div className="terminal-panel rounded-xl p-8 font-mono text-xs leading-6 text-muted-foreground">
               No telemetry has arrived for this machine in the last 24 hours.
             </div>
           )}

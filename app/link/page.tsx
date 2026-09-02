@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { Logo } from "@/components/logo";
 import { LinkForm } from "@/components/link-form";
 import { ParticleField } from "@/components/particle-field";
+import { DashboardMagicRings } from "@/components/dashboard-magic-rings";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
 
@@ -17,6 +18,7 @@ export default async function LinkPage() {
     return (
       <div className="flex min-h-svh flex-col items-center justify-center px-4 py-16">
         <ParticleField blur="soft" />
+        <DashboardMagicRings />
         <div className="terminal-panel w-full max-w-md p-8">
           <p className="section-kicker">// link a server</p>
           <h1 className="mt-2 font-sentient text-2xl text-card-foreground">
@@ -46,6 +48,7 @@ export default async function LinkPage() {
   return (
     <div className="flex min-h-svh flex-col items-center justify-center px-4 py-16">
       <ParticleField blur="soft" />
+      <DashboardMagicRings />
       <Link href="/" className="mb-10">
         <Logo className="w-[120px]" />
       </Link>

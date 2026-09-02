@@ -3,6 +3,7 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { ParticleField } from "@/components/particle-field";
+import { DashboardMagicRings } from "@/components/dashboard-magic-rings";
 import { StatCards, ThroughputCard } from "@/components/dashboard/stat-cards";
 import { HighwayPanel } from "@/components/dashboard/highway-panel";
 import { SimpleDashboard } from "@/components/dashboard/simple-dashboard";
@@ -378,6 +379,7 @@ function Shell({
     <div className="min-h-screen bg-background">
       {email ? <LiveRefresh /> : null}
       <ParticleField blur="subtle" />
+      <DashboardMagicRings />
       <main className="container pt-32 pb-10 md:pt-44">
         {nodes && nodes.length > 1 ? (
           <nav className="mb-8 flex flex-wrap gap-2" aria-label="Linked nodes">
