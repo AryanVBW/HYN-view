@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "// packageManager": "Pinned because the builder picks a pnpm major on its own -- `Using pnpm@11.x based on project creation date` -- so an unchanged lockfile that deployed cleanly one day failed the next, and pnpm 11 ignored the build-script classification that pnpm 10 honours. This is the version the tests and local build run on.",
+  "packageManager": "pnpm@10.33.0",
   "author": "NEXUSV TECHNOLOGIES PRIVATE LIMITED <vivek.aryanvbw@gmail.com>",
   "license": "MIT",
   "scripts": {
