@@ -906,17 +906,28 @@ begin
 end $$;
 
 do $$
-declare n integer;
+declare n integer; pref public.email_preferences;
 begin
   select count(*) into n from public.email_preferences;
   if n <> 1 then raise exception 'pairing should create one default email schedule, saw %', n; end if;
+  -- Incident mail is opt-in; the two digests are not. A machine that pairs itself
+  -- must not start mailing an account that never asked to be mailed -- and this is
+  -- the assertion, because the flood that prompted it (4501 failed attempts in a
+  -- day) came from a column default, not from anybody's choice.
+  select * into pref from public.email_preferences;
+  if pref.incident_enabled then
+    raise exception 'a newly paired machine defaults to sending incident alert email';
+  end if;
+  if not pref.daily_enabled or not pref.system_enabled then
+    raise exception 'the daily digests lost their default with the incident change';
+  end if;
   update public.email_preferences set timezone = 'Asia/Kolkata', daily_at = '08:30';
   if not found then raise exception 'the node owner could not update their email schedule'; end if;
   set local "test.uid" = '22222222-2222-2222-2222-222222222222';
   select count(*) into n from public.email_preferences;
   if n <> 0 then raise exception 'another client can read Alice''s email schedule'; end if;
   set local "test.uid" = '11111111-1111-1111-1111-111111111111';
-  raise notice 'PASS  cloud email timing is defaulted and tenant-private';
+  raise notice 'PASS  cloud email timing is defaulted and tenant-private, and incident mail is opt-in';
 end $$;
 
 set local role anon;
@@ -1276,6 +1287,7 @@ begin
     'select public.hyn_admin_audit(10)',
     'select public.hyn_admin_templates()',
     'select public.hyn_admin_save_template(''alert'', ''{{content}}'')',
+    'select public.hyn_admin_clear_notifications(null::timestamptz, ''mischief'')',
     'select public.hyn_admin_set_node_config(''' || (select v from t where k = 'node_id') || '''::uuid, ''{"dashboard_view":"simple"}''::jsonb)'
   ] loop
     ok := false;
@@ -2104,6 +2116,55 @@ begin
     raise exception 'an active machine refused an administrator update: %', r;
   end if;
   raise notice 'PASS  the admin command RPC refuses for the same stated reasons, and works otherwise';
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 18. an administrator clears the delivery log
+-- ---------------------------------------------------------------------------
+-- notification_log is the one table nothing prunes, so the admin panel grew a
+-- control for it. Two things are worth asserting: the cutoff is honoured, because
+-- a purge that quietly took this morning's failures with it would be the same
+-- accident every time; and the count reaches the audit trail, which after the
+-- delete is the only record that the delete happened.
+do $$
+declare v_node uuid; r json; n integer;
+begin
+  v_node := (select v from t where k = 'cmd_node')::uuid;
+  set local role postgres;
+  delete from public.notification_log;
+  insert into public.notification_log (node_id, owner, ts, kind, target, status, category)
+  values (v_node, '11111111-1111-1111-1111-111111111111', now() - interval '40 days',
+          'resend-cloud', 'alice@example.com', 'failed', 'alert'),
+         (v_node, '11111111-1111-1111-1111-111111111111', now() - interval '1 hour',
+          'resend-cloud', 'alice@example.com', 'sent', 'report');
+
+  set local role authenticated;
+  perform set_config('test.uid', '33333333-3333-3333-3333-333333333333', true);
+  r := public.hyn_admin_clear_notifications(now() - interval '30 days', 'routine cleanup');
+  if (r->>'deleted')::int <> 1 then
+    raise exception 'the retention cutoff was ignored: %', r;
+  end if;
+
+  set local role postgres;
+  select count(*) into n from public.notification_log;
+  if n <> 1 then
+    raise exception 'a delivery record inside the retention window was cleared';
+  end if;
+  select count(*) into n from public.admin_audit
+   where action = 'notification_log.clear' and (detail->>'deleted')::int = 1
+     and detail->>'reason' = 'routine cleanup';
+  if n <> 1 then raise exception 'clearing the log was not attributed in the audit trail'; end if;
+
+  set local role authenticated;
+  r := public.hyn_admin_clear_notifications(null, 'start again');
+  if (r->>'deleted')::int <> 1 then
+    raise exception 'a null cutoff did not clear everything: %', r;
+  end if;
+  set local role postgres;
+  select count(*) into n from public.notification_log;
+  if n <> 0 then raise exception '% delivery records survived a full clear', n; end if;
+  set local role authenticated;
+  raise notice 'PASS  an admin clears the delivery log, honours the cutoff, and is audited for it';
 end $$;
 
 rollback;

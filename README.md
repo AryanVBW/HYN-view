@@ -232,9 +232,20 @@ than waiting up to `cloud_push_min` — someone who edits a threshold and watche
 page would otherwise reasonably conclude it had not worked.
 
 `/account` shows node settings and every delivery attempt with the reason any
-failed. Thresholds, CLI update policy and push interval are edited per server.
+failed. **Clear on that panel hides the history from your own view and deletes
+nothing** — the rows stay in the database for the 30-day counters above it and for
+the administrator's fleet-wide log, anything sent afterwards appears as usual, and
+*show all again* brings the rest back. The cutoff is a cookie, so it is a
+per-browser preference rather than a change to anyone's data; clearing for real is
+an administrator action. Thresholds, CLI update policy and push interval are
+edited per server.
 The Email automation section controls immediate incident alerts, the daily
-health digest and the daily system-information message. No customer configures a
+health digest and the daily system-information message. **Incident alerts are off
+until you turn them on**, and the two digests are not: a machine that pairs itself
+should not start mailing an account that never asked to be mailed, and a default
+nobody chose is the one that ends up failing thousands of times a day and being
+ignored. The same switch gates the portal's outage email — see "Detecting a dead
+server". No customer configures a
 provider credential: the portal uses one deployment-level email key for every
 account, and the monitored machine holds none.
 
@@ -296,6 +307,14 @@ gone quiet, open alerts, notification volume and failures per client, the
 fleet-wide delivery log, and an audit trail. Client and machine rows open an
 embedded per-client dashboard, so an administrator can inspect that client's
 live stat cards and telemetry charts without leaving the control panel.
+
+**The delivery log can be cleared, and defaults to a purge rather than a wipe.**
+It is the one table nothing prunes, so a fleet that has been mailing for a year
+reads as a wall of long-resolved failures — which is what stops it being read.
+The control offers older than 30 days, older than 7 days, or everything, and the
+first is preselected: clearing months of settled history is routine, deleting
+this morning's failures is not. It is fleet-wide and irreversible, so the audit
+trail records who cleared it, with what cutoff, and how many rows went.
 
 | Control | Effect |
 | --- | --- |
@@ -444,8 +463,11 @@ tool claiming otherwise from inside the machine is lying to you.
 So the check that matters is made from outside it, and the portal makes it. Pairing
 starts a watchdog for that node. `hyn-agent.service` beats every 24 seconds; after
 three minutes of silence — seven missed beats — the owner gets a `[HYN CRIT]`
-email, and another when the beats resume. Nothing to configure and nothing to
-install.
+email, and another when the beats resume. Nothing to install and nothing to
+configure but the one switch: the outage email goes out through **Incident
+alerts** on `/account`, which is off until you turn it on. The watchdog itself
+runs regardless, so the portal always knows a machine has gone quiet and shows it;
+the switch decides whether you are emailed about it.
 
 Seven missed beats rather than three is deliberate. The threshold is what makes
 the difference between "reports an outage" and "cries wolf": at a one-minute
