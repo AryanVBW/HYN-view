@@ -23,11 +23,13 @@ export function AdminClientDashboard({
   nodes,
   current,
   metrics,
+  relayers,
 }: {
   client: AdminClient;
   nodes: AdminNode[];
   current: AdminNode | null;
   metrics: Metric[];
+  relayers?: React.ReactNode;
 }) {
   return (
     <div className="space-y-8">
@@ -89,6 +91,8 @@ export function AdminClientDashboard({
       </section>
 
       <AdminClientActions client={client} nodes={nodes} current={current} />
+
+      {relayers}
 
       {current ? (
         <>

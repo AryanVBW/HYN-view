@@ -1,0 +1,118 @@
+.relayer-management {
+  display: grid;
+  gap: 32px;
+}
+.relayer-assignment-panel {
+  padding: 26px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--card);
+}
+.relayer-assignment-panel .relayer-section-title {
+  margin-bottom: 14px;
+  color: var(--primary);
+}
+.relayer-assignment-panel h3 {
+  color: var(--foreground);
+  font-size: 17px;
+}
+.relayer-assignment-panel > p {
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--muted-foreground);
+  max-width: 85ch;
+}
+.relayer-assignment-panel > p strong {
+  color: var(--foreground);
+  font-weight: 500;
+}
+.relayer-assign-controls {
+  display: flex;
+  gap: 12px;
+  margin-top: 22px;
+}
+.relayer-assign-controls > label {
+  flex: 1;
+}
+.relayer-search-status,
+.relayer-selection {
+  margin-top: 12px;
+}
+.relayer-search-results {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.relayer-search-results > button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px;
+  gap: 15px;
+  text-align: left;
+  width: 100%;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.relayer-search-results > button:last-child {
+  border-bottom: 0;
+}
+.relayer-search-results > button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--primary) 8%, var(--card));
+  color: var(--primary);
+}
+.relayer-search-results > button > div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.relayer-search-results strong {
+  font-weight: 500;
+}
+.relayer-search-results span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.relayer-assigned-list {
+  margin-top: 20px;
+}
+.relayer-assigned-list > div {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+.relayer-assigned-list > div > span {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.relayer-assigned-list strong {
+  font-size: 13px;
+  font-weight: 500;
+}
+.relayer-assigned-list small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.relayer-assignment-message {
+  margin-top: 8px;
+}
+@media (max-width: 640px) {
+  .relayer-assignment-panel {
+    padding: 20px;
+  }
+  .relayer-assign-controls {
+    flex-direction: column;
+  }
+  .relayer-assigned-list > div {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+}

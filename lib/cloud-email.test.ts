@@ -194,7 +194,7 @@ test("first system email summarizes network, speed, hardware, temperature and Hi
 });
 
 test("managed email delivery sends the exact lifecycle message through Resend", async () => {
-  let request: { url: string; init?: RequestInit } | null = null;
+  const requests: { url: string; init?: RequestInit }[] = [];
   const result = await sendResendEmail({
     apiKey: "re_test",
     from: "HYN-view <reports@example.com>",
@@ -203,7 +203,7 @@ test("managed email delivery sends the exact lifecycle message through Resend", 
     html: "<h1>Welcome</h1>",
     idempotencyKey: "email:test:123",
     fetchImpl: async (url, init) => {
-      request = { url: String(url), init };
+      requests.push({ url: String(url), init });
       return new Response(JSON.stringify({ id: "email_123" }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -212,6 +212,8 @@ test("managed email delivery sends the exact lifecycle message through Resend", 
   });
 
   assert.deepEqual(result, { ok: true, providerId: "email_123" });
+  const request = requests[0];
+  assert.ok(request, "The delivery must make an HTTP request");
   assert.equal(request?.url, "https://api.resend.com/emails");
   assert.deepEqual(JSON.parse(String(request?.init?.body)), {
     from: "HYN-view <reports@example.com>",

@@ -5,6 +5,8 @@ import { AlertTriangle, Mail, ShieldAlert, ShieldCheck } from "lucide-react";
 import { AdminTabs, type AdminTabId } from "@/components/admin/admin-tabs";
 import { AgentVersions } from "@/components/admin/agent-versions";
 import { AdminClientDashboard } from "@/components/admin/client-dashboard";
+import { RelayerManager } from "@/components/admin/relayer-manager";
+import type { RelayerAssignment } from "@/lib/relayer";
 import { ClearDeliveryLogButton } from "@/components/admin/clear-delivery-log-button";
 import { EmailTemplateManager } from "@/components/admin/email-template-manager";
 import {
@@ -198,6 +200,8 @@ export default async function AdminPage({
   ];
 
   const selectedClient = clients.find((client) => client.id === query.client) ?? null;
+  const assignmentResult = selectedClient ? await supabase.from("relayer_assignments")
+    .select("id,owner,relayer_id,relayer_name,created_at").eq("owner", selectedClient.id).order("created_at") : null;
   const selectedNodes = selectedClient
     ? nodes.filter((node) => node.owner_id === selectedClient.id)
     : [];
@@ -392,6 +396,10 @@ export default async function AdminPage({
                 nodes={selectedNodes}
                 current={selectedNode}
                 metrics={selectedMetrics}
+                relayers={<RelayerManager key={selectedClient.id} ownerId={selectedClient.id}
+                  ownerName={selectedClient.full_name || selectedClient.email || "this client"}
+                  assignments={(assignmentResult?.data ?? []) as RelayerAssignment[]}
+                  error={assignmentResult?.error ? "Apply the relayer database migration to enable assignments." : null} />}
               />
             ) : undefined
           }

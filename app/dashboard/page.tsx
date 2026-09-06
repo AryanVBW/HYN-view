@@ -6,6 +6,7 @@ import { ParticleField } from "@/components/particle-field";
 import { DashboardMagicRings } from "@/components/dashboard-magic-rings";
 import { StatCards, ThroughputCard } from "@/components/dashboard/stat-cards";
 import { HighwayPanel } from "@/components/dashboard/highway-panel";
+import { RelayerDashboard } from "@/components/dashboard/relayer-dashboard";
 import { SimpleDashboard } from "@/components/dashboard/simple-dashboard";
 import { CpuUsageChart } from "@/components/dashboard/cpu-usage-chart";
 import { TemperatureChart } from "@/components/dashboard/temperature-chart";
@@ -114,6 +115,7 @@ export default async function DashboardPage({
   if (nodes.length === 0) {
     return (
       <Shell email={auth.user.email}>
+        <div className="mb-12"><RelayerDashboard key={auth.user.id} /></div>
         <NoNodesState />
       </Shell>
     );
@@ -151,6 +153,7 @@ export default async function DashboardPage({
   if (metrics.length === 0) {
     return (
       <Shell email={auth.user.email} nodes={nodes} current={node}>
+        <div className="mb-12"><RelayerDashboard key={auth.user.id} /></div>
         <AwaitingFirstPushState nodeName={node.name} />
       </Shell>
     );
@@ -188,6 +191,7 @@ export default async function DashboardPage({
   return (
     <Shell email={auth.user.email} nodes={nodes} current={node}>
       <div className="space-y-12">
+        <RelayerDashboard key={auth.user.id} />
         <div className="flex flex-col gap-4 border-b border-border pb-8 md:flex-row md:items-end md:justify-between">
           <div>
             <p className="section-kicker">// live dashboard</p>
