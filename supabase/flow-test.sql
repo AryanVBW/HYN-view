@@ -2168,3 +2168,6 @@ begin
 end $$;
 
 rollback;
+
+-- Relayer assignment isolation and administrative permissions.
+\ir relayer-test.sql
