@@ -2,7 +2,6 @@
   "name": "my-v0-project",
   "version": "0.1.0",
   "private": true,
-  "packageManager": "pnpm@12.3.4",
   "author": "NEXUSV TECHNOLOGIES PRIVATE LIMITED <vivek.aryanvbw@gmail.com>",
   "license": "MIT",
   "scripts": {
