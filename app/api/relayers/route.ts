@@ -23,7 +23,7 @@ export async function GET(request: Request) {
   const requestedOwner = new URL(request.url).searchParams.get("owner");
   const owner = requestedOwner ?? auth.user.id;
   if (owner !== auth.user.id) {
-    const { data: admin, error } = await supabase.rpc("hyn_is_admin");
+    const { data: admin, error } = await supabase.rpc("hyn_can_view_dashboard", { p_owner: owner });
     if (error || admin !== true)
       return fail("You cannot view another account's relayers.", 403);
   }
@@ -39,11 +39,21 @@ export async function GET(request: Request) {
       "Relayer assignments could not be loaded. Ask an administrator to apply the relayer database migration.",
       503,
     );
-  return NextResponse.json(
-    await readAssignedRelayers(
+  const dashboard = await readAssignedRelayers(
       (data ?? []) as RelayerAssignment[],
       Number(new URL(request.url).searchParams.get("relayer")),
-    ),
-    { headers },
   );
+  if (!requestedOwner) {
+    const [requests,admin,monitor] = await Promise.all([
+      supabase.from("relayer_requests").select("id,relayer_id,relayer_name,status,created_at")
+        .eq("owner",owner).in("status",["pending","rejected"]).order("created_at",{ascending:false}).limit(50),
+      supabase.rpc("hyn_is_super_admin"),
+      supabase.rpc("hyn_can_monitor"),
+    ]);
+    dashboard.canRequest = monitor.data === true;
+    dashboard.requests = requests.data ?? [];
+    dashboard.requestsError = requests.error ? "Relayer requests are not available yet. Ask an administrator to finish portal setup." : null;
+    dashboard.manageHref = admin.data === true ? `/admin?tab=client&client=${owner}` : null;
+  }
+  return NextResponse.json(dashboard,{headers});
 }

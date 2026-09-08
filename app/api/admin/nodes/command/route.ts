@@ -67,7 +67,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ message: "the command request returned an invalid response" }, { status: 502 });
   }
   let workflowRunId: string | null = null;
-  if (commandKind === "update" && raw?.created === true) {
+  if (process.env.HYN_ENABLE_WORKFLOW_WATCHDOG === "true" && commandKind === "update" && raw?.created === true) {
     try {
       const run = await start(monitorNodeUpdate, [command.id]);
       workflowRunId = run.runId;

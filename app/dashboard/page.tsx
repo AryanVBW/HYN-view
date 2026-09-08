@@ -1,3 +1,5 @@
+import { DashboardContext } from "@/components/dashboard/dashboard-context";
+import { permissions, type DashboardAccount } from "@/lib/permissions";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { cookies } from "next/headers";
@@ -42,6 +44,7 @@ import {
 } from "@/lib/dashboard-data";
 import { heartbeatState } from "@/lib/heartbeat";
 import { commandBlockedReason, readAgentRelease } from "@/lib/node-command";
+import { readTransientSnapshot, snapshotMetric } from "@/lib/transient-snapshot";
 
 export const metadata: Metadata = {
   title: "Dashboard / HYN-view",
@@ -55,7 +58,7 @@ export const dynamic = "force-dynamic";
 export default async function DashboardPage({
   searchParams,
 }: {
-  searchParams: Promise<{ node?: string }>;
+  searchParams: Promise<{ node?: string; owner?: string }>;
 }) {
   if (!isSupabaseConfigured) {
     return (
@@ -80,12 +83,28 @@ export default async function DashboardPage({
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) redirect("/signin?next=%2Fdashboard");
 
-  const { node: requestedNode } = await searchParams;
+  const { node: requestedNode, owner: requestedOwner } = await searchParams;
+  const [profileResult, accountsResult] = await Promise.all([
+    supabase.from("profiles").select("role,status").eq("id", auth.user.id).maybeSingle(),
+    supabase.rpc("hyn_dashboard_accounts"),
+  ]);
+  if (profileResult.error || accountsResult.error || profileResult.data?.status !== "active") {
+    return <Shell email={auth.user.email}><div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">Dashboard access unavailable</h1><p className="mt-4 font-mono text-sm leading-7">{profileResult.data?.status === "suspended" ? "Your account is suspended. Contact a Super admin." : "Ask a Super admin to finish the portal roles setup, then refresh this page."}</p></div></Shell>;
+  }
+  const accounts = (accountsResult.data ?? []) as DashboardAccount[];
+  const owner = requestedOwner ?? auth.user.id;
+  if (!accounts.some(account => account.id === owner)) {
+    return <Shell email={auth.user.email}><div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">This dashboard has not been shared with you</h1><Link href="/dashboard" className="mt-4 inline-block text-primary underline">Return to your dashboards</Link></div></Shell>;
+  }
+  const access = permissions(profileResult.data.role);
+  const context = { role: profileResult.data.role, accounts, owner };
+  const relayerOwner = owner === auth.user.id ? undefined : owner;
 
   // Real nodes first, demo last, so a paired machine is what you land on.
   const { data: nodeRows, error: nodesError } = await supabase
     .from("nodes")
     .select(NODE_COLUMNS)
+    .eq("owner", owner)
     .eq("revoked", false)
     .order("is_demo", { ascending: true })
     .order("created_at", { ascending: true });
@@ -114,31 +133,33 @@ export default async function DashboardPage({
 
   if (nodes.length === 0) {
     return (
-      <Shell email={auth.user.email}>
-        <div className="mb-12"><RelayerDashboard key={auth.user.id} /></div>
-        <NoNodesState />
+      <Shell email={auth.user.email} context={context}>
+        <div className="mb-12"><RelayerDashboard key={owner} ownerId={relayerOwner} /></div>
+        {access.canWrite && owner === auth.user.id ? <NoNodesState /> : <div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">No machines on this dashboard</h1><p className="mt-3 font-mono text-sm leading-7 text-muted-foreground">A Super admin can link a machine or share another dashboard with you. Assigned relayers appear above independently of linked machines.</p></div>}
       </Shell>
     );
   }
 
   const node = nodes.find((n) => n.id === requestedNode) ?? nodes[0];
+  const localMode = node.telemetry_mode === "local";
+  const transient = localMode && node.status === "active" ? readTransientSnapshot(node.id) : null;
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
   const [metricsRes, speedRes, alertRes] = await Promise.all([
-    supabase
+    localMode ? Promise.resolve({ data: [] }) : supabase
       .from("metrics")
       .select("*")
       .eq("node_id", node.id)
       .gte("ts", since)
       .order("ts", { ascending: true })
       .limit(600),
-    supabase
+    localMode ? Promise.resolve({ data: [] }) : supabase
       .from("speedtests")
       .select("*")
       .eq("node_id", node.id)
       .order("ts", { ascending: false })
       .limit(14),
-    supabase
+    localMode ? Promise.resolve({ data: [] }) : supabase
       .from("alert_events")
       .select("*")
       .eq("node_id", node.id)
@@ -147,14 +168,23 @@ export default async function DashboardPage({
   ]);
 
   const metrics = (metricsRes.data ?? []) as Metric[];
+  if (transient) metrics.push(snapshotMetric(node.id, transient));
   const speedtests = (speedRes.data ?? []) as Speedtest[];
   const alerts = (alertRes.data ?? []) as AlertEvent[];
 
   if (metrics.length === 0) {
     return (
-      <Shell email={auth.user.email} nodes={nodes} current={node}>
-        <div className="mb-12"><RelayerDashboard key={auth.user.id} /></div>
-        <AwaitingFirstPushState nodeName={node.name} />
+      <Shell email={auth.user.email} nodes={nodes} current={node} context={context}>
+        <div className="mb-12"><RelayerDashboard key={owner} ownerId={relayerOwner} /></div>
+        {localMode ? (
+          <div className="space-y-6">
+            <LiveRefresh />
+            <p className="font-mono text-sm text-muted-foreground">History stays on {node.name}. Request a reading to view it for five minutes. A sleeping or restarting portal may need another request.</p>
+            <AgentUpdateControl canSync={access.canSync} canWrite={access.canWrite} nodeId={node.id} nodeName={node.name} currentVersion={node.agent_version}
+              release={{ latest: null, available: false, checkedAt: null }}
+              automatic={node.config?.auto_update !== "off"} blocked={commandBlockedReason(node)} />
+          </div>
+        ) : <AwaitingFirstPushState nodeName={node.name} />}
       </Shell>
     );
   }
@@ -189,9 +219,9 @@ export default async function DashboardPage({
     viewOverride === "simple" || viewOverride === "dash" ? viewOverride : dbDefaultView;
 
   return (
-    <Shell email={auth.user.email} nodes={nodes} current={node}>
+    <Shell email={auth.user.email} nodes={nodes} current={node} context={context}>
       <div className="space-y-12">
-        <RelayerDashboard key={auth.user.id} />
+        <RelayerDashboard key={owner} ownerId={relayerOwner} />
         <div className="flex flex-col gap-4 border-b border-border pb-8 md:flex-row md:items-end md:justify-between">
           <div>
             <p className="section-kicker">// live dashboard</p>
@@ -203,7 +233,7 @@ export default async function DashboardPage({
               <span className="text-card-foreground">
                 hyn {node.agent_version ?? "version unknown"}
               </span>{" "}
-              · last push {formatRelative(node.last_seen_at)} · {metrics.length} samples in
+              · {localMode ? "temporary reading" : "last push"} {formatRelative(localMode ? latest.ts : node.last_seen_at)} · {metrics.length} samples in
               the last 24h
             </p>
           </div>
@@ -223,7 +253,7 @@ export default async function DashboardPage({
             ) : (
               <HeartbeatIndicator heartbeatAt={durableHeartbeat} quietAfterSeconds={quietAfterSeconds} />
             )}
-            {node.is_demo ? <DemoDataButton mode="clear" /> : null}
+            {node.is_demo && access.canWrite && owner === auth.user.id ? <DemoDataButton mode="clear" /> : null}
           </div>
         </div>
 
@@ -340,7 +370,7 @@ export default async function DashboardPage({
             then "here is what you can do about it" -- rather than offering a
             button before the reader knows whether they need it. */}
         {!node.is_demo ? (
-          <AgentUpdateControl
+          <AgentUpdateControl canSync={access.canSync} canWrite={access.canWrite}
             nodeId={node.id}
             nodeName={node.name}
             currentVersion={node.agent_version}
@@ -373,11 +403,13 @@ function Shell({
   email,
   nodes,
   current,
+  context,
 }: {
   children: React.ReactNode;
   email?: string | null;
   nodes?: Node[];
   current?: Node;
+  context?: { role: unknown; accounts: DashboardAccount[]; owner: string };
 }) {
   return (
     <div className="min-h-screen bg-background">
@@ -385,12 +417,13 @@ function Shell({
       <ParticleField blur="subtle" />
       <DashboardMagicRings />
       <main className="container pt-32 pb-10 md:pt-44">
+        {context ? <DashboardContext {...context} /> : null}
         {nodes && nodes.length > 1 ? (
           <nav className="mb-8 flex flex-wrap gap-2" aria-label="Linked nodes">
             {nodes.map((n) => (
               <Link
                 key={n.id}
-                href={`/dashboard?node=${n.id}`}
+                href={`/dashboard?node=${n.id}${context ? `&owner=${context.owner}` : ""}`}
                 className={`border px-3 py-1.5 font-mono text-xs transition-colors ${
                   n.id === current?.id
                     ? "border-primary text-primary"
@@ -415,9 +448,7 @@ function Shell({
           <Link href="/legal" className="hover:text-foreground">Disclaimer</Link>
         </span>
         <span className="flex flex-wrap items-center gap-4">
-          <Link href="/link" className="hover:text-foreground">
-            Link another server
-          </Link>
+          {permissions(context?.role).canWrite ? <Link href="/link" className="hover:text-foreground">Link another server</Link> : null}
           {email ? (
             <>
               <span>{email}</span>

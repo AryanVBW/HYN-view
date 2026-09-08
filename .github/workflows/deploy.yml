@@ -1,4 +1,4 @@
-name: Deploy to Vercel
+name: Deploy to Heroku
 
 on:
   push:
@@ -11,20 +11,32 @@ jobs:
     environment: production
     permissions:
       contents: read
-    env:
-      VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
-      VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+    concurrency:
+      group: heroku-production
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Vercel CLI
-        run: npm install --global vercel@latest
-
-      - name: Pull Vercel environment
-        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
-
-      - name: Build
-        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
-
-      - name: Deploy
-        run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
+        with:
+          fetch-depth: 0
+      - name: Push source to Heroku Node buildpack
+        env:
+          HEROKU_APP_NAME: ${{ vars.HEROKU_APP_NAME }}
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+          GIT_TERMINAL_PROMPT: '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$HEROKU_APP_NAME" =~ ^[a-z][a-z0-9-]+$ ]] || { echo 'Set the HEROKU_APP_NAME repository variable'; exit 1; }
+          [[ -n "$HEROKU_API_KEY" ]] || { echo 'Set the HEROKU_API_KEY repository secret'; exit 1; }
+          credential_script=$(mktemp)
+          trap 'rm -f "$credential_script"' EXIT
+          cat > "$credential_script" <<'SCRIPT'
+          #!/usr/bin/env bash
+          case "$1" in
+            *Username*) printf '%s\n' heroku ;;
+            *Password*) printf '%s\n' "$HEROKU_API_KEY" ;;
+            *) exit 1 ;;
+          esac
+          SCRIPT
+          chmod 700 "$credential_script"
+          git -c credential.helper= -c core.askPass="$credential_script" push "https://git.heroku.com/${HEROKU_APP_NAME}.git" HEAD:main

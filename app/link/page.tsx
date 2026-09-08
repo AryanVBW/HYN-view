@@ -38,12 +38,14 @@ export default async function LinkPage() {
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) redirect("/signin?next=%2Flink");
 
+  const { data: canWrite } = await supabase.rpc("hyn_is_super_admin");
+
   // Count only to show a "you already have N nodes" hint. RLS scopes this to
   // the signed-in user.
   const { count } = await supabase
     .from("nodes")
     .select("id", { count: "exact", head: true })
-    .eq("is_demo", false);
+    .eq("is_demo", false).eq("owner", auth.user.id);
 
   return (
     <div className="flex min-h-svh flex-col items-center justify-center px-4 py-16">
@@ -62,7 +64,7 @@ export default async function LinkPage() {
           signed in as {auth.user.email}
         </p>
 
-        <LinkForm nodeCount={count ?? 0} />
+        {canWrite === true ? <LinkForm nodeCount={count ?? 0} /> : <p className="mt-6 font-mono text-sm leading-7 text-muted-foreground">A Super admin can link servers. Ask them to set up a machine and share its dashboard with your account. <Link href="/dashboard" className="text-primary underline">View dashboards</Link></p>}
       </div>
     </div>
   );

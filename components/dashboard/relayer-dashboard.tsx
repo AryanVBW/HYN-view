@@ -25,6 +25,7 @@ import {
   type RelayerReading,
 } from "@/lib/relayer";
 import "./relayer.css";
+import { RelayerRequestForm } from "./relayer-request-form";
 
 const number = (value: string | number | null | undefined) => {
   if (value === null || value === undefined) return "—";
@@ -98,6 +99,7 @@ export function RelayerDashboard({
       } catch (error) {
         if (alive)
           setData((previous) => ({
+            ...previous,
             readings: (previous?.readings ?? []).map((r) => ({
               ...r,
               error: "Refresh failed. These are the last received readings.",
@@ -182,10 +184,16 @@ export function RelayerDashboard({
           <Radio size={26} aria-hidden />
           <h3>No relayer assigned yet</h3>
           <p>
-            An administrator can connect your Highway username or relayer ID to
-            this account. Your service details will appear here automatically.
+            {ownerId || !data?.canRequest ? "A Super admin can assign a Highway relayer to this dashboard."
+              : "Request your relayer below. Once an administrator approves it, your service details will appear here automatically."}
           </p>
         </div>
+      ) : null}
+      {data && data.canRequest && !ownerId && !data.error ? (
+        <details className="relayer-request-details" open={!readings.length || !!data.requests?.some(r=>r.status === "pending")}>
+          <summary>{readings.length ? "Connect another relayer / requests" : "Request a relayer"}</summary>
+          <RelayerRequestForm requests={data.requests ?? []} error={data.requestsError ?? null} manageHref={data.manageHref} onChanged={refresh} />
+        </details>
       ) : null}
       {readings.length > 1 ? (
         <div className="relayer-picker">

@@ -33,7 +33,7 @@ function formatSavedAt(value: string): string {
   }).format(new Date(value))} UTC`;
 }
 
-export function EmailTemplateManager({ templates }: { templates: NotificationTemplate[] }) {
+export function EmailTemplateManager({ templates, canWrite = false }: { templates: NotificationTemplate[]; canWrite?: boolean }) {
   const [activeKey, setActiveKey] = useState<NotificationTemplate["template_key"]>(
     templates[0]?.template_key ?? "alert"
   );
@@ -128,7 +128,7 @@ export function EmailTemplateManager({ templates }: { templates: NotificationTem
 
           <div className="mt-5">
             {view === "code" ? (
-              <textarea
+              <textarea readOnly={!canWrite}
                 aria-label={`${active?.name ?? activeKey} HTML`}
                 value={draft}
                 onChange={(event) => {
@@ -154,7 +154,7 @@ export function EmailTemplateManager({ templates }: { templates: NotificationTem
               <p>Required: <code className="text-primary">{"{{content}}"}</code></p>
               <p>Optional: {"{{hostname}} · {{version}} · {{severity}} · {{subject}}"}</p>
             </div>
-            <button
+            {canWrite ? <button
               type="button"
               disabled={pending}
               onClick={save}
@@ -162,7 +162,7 @@ export function EmailTemplateManager({ templates }: { templates: NotificationTem
             >
               {pending ? <Loader2 className="size-4 animate-spin" aria-hidden /> : message?.tone === "ok" ? <Check className="size-4" aria-hidden /> : <Save className="size-4" aria-hidden />}
               {pending ? "Saving" : "Save template"}
-            </button>
+            </button> : <p className="font-mono text-xs text-muted-foreground">Only Super admins can edit templates.</p>}
           </div>
 
           {message ? (

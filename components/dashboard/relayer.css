@@ -693,3 +693,15 @@
     animation: none;
   }
 }
+.relayer-request-details { margin: 20px 0; }
+.relayer-request-details > summary { cursor: pointer; font-size: 13px; color: var(--primary); padding: 10px 0; }
+.relayer-request-panel { padding: 22px; border: 1px solid var(--border); border-radius: 14px; background: var(--card); text-align: left; }
+.relayer-request-panel h3 { font-size: 16px; margin-bottom: 8px; }
+.relayer-request-panel > p { font-size: 12px; line-height: 1.8; color: var(--muted-foreground); }
+.relayer-request-panel form { display: flex; gap: 12px; margin-top: 16px; }
+.relayer-request-panel form label { flex: 1; min-width: 0; }
+.relayer-request-panel ul { list-style: none; padding: 0; margin: 20px 0 0; }
+.relayer-request-panel li { display: flex; gap: 16px; align-items: center; justify-content: space-between; border-top: 1px solid var(--border); padding: 14px 0; }
+.relayer-request-panel li strong, .relayer-request-panel li small { display: block; font-size: 12px; overflow-wrap: anywhere; }
+.relayer-request-panel li small { color: var(--muted-foreground); margin-top: 6px; }
+@media (max-width: 640px) { .relayer-request-panel form, .relayer-request-panel li { flex-direction: column; align-items: stretch; } }

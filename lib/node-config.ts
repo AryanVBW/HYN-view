@@ -11,6 +11,12 @@ export const PORTAL_CONFIG_KEYS = new Set([
   "cloud_push_min",
   "auto_update",
   "dashboard_view",
+  "alert_enabled",
+  "report_enabled",
+  "alert_interval_min",
+  "record_interval_min",
+  "speedtest_per_day",
+  "keep_awake",
 ]);
 
 function integer(value: string, max: number, allowZero = true) {
@@ -20,6 +26,12 @@ function integer(value: string, max: number, allowZero = true) {
 
 function validExistingValue(key: string, value: string) {
   switch (key) {
+    case "alert_enabled":
+    case "report_enabled":
+    case "keep_awake": return value === "on" || value === "off";
+    case "alert_interval_min":
+    case "record_interval_min": return integer(value, 1_440, false);
+    case "speedtest_per_day": return integer(value, 24, false);
     case "alert_mem_pct":
     case "alert_disk_pct": return integer(value, 100);
     case "alert_temp_c": return integer(value, 200);

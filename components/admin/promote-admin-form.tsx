@@ -51,12 +51,13 @@ export function PromoteAdminForm() {
         Promote by email
       </p>
       <p className="mt-2 max-w-xl font-mono text-xs leading-6 text-muted-foreground">
-        Grants full administrator access: every client, every machine, and the
-        ability to promote or suspend others. They must have signed in at least
-        once.
+        Admins can view every dashboard and add other admins.
+        Only Super admins can change machines, settings, and roles.
+        The account must have signed in at least once.
       </p>
       <form onSubmit={submit} className="mt-6 flex flex-wrap gap-3">
         <input
+          aria-label="Email of the new admin"
           type="email"
           required
           value={email}

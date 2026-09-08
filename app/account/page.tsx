@@ -1,3 +1,4 @@
+import { permissions, roleLabels, normalizeRole } from "@/lib/permissions";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { cookies } from "next/headers";
@@ -53,7 +54,7 @@ export default async function AccountPage() {
 
   const [profileRes, nodesRes, logRes, emailPrefsRes] = await Promise.all([
     supabase.from("profiles").select("*").eq("id", auth.user.id).maybeSingle(),
-    supabase.from("nodes").select(NODE_COLUMNS).eq("revoked", false).order("created_at"),
+    supabase.from("nodes").select(NODE_COLUMNS).eq("owner", auth.user.id).eq("revoked", false).order("created_at"),
     supabase
       .from("notification_log")
       .select("*")
@@ -122,9 +123,10 @@ export default async function AccountPage() {
           ))}
         </div>
 
-        <EmailPreferences nodes={nodes} preferences={emailPreferences} accountEmail={auth.user.email ?? ""} />
-
-        <NodeSettings nodes={nodes} />
+        {profile?.status === "active" && permissions(profile?.role).canWrite ? <>
+          <EmailPreferences nodes={nodes} preferences={emailPreferences} accountEmail={auth.user.email ?? ""} />
+          <NodeSettings nodes={nodes} />
+        </> : <p className="terminal-panel p-6 font-mono text-sm leading-7">Your role is {roleLabels[normalizeRole(profile?.role)]}. A Super admin manages machine settings and email delivery preferences.</p>}
 
         <DeliveryHistory log={visibleLog} byKind={byKind} cleared={logCleared} />
       </div>
@@ -179,13 +181,13 @@ function AccountHeader({
                 <Mail className="size-4 text-primary" aria-hidden />
                 {authUser.email}
               </span>
-              {profile?.role === "admin" ? (
+              {permissions(profile?.role).canAdmin ? (
                 <Link
                   href="/admin"
                   className="flex items-center gap-2 rounded-full border border-primary/40 bg-primary/10 px-3 py-1 text-primary transition-colors hover:bg-primary/20"
                 >
                   <ShieldCheck className="size-3.5" aria-hidden />
-                  administrator
+                  {roleLabels[normalizeRole(profile?.role)]}
                 </Link>
               ) : null}
               <span>member since {new Date(profile?.created_at ?? authUser.created_at).toLocaleDateString()}</span>
