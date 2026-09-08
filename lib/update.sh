@@ -29,10 +29,9 @@ UPD_REGISTRY='https://registry.npmjs.org'
 # cannot be intercepted on the wire, and it is how test/update-workflow.sh drives
 # the real checker against a mock registry.
 _upd_proto() {
-  case $UPD_REGISTRY in
-    http://127.0.0.1* | http://localhost* | 'http://[::1]'*) printf '=http' ;;
-    *) printf '=https' ;;
-  esac
+  if [[ $UPD_REGISTRY =~ ^http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?(/|$) ]]; then
+    printf '=http'
+  else printf '=https'; fi
 }
 UPD_PROGRESS_HOOK=''
 
@@ -191,7 +190,7 @@ update_refresh_services() {
   }
 
   local unit state
-  for unit in hyn-speedtest.timer hyn-record.timer hyn-alerts.timer hyn-report.timer hyn-push.timer; do
+  for unit in hyn-speedtest.timer hyn-record.timer hyn-alerts.timer hyn-report.timer hyn-push.timer hyn-update.timer; do
     systemctl is-enabled --quiet "$unit" >/dev/null 2>&1 || continue
     if ! systemctl restart "$unit" >/dev/null 2>&1; then
       UPD_LAST_ERR="could not restart $unit"
@@ -203,6 +202,14 @@ update_refresh_services() {
       return 1
     fi
   done
+
+  if systemctl is-enabled --quiet hyn-awake.service >/dev/null 2>&1; then
+    state=$(systemctl is-active hyn-awake.service 2>/dev/null)
+    if [[ $state != active && $state != activating ]]; then
+      UPD_LAST_ERR="hyn-awake.service is $state; sleep prevention is unavailable"
+      return 1
+    fi
+  fi
 
   # The resident agent last, and only when this process is not living inside it.
   #
@@ -233,6 +240,25 @@ update_refresh_services() {
 # update_apply -- performs the upgrade. Returns 0 only when the package,
 # systemd integration and installed version all verify successfully.
 update_apply() {
+  local lock_fd='' rc
+  state_dir_v
+  mkdir -p "$STATE_DIR" || return 1
+  # util-linux supplies flock on supported Ubuntu systems. Hold the descriptor
+  # through npm, setup and verification, including across child processes.
+  if have flock; then
+    exec {lock_fd}>"$STATE_DIR/update.lock" || return 1
+    if ! flock -n "$lock_fd"; then
+      exec {lock_fd}>&-
+      UPD_LAST_ERR='another package update is already running'
+      return 1
+    fi
+  fi
+  _update_apply "$@"; rc=$?
+  [[ -z $lock_fd ]] || exec {lock_fd}>&-
+  return "$rc"
+}
+
+_update_apply() {
   local force=${1:-0} installed=''
   UPD_LAST_ERR=''
   update_detect_method
@@ -268,6 +294,7 @@ update_apply() {
         update_emit_progress verifying 'Verifying the installed CLI and managed timers'
         if [[ -x $HYN_ROOT/bin/hyn ]]; then
           installed=$("$HYN_ROOT/bin/hyn" --version 2>/dev/null)
+          installed=${installed%%$'\n'*}
           installed=${installed##* }
         fi
         if [[ -z $installed || ! $installed =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$ ]]; then
@@ -286,7 +313,7 @@ update_apply() {
         printf 'hyn: updated to %s; managed services restarted and verified.\n' "$installed"
         return 0
       fi
-      UPD_LAST_ERR='npm install failed; nothing was changed'
+      UPD_LAST_ERR='npm install failed; the installed package may be incomplete and will need another update attempt'
       warn "$UPD_LAST_ERR"
       return 1
       ;;
@@ -308,15 +335,20 @@ update_startup() {
     off) return 0 ;;
     install)
       update_read
+      local attempted='' now=${EPOCHSECONDS:-0}
+      state_dir_v
+      [[ -r $STATE_DIR/automatic-update-attempt ]] && read -r attempted <"$STATE_DIR/automatic-update-attempt"
+      if [[ $attempted =~ ^[0-9]+$ ]] && ((now >= attempted && now - attempted < 900)); then
+        update_check_async
+        return 0
+      fi
       if ((UPD_AVAILABLE)); then
         # From a scheduled unit, hand the install to hyn-update.service: that
         # unit has the memory headroom node needs and the long timeout an npm
         # install needs, and delegating keeps the sixty-second check-in short.
-        if declare -F cloud_should_handoff >/dev/null 2>&1 && cloud_should_handoff &&
-           declare -F cloud_handoff_command >/dev/null 2>&1 &&
-           cloud_handoff_command '' update; then
-          UPD_STATE='installing'
-        elif [[ ${HYN_IN_AGENT:-0} == 1 ]]; then
+        if declare -F cloud_should_handoff >/dev/null 2>&1 && cloud_should_handoff; then
+          if cloud_handoff_command '' update; then UPD_STATE='installing'; else UPD_STATE='available'; fi
+        elif [[ ${HYN_IN_AGENT:-0} == 1 || -n ${INVOCATION_ID:-} ]]; then
           # The resident loop never installs in its own cgroup. Its child would
           # be killed the moment the loop restarts -- and the loop restarts
           # *because of* the install, either from update_refresh_services or by

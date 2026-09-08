@@ -10,7 +10,7 @@
 # HYN_PROC / HYN_SYS exist so test/selfcheck.sh can point the readers at a
 # fixture tree and assert on known numbers. Never hardcode /proc below.
 
-HYN_VERSION="1.9.0"
+HYN_VERSION="1.10.0"
 HYN_AUTHOR='NEXUSV'
 HYN_AUTHOR_URL='https://www.hyn-view.in'
 HYN_COPYRIGHT='(c) 2026 NEXUSV TECHNOLOGIES PRIVATE LIMITED'
@@ -198,13 +198,19 @@ declare -A CFG=(
   [cloud_portal_url]='https://www.hyn-view.in'
   [cloud_node_id]=''
   [cloud_push_min]=10
+  # Local is the default: no periodic telemetry or diagnostic uploads. An
+  # explicit push/sync shares one transient reading with the hosted portal.
+  [cloud_storage]=local
+  [cloud_notifications]=off
+  [cloud_checkin_min]=5
+  [local_keep_days]=14
+  [local_max_mb]=256
   [cloud_timeout]=20
   # Seconds between liveness beats from the resident agent (hyn-agent.service).
   # This is not the reading interval: a beat is one small POST that proves the
-  # machine is alive, and cloud_push_min still governs telemetry. 24s means the
-  # portal's three-minute quiet threshold is seven missed beats rather than
-  # three, so one dropped packet on a domestic link never reads as an outage.
-  [heartbeat_sec]=24
+  # machine is alive. The portal's three-minute quiet threshold allows three
+  # missed beats at the default cadence. Detailed history stays local.
+  [heartbeat_sec]=60
 
   # --- self update -----------------------------------------------------------
   # off     never look
@@ -215,6 +221,7 @@ declare -A CFG=(
   # contract stay synchronized. An operator can still select check or off in
   # the account page or local root-owned configuration.
   [auto_update]=install
+  [keep_awake]=on
   [update_check_hours]=12
   # Off, because `npm install -g hyn-view` now finishes its own setup: the config
   # file, the state directory and the timers are in place before the operator
@@ -268,7 +275,9 @@ _cfg_cloud_allowed() {
   case ${1:-} in
     alert_mem_pct | alert_disk_pct | alert_temp_c | alert_load_per_core | \
       alert_latency_ms | alert_min_severity | alert_repeat_hours | report_at | \
-      notify_max_per_day | cloud_push_min | auto_update | dashboard_view) return 0 ;;
+      notify_max_per_day | cloud_push_min | auto_update | dashboard_view | \
+      alert_enabled | report_enabled | alert_interval_min | record_interval_min | \
+      speedtest_per_day | keep_awake) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -279,6 +288,12 @@ _cfg_cloud_allowed() {
 _cfg_cloud_value_allowed() {
   local k=${1:-} v=${2:-}
   case $k in
+    alert_enabled | report_enabled | keep_awake)
+      [[ $v == on || $v == off ]] ;;
+    alert_interval_min | record_interval_min)
+      [[ $v =~ ^[1-9][0-9]{0,3}$ ]] && ((10#$v <= 1440)) ;;
+    speedtest_per_day)
+      [[ $v =~ ^[1-9][0-9]?$ ]] && ((10#$v <= 24)) ;;
     alert_mem_pct | alert_disk_pct)
       [[ $v =~ ^(0|[1-9][0-9]{0,2})$ ]] && ((10#$v <= 100)) ;;
     alert_temp_c)
@@ -823,28 +838,72 @@ config_file_rw() {
   fi
 }
 
-# Rewrites one key in place, preserving comments and everything else in the file.
-config_set() {
-  local k=$1 v=$2 f
+# Validate before any changes are written, for single or grouped edits.
+config_value_check() {
+  local k=$1 v=$2
   _cfg_allowed "$k" || { warn "unknown config key: $k"; return 1; }
+  [[ $v != *$'\n'* && $v != *$'\r'* && $v != *'#'* ]] || { warn 'config values must be a single line without #'; return 1; }
+  if _cfg_cloud_allowed "$k"; then
+    _cfg_cloud_value_allowed "$k" "$v" || { warn "invalid value for $k"; return 1; }
+  fi
+  case $k in
+    cloud_notifications) [[ $v == on || $v == off ]] || { warn 'cloud_notifications must be on or off'; return 1; } ;;
+    cloud_storage) [[ $v == local || $v == cloud ]] || { warn 'cloud_storage must be local or cloud'; return 1; } ;;
+    cloud_checkin_min) [[ $v =~ ^[1-9][0-9]{0,2}$ ]] && ((v <= 60)) || { warn 'cloud_checkin_min must be 1..60'; return 1; } ;;
+    local_keep_days) [[ $v =~ ^[1-9][0-9]{0,2}$ ]] || { warn 'local_keep_days must be 1..999'; return 1; } ;;
+    local_max_mb) [[ $v =~ ^[1-9][0-9]{0,4}$ ]] || { warn 'local_max_mb must be 1..99999'; return 1; } ;;
+    heartbeat_sec) [[ $v =~ ^[1-9][0-9]{0,3}$ ]] && ((v >= 5 && v <= 3600)) || { warn 'heartbeat_sec must be 5..3600'; return 1; } ;;
+  esac
+  return 0
+}
+
+# Rewrite a group in one rename, preserving unrelated values and comments. If
+# any value is invalid, none of the requested changes reaches disk.
+config_set() {
+  (($# > 0 && $# % 2 == 0)) || { warn 'config set needs key/value pairs'; return 1; }
+  local k v f line tmp lock_fd='' rc=0
+  local -A updates=() found=()
+  local -a out=()
+  while (($#)); do
+    k=$1 v=$2; shift 2
+    config_value_check "$k" "$v" || return 1
+    updates[$k]=$v
+  done
   f=$(config_file_rw)
   mkdir -p "${f%/*}" 2>/dev/null || { warn "cannot create ${f%/*}"; return 1; }
-  local -a out=()
-  local line found=0
+  if have flock; then
+    exec {lock_fd}>"$f.lock" || return 1
+    flock -w 10 "$lock_fd" || { exec {lock_fd}>&-; warn 'configuration is busy'; return 1; }
+  fi
   if [[ -r $f ]]; then
     while IFS= read -r line || [[ -n $line ]]; do
-      if [[ $line == "$k="* || $line == "$k "*=* ]]; then
-        out+=("$k=$v")
-        found=1
+      k=${line%%=*}; k=${k//[[:space:]]/}
+      if [[ -n $k && -v updates[$k] && $line == *=* ]]; then
+        [[ -v found[$k] ]] || out+=("$k=${updates[$k]}")
+        found[$k]=1
       else
         out+=("$line")
       fi
     done <"$f"
   fi
-  ((found == 0)) && out+=("$k=$v")
-  printf '%s\n' "${out[@]}" >"$f.tmp" && mv -f "$f.tmp" "$f" || { warn "cannot write $f"; return 1; }
-  CFG[$k]=$v
+  for k in "${!updates[@]}"; do [[ -v found[$k] ]] || out+=("$k=${updates[$k]}"); done
+  tmp=$(mktemp "$f.XXXXXX") || rc=1
+  if ((rc == 0)); then
+    printf '%s\n' "${out[@]}" >"$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" "$f" || rc=1
+    ((rc == 0)) || rm -f "$tmp"
+  fi
+  [[ -z $lock_fd ]] || exec {lock_fd}>&-
+  ((rc == 0)) || { warn "cannot write $f"; return 1; }
+  for k in "${!updates[@]}"; do CFG[$k]=${updates[$k]}; done
   return 0
+}
+
+config_apply() {
+  cfg_load
+  is_root || return 0
+  [[ -r $HYN_LIB/setup.sh ]] || return 0
+  declare -F setup_reconcile >/dev/null || source "$HYN_LIB/setup.sh" || return 1
+  setup_reconcile
 }
 
 # Secrets go to their own root-only file. Keeping them out of the 0644 config is

@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
 # hyn-view :: system integration
 #
-# `hyn setup` is the apt-style half of the install that npm cannot do: the
-# config file under /etc, the state directory under /var/lib, and the systemd
-# timer for scheduled speed tests. It is a separate, explicit, root-run step on
-# purpose -- an npm postinstall script that silently wrote systemd units and
-# enabled timers would be doing something the user did not ask for, at a
-# privilege level they did not expect.
+# Global root npm installs call setup automatically. Re-running it repairs
+# configuration and boot services without prompting or replacing user data.
 #
 # This never touches anything belonging to Highway.
 
@@ -54,6 +50,19 @@ OOMScoreAdjust=500
 EOF
 }
 
+# npm installed through nvm/asdf may not be on systemd's default PATH. Record
+# only the executable directories needed by the service, then system paths.
+_unit_runtime_path() {
+  local runtime='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' executable tool
+  for tool in node npm; do
+    executable=$(command -v "$tool" 2>/dev/null) || continue
+    [[ $executable == /* && -x $executable ]] || continue
+    runtime="${executable%/*}:$runtime"
+  done
+  runtime=${runtime//\\/\\\\}; runtime=${runtime//\"/\\\"}; runtime=${runtime//%/%%}
+  printf 'Environment="PATH=%s"\n' "$runtime"
+}
+
 # generic_unit <description> <exec> <extra-service-lines> <timeout-seconds>
 _generic_service() {
   local desc=$1 exec=$2 extra=${3:-} timeout=${4:-180}
@@ -72,6 +81,7 @@ ExecStart=$exec
 # a unit written by this release keeps working if the package is ever rolled back
 # to a build without that fix.
 Environment=HOME=/root
+$(_unit_runtime_path)
 Nice=15
 IOSchedulingClass=idle
 CPUSchedulingPolicy=batch
@@ -107,6 +117,7 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=$exec
 Environment=HOME=/root
+$(_unit_runtime_path)
 # Politeness, not restriction: npm may run for a minute and must not do it at
 # the expense of the node.
 Nice=10
@@ -155,6 +166,7 @@ StartLimitIntervalSec=0
 Type=simple
 ExecStart=$exec agent
 Environment=HOME=/root
+$(_unit_runtime_path)
 # Always. A crash, an OOM kill, a wedge cleared by self-heal, or a deliberate
 # exit after installing a new version all end the same way: the loop comes back.
 Restart=always
@@ -193,6 +205,31 @@ $extra
 
 [Install]
 WantedBy=timers.target
+EOF
+}
+
+# Keep the computer awake while monitoring. This releases its inhibitor when
+# disabled, and never masks OS targets or blocks shutdown/reboot.
+_awake_service() {
+  local inhibitor sleeper
+  inhibitor=$(command -v systemd-inhibit) || return 1
+  sleeper=$(command -v sleep) || return 1
+  cat <<EOF
+[Unit]
+Description=hyn-view prevent idle sleep while monitoring
+After=systemd-logind.service
+Wants=systemd-logind.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=$inhibitor --what=sleep:idle:handle-lid-switch --who=HYN-view --why=Unattended-monitoring --mode=block $sleeper infinity
+Restart=always
+RestartSec=30s
+TimeoutStopSec=5s
+
+[Install]
+WantedBy=multi-user.target
 EOF
 }
 
@@ -353,6 +390,7 @@ metrics_keep_days=${CFG[metrics_keep_days]}
 # --- self update -------------------------------------------------------------
 # off | check (tell before installing) | install (managed default)
 auto_update=${CFG[auto_update]}
+keep_awake=${CFG[keep_awake]}
 update_check_hours=${CFG[update_check_hours]}
 
 # --- first run ---------------------------------------------------------------
@@ -372,6 +410,16 @@ cloud_portal_url=${CFG[cloud_portal_url]}
 # Minutes between full portal readings. The heartbeat and settings check stay at
 # one minute regardless. Also settable from the portal, which wins.
 cloud_push_min=${CFG[cloud_push_min]}
+# local: retain history here; explicit push/sync is transient. cloud: opt in to
+# the legacy Supabase telemetry archive. Never managed by the portal.
+cloud_storage=${CFG[cloud_storage]}
+# Explicit consent to send notification/report content through the portal.
+cloud_notifications=${CFG[cloud_notifications]}
+# Minutes between managed-property and command checks (1..60).
+cloud_checkin_min=${CFG[cloud_checkin_min]}
+# Detailed snapshots and request accounting stay here, with bounded retention.
+local_keep_days=${CFG[local_keep_days]}
+local_max_mb=${CFG[local_max_mb]}
 # Seconds between liveness beats from the resident agent (hyn-agent.service).
 # One small POST that proves this machine is alive; telemetry still follows
 # cloud_push_min. Clamped to 5..3600. The portal cannot set this key.
@@ -522,6 +570,9 @@ setup_run() {
     warn 'one or more managed timers could not be enabled; inspect systemctl status for the failed HYN unit'
     return 1
   fi
+  if ((no_timer == 0)) && have systemctl; then
+    (umask 077; printf '%s\n' "$HYN_ROOT" >"$HYN_VAR/installed") || return 1
+  fi
 
   printf '\nhyn: done. Next steps:\n'
   printf '  hyn                 open the dashboard\n'
@@ -593,6 +644,12 @@ setup_timers() {
   # Started on demand by the check-in, never enabled. See _maintenance_service.
   _write_unit "$HYN_UNIT_DIR/hyn-update.service" \
     "$(_maintenance_service "$exe cloud run-command")"
+  _write_unit "$HYN_UNIT_DIR/hyn-update.timer" \
+    "$(_generic_timer 'hyn-view recover pending maintenance after interruption' \
+      "OnBootSec=1min"$'\n'"OnUnitInactiveSec=5min" 'hyn-update.service' 30)"
+  if have systemd-inhibit; then
+    _write_unit "$HYN_UNIT_DIR/hyn-awake.service" "$(_awake_service)"
+  fi
 
   systemctl daemon-reload || {
     warn 'systemd daemon reload failed'
@@ -608,16 +665,18 @@ setup_timers() {
   # information the operator needs, not litter for hyn to tidy.
   local u
   for u in "$SVC_NAME.service" hyn-record.service hyn-alerts.service \
-           hyn-report.service hyn-push.service hyn-agent.service hyn-update.service; do
+           hyn-report.service hyn-push.service hyn-agent.service hyn-update.service hyn-awake.service; do
     systemctl reset-failed "$u" >/dev/null 2>&1 || true
   done
   setup_apply_schedule "$exe"
 }
 
 _write_unit() {
-  local path=$1 content=$2
-  printf '%s\n' "$content" >"$path.tmp" && mv -f "$path.tmp" "$path" || die "cannot write $path"
-  chmod 0644 "$path"
+  local path=$1 content=$2 tmp
+  tmp=$(mktemp "$path.XXXXXX") || die "cannot create $path"
+  printf '%s\n' "$content" >"$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" "$path" || {
+    rm -f "$tmp"; die "cannot write $path";
+  }
   printf '  %-34s written\n' "$path"
   return 0
 }
@@ -664,6 +723,83 @@ setup_apply_schedule() {
   # `enable --now` on an already-running service is a no-op, so a repeated
   # `hyn setup` does not interrupt the beat.
   _toggle_timer hyn-agent.service 1 || rc=1
+  _toggle_timer hyn-update.timer 1 || rc=1
+  if [[ -f $HYN_UNIT_DIR/hyn-awake.service ]]; then
+    _toggle_timer hyn-awake.service "$(cfg_on keep_awake && printf 1 || printf 0)" || rc=1
+  elif cfg_on keep_awake; then
+    warn 'systemd-inhibit is unavailable; monitoring starts at boot but cannot prevent sleep'
+  fi
+  return "$rc"
+}
+
+# Apply changed schedules once, including portal changes and direct config-file
+# edits. The fingerprint is written only after the units restart successfully,
+# so the next maintenance pass retries a failed application.
+setup_reconcile() {
+  local lock_fd='' rc
+  is_root && have systemctl || return 0
+  [[ -f $HYN_UNIT_DIR/hyn-agent.service || -f $HYN_VAR/installed ]] || return 0
+  state_dir_v
+  if have flock; then
+    exec {lock_fd}>"$STATE_DIR/schedule.lock" || return 1
+    flock -n "$lock_fd" || { exec {lock_fd}>&-; return 0; }
+  fi
+  _setup_reconcile; rc=$?
+  [[ -z $lock_fd ]] || exec {lock_fd}>&-
+  return "$rc"
+}
+
+_setup_reconcile() {
+  local desired k previous='' u tmp intact=1
+  desired="$HYN_VERSION $HYN_ROOT"
+  for k in speedtest_per_day alert_interval_min record_interval_min report_at \
+           alert_enabled report_enabled cloud_enabled keep_awake; do
+    _cfg_cloud_allowed "$k" && ! _cfg_cloud_value_allowed "$k" "${CFG[$k]}" && {
+      warn "cannot apply invalid schedule property: $k"; return 1;
+    }
+    desired+=" $k=${CFG[$k]}"
+  done
+  desired+=" linked=$(cloud_linked && printf yes || printf no)"
+  [[ -r $STATE_DIR/applied-schedule ]] && IFS= read -r previous <"$STATE_DIR/applied-schedule"
+  if [[ $desired == "$previous" ]]; then
+    for u in hyn-agent.service hyn-update.service hyn-update.timer \
+             hyn-speedtest.service hyn-speedtest.timer hyn-record.service hyn-record.timer \
+             hyn-alerts.service hyn-alerts.timer hyn-report.service hyn-report.timer hyn-push.service hyn-push.timer; do
+      [[ -s $HYN_UNIT_DIR/$u ]] || intact=0
+    done
+    if have systemd-inhibit && [[ ! -s $HYN_UNIT_DIR/hyn-awake.service ]]; then intact=0; fi
+    ((intact)) && return 0
+  fi
+  setup_timers "$HYN_ROOT/bin/hyn" >/dev/null || return 1
+  for u in hyn-speedtest.timer hyn-record.timer hyn-alerts.timer hyn-report.timer hyn-push.timer; do
+    systemctl is-enabled --quiet "$u" >/dev/null 2>&1 || continue
+    systemctl restart "$u" >/dev/null 2>&1 || return 1
+  done
+  tmp=$(mktemp "$STATE_DIR/.applied-schedule.XXXXXX") || return 1
+  printf '%s\n' "$desired" >"$tmp" && mv -f "$tmp" "$STATE_DIR/applied-schedule" || {
+    rm -f "$tmp"; return 1;
+  }
+}
+
+autostart_run() {
+  case ${1:-status} in
+    enable | repair) setup_run --no-wizard || return 1 ;;
+    status) ;;
+    *) warn 'usage: hyn autostart [status|enable|repair]'; return 1 ;;
+  esac
+  local u enabled active rc=0
+  if ! have systemctl; then warn 'automatic startup requires Ubuntu/Linux with systemd'; return 1; fi
+  for u in hyn-agent.service hyn-record.timer hyn-update.timer hyn-awake.service; do
+    enabled=$(systemctl is-enabled "$u" 2>/dev/null) || true
+    active=$(systemctl is-active "$u" 2>/dev/null) || true
+    printf '%-24s boot=%-12s state=%s\n' "$u" "${enabled:-missing}" "${active:-unknown}"
+    if [[ $u != hyn-awake.service || ${CFG[keep_awake]} == on ]]; then
+      [[ $enabled == enabled && $active == active ]] || rc=1
+    fi
+  done
+  printf 'Update policy: %s. Manage releases and monitoring settings from the portal.\n' "${CFG[auto_update]}"
+  printf 'For power-on after an outage, enable Restore on AC Power Loss in BIOS/UEFI.\n'
+  printf 'A shut-down PC needs firmware wake support and power; the CLI cannot start its own CPU.\n'
   return "$rc"
 }
 
@@ -703,18 +839,24 @@ setup_timer_reason() {
 setup_self_heal() {
   have systemctl || return 0
   is_root || return 0
+  setup_reconcile || warn 'settings could not be applied; the next maintenance pass will retry'
   local u want st
-  for u in hyn-record.timer hyn-alerts.timer hyn-report.timer hyn-push.timer hyn-speedtest.timer; do
+  for u in hyn-record.timer hyn-alerts.timer hyn-report.timer hyn-push.timer hyn-speedtest.timer hyn-update.timer hyn-awake.service; do
     systemctl cat "$u" >/dev/null 2>&1 || continue
     case $u in
       hyn-alerts.timer) want=$(cfg_on alert_enabled && printf 1 || printf 0) ;;
       hyn-report.timer) want=$(cfg_on report_enabled && printf 1 || printf 0) ;;
       hyn-push.timer) want=$(cfg_on cloud_enabled && cloud_linked && printf 1 || printf 0) ;;
+      hyn-awake.service) want=$(cfg_on keep_awake && printf 1 || printf 0) ;;
       *) want=1 ;;
     esac
     [[ $want == 1 ]] || continue
     st=$(systemctl is-active "$u" 2>/dev/null)
-    [[ $st == active ]] && continue
+    if [[ $st == active ]]; then
+      # An active-but-disabled unit disappears at the next reboot.
+      systemctl is-enabled --quiet "$u" >/dev/null 2>&1 || systemctl enable "$u" >/dev/null 2>&1 || true
+      continue
+    fi
     systemctl reset-failed "$u" >/dev/null 2>&1 || true
     systemctl enable --now "$u" >/dev/null 2>&1 || true
   done
@@ -742,6 +884,8 @@ setup_heal_agent() {
   systemctl cat hyn-agent.service >/dev/null 2>&1 || return 0
   local st
   st=$(systemctl is-active hyn-agent.service 2>/dev/null)
+  systemctl is-enabled --quiet hyn-agent.service >/dev/null 2>&1 || \
+    systemctl enable hyn-agent.service >/dev/null 2>&1 || true
   if [[ $st != active ]]; then
     systemctl reset-failed hyn-agent.service >/dev/null 2>&1 || true
     systemctl enable --now hyn-agent.service >/dev/null 2>&1 || true
@@ -799,7 +943,7 @@ setup_uninstall() {
   if have systemctl; then
     local u
     for u in "$SVC_NAME.timer" hyn-alerts.timer hyn-record.timer hyn-report.timer hyn-push.timer \
-             hyn-agent.service; do
+             hyn-agent.service hyn-update.timer hyn-awake.service; do
       systemctl disable --now "$u" >/dev/null 2>&1 && printf '  %-24s disabled\n' "$u"
     done
     rm -f "$SVC_PATH" "$TMR_PATH" \
@@ -808,7 +952,7 @@ setup_uninstall() {
       "$HYN_UNIT_DIR/hyn-report.service" "$HYN_UNIT_DIR/hyn-report.timer" \
       "$HYN_UNIT_DIR/hyn-push.service" "$HYN_UNIT_DIR/hyn-push.timer" \
       "$HYN_UNIT_DIR/hyn-agent.service" \
-      "$HYN_UNIT_DIR/hyn-update.service"
+      "$HYN_UNIT_DIR/hyn-update.service" "$HYN_UNIT_DIR/hyn-update.timer" "$HYN_UNIT_DIR/hyn-awake.service"
     systemctl daemon-reload
     printf '  units removed\n'
   fi
@@ -823,6 +967,7 @@ setup_uninstall() {
     printf '  kept %s (config + secrets) and %s (history)\n' "$HYN_ETC" "$HYN_VAR"
     printf '  use --purge to remove them too\n'
   fi
+  rm -f "$HYN_VAR/installed" "$HYN_VAR/applied-schedule"
   printf '\nhyn: the command itself is managed by npm: npm rm -g hyn-view\n'
   return 0
 }

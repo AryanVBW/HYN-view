@@ -86,6 +86,10 @@ record_sample() {
   keep=${CFG[metrics_keep_days]:-8}
   [[ $keep =~ ^[0-9]+$ ]] || keep=8
   _metrics_trim "$f" $((keep * 86400))
+  # Detailed local history is recorded even while unpaired or offline. It is
+  # never wrapped in a token or queued for a later bulk upload.
+  cloud_payload_v
+  local_store_snapshot || { warn 'cannot save detailed local history'; return 1; }
   return 0
 }
 
@@ -970,6 +974,7 @@ report_run() {
   local v
   v=$(_verdict)
   subject="[hyn] $HOSTNAME_S daily report — ${v%% —*}"
+  local_store_report "$(report_text "$hours")" || { warn 'cannot save local daily report'; return 1; }
   # Nowhere to send is not a failure. The report timer is enabled from the moment
   # the package is installed, which is before there is any way to deliver, and a
   # unit that goes red every morning for a machine that is working perfectly
@@ -979,6 +984,10 @@ report_run() {
     printf '     link this machine to the portal (sudo hyn link), which sets up managed\n'
     printf '     email, or configure a local channel with: sudo hyn wizard\n'
     printf '     `hyn report` prints it here in the meantime.\n'
+    return 0
+  fi
+  if [[ ${CFG[cloud_storage]:-local} != cloud ]] && ! cfg_on cloud_notifications; then
+    printf 'hyn: daily report saved locally; cloud notification sharing is disabled.\n'
     return 0
   fi
   if NOTIFY_CATEGORY=report notify_send info "$subject" "$(report_text "$hours")" "$(report_html "$hours")"; then

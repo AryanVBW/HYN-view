@@ -2171,3 +2171,6 @@ rollback;
 
 -- Relayer assignment isolation and administrative permissions.
 \ir relayer-test.sql
+\ir relayer-request-test.sql
+\ir local-telemetry-test.sql
+\ir unattended-test.sql

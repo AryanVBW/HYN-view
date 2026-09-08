@@ -73,6 +73,49 @@ json_field_v() {
 CLOUD_LAST_CODE=0
 CLOUD_LAST_BODY=''
 CLOUD_LAST_ERR=''
+CLOUD_SENT_BYTES=0
+CLOUD_RECEIVED_BYTES=0
+
+# shellcheck source=lib/local-store.sh
+source "${HYN_LIB:-${BASH_SOURCE[0]%/*}}/local-store.sh"
+
+CLOUD_RESOLVED_URL=''
+cloud_official_url() {
+  case ${CFG[cloud_api_url]:-} in
+    https://www.hyn-view.in/api/agent/v1 | https://hyn-view.in/api/agent/v1) [[ -z ${CFG[cloud_url]:-} ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+# Probe only the two trusted HTTPS hosts, without secrets or redirects. Cache
+# discovery on disk so independent timer processes do not double every request.
+cloud_resolve_portal() {
+  cloud_official_url || return 0
+  state_dir_v
+  local f="$STATE_DIR/portal-endpoint" ts='' cached='' u response preferred
+  preferred=${CFG[cloud_api_url]}
+  [[ -r $f ]] && read -r ts cached <"$f"
+  if [[ $ts =~ ^[0-9]+$ ]] && ((${EPOCHSECONDS:-0} >= ts && ${EPOCHSECONDS:-0} - ts < 21600)); then
+    case $cached in
+      https://www.hyn-view.in/api/agent/v1 | https://hyn-view.in/api/agent/v1) CLOUD_RESOLVED_URL=$cached; return 0 ;;
+    esac
+  fi
+  local other='https://hyn-view.in/api/agent/v1'
+  [[ $preferred == "$other" ]] && other='https://www.hyn-view.in/api/agent/v1'
+  if [[ $ts == 0 && $cached == "$preferred" ]]; then
+    u=$preferred; preferred=$other; other=$u
+  fi
+  for u in "$preferred" "$other"; do
+    response=$(curl -fsS --connect-timeout 5 --max-time 20 "$u/health" 2>/dev/null) || continue
+    json_field_v "$response" service || continue
+    [[ $JSON_FIELD == hyn-agent-v1 ]] || continue
+    CLOUD_RESOLVED_URL=$u
+    (umask 077; mkdir -p "$STATE_DIR"; printf '%s %s\n' "${EPOCHSECONDS:-0}" "$u" >"$f") || return 1
+    return 0
+  done
+  CLOUD_LAST_ERR='neither www.hyn-view.in nor hyn-view.in passed the HTTPS agent health check; history remains local'
+  return 1
+}
 
 cloud_url() {
   local u
@@ -80,6 +123,17 @@ cloud_url() {
     u=${CFG[cloud_url]}
   else
     u=${CFG[cloud_api_url]:-}
+    if cloud_official_url && [[ -z $CLOUD_RESOLVED_URL ]]; then
+      state_dir_v
+      local ts='' cached=''
+      [[ -r $STATE_DIR/portal-endpoint ]] && read -r ts cached <"$STATE_DIR/portal-endpoint"
+      if [[ $ts =~ ^[0-9]+$ ]] && ((${EPOCHSECONDS:-0} >= ts && ${EPOCHSECONDS:-0} - ts < 21600)); then
+        case $cached in
+          https://www.hyn-view.in/api/agent/v1 | https://hyn-view.in/api/agent/v1) CLOUD_RESOLVED_URL=$cached ;;
+        esac
+      fi
+    fi
+    if cloud_official_url && [[ -n $CLOUD_RESOLVED_URL ]]; then u=$CLOUD_RESOLVED_URL; fi
   fi
   u=${u%/}
   printf '%s' "$u"
@@ -98,6 +152,22 @@ cloud_linked() {
 # token lands in argv; the anon key goes through curl --config on stdin for the
 # same reason, even though it is a public value.
 _cloud_rpc() {
+  local fn=$1 body=$2 result
+  cloud_resolve_portal || return 1
+  CLOUD_SENT_BYTES=0 CLOUD_RECEIVED_BYTES=0
+  _cloud_rpc_once "$fn" "$body"; result=$?
+  local_usage_record "$fn" "$CLOUD_LAST_CODE" "$CLOUD_SENT_BYTES" "$CLOUD_RECEIVED_BYTES" "$result" || warn 'could not record local HTTP usage'
+  if ((result != 0)) && cloud_official_url && [[ $CLOUD_LAST_CODE == 0 || $CLOUD_LAST_CODE == 5* ]]; then
+    # Never replay a POST: a timeout may follow a committed mutation. Force a
+    # fresh unauthenticated probe on the NEXT operation instead.
+    state_dir_v
+    (umask 077; printf '0 %s\n' "$CLOUD_RESOLVED_URL" >"$STATE_DIR/portal-endpoint")
+    CLOUD_RESOLVED_URL=''
+  fi
+  return "$result"
+}
+
+_cloud_rpc_once() {
   local fn=$1 body=$2 url key tmp out rc endpoint mode=hosted
   url=$(cloud_url)
   key=${CFG[cloud_anon_key]}
@@ -117,7 +187,9 @@ _cloud_rpc() {
   # that is also how the mock endpoint in test/cloud-integration.sh is reached.
   case $url in
     https://*) ;;
-    http://127.0.0.1* | http://localhost* | 'http://[::1]'*) ;;
+    http://127.0.0.1/* | http://127.0.0.1:* | http://localhost/* | http://localhost:* | 'http://[::1]/'* | 'http://[::1]:'*)
+      local authority=${url#http://}; authority=${authority%%/*}
+      [[ $authority =~ ^(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?$ ]] || { CLOUD_LAST_ERR='invalid loopback URL'; return 1; } ;;
     *)
       CLOUD_LAST_ERR="cloud_url must be https (refusing to send the node token in clear text to ${url%%/*}//…)"
       return 1 ;;
@@ -140,20 +212,23 @@ _cloud_rpc() {
       curl -sS --max-time "${CFG[cloud_timeout]:-20}" --config - \
         -X POST "$endpoint" \
         -H 'Content-Type: application/json' \
-        -w $'\n%{http_code}' \
+        -w $'\n%{http_code} %{size_upload} %{size_download}' \
         --data-binary "@$tmp" 2>&1)
   else
     out=$(curl -sS --max-time "${CFG[cloud_timeout]:-20}" \
       -X POST "$endpoint" \
       -H 'Content-Type: application/json' \
       -H "User-Agent: hyn-view/$HYN_VERSION" \
-      -w $'\n%{http_code}' \
+      -w $'\n%{http_code} %{size_upload} %{size_download}' \
       --data-binary "@$tmp" 2>&1)
   fi
   rc=$?
   rm -f "$tmp"
 
-  local code=${out##*$'\n'}
+  local trailer=${out##*$'\n'} code sent received
+  read -r code sent received <<<"$trailer"
+  [[ $sent =~ ^[0-9]+$ ]] && CLOUD_SENT_BYTES=$sent
+  [[ $received =~ ^[0-9]+$ ]] && CLOUD_RECEIVED_BYTES=$received
   if [[ $code =~ ^[0-9]{3}$ ]]; then
     CLOUD_LAST_CODE=$code
     CLOUD_LAST_BODY=${out%$'\n'*}
@@ -528,7 +603,7 @@ cloud_heartbeat_age_v() {
 }
 
 cloud_heartbeat() {
-  local quiet=${1:-0} token body f
+  local quiet=${1:-0} token body f rpc=hyn_heartbeat
   CLOUD_HEARTBEAT_STATUS=''
   # Silent for the loop, explanatory for a person: `hyn heartbeat` exiting 1 with
   # no output is the worst possible answer to "why is the portal not seeing this
@@ -546,7 +621,8 @@ cloud_heartbeat() {
   token=$(secret cloud_node_token)
   body="{\"p_node_token\": \"$(_jstr "$token")\", \"p_agent_version\": \"$(_jstr "$HYN_VERSION")\"}"
   f=$(cloud_heartbeat_stamp)
-  if _cloud_rpc hyn_heartbeat "$body"; then
+  [[ ${CFG[cloud_storage]:-local} == local ]] && rpc=hyn_local_heartbeat
+  if _cloud_rpc "$rpc" "$body"; then
     json_field_v "$CLOUD_LAST_BODY" node_status && CLOUD_HEARTBEAT_STATUS=$JSON_FIELD
     _cloud_stamp "$f" "${EPOCHSECONDS:-0}" ok "${CLOUD_HEARTBEAT_STATUS:-active}"
     ((quiet)) || printf 'hyn: heartbeat accepted by %s%s\n' "$(cloud_url)" \
@@ -583,6 +659,10 @@ _cloud_push_stamp() {
 cloud_web_notify() {
   local subject=${1:0:300} text=${2:0:10000} html=${3:0:20000}
   local severity=${4:-info} category=${5:-alert} token body checksum bucket material
+  if [[ ${CFG[cloud_storage]:-local} != cloud ]] && ! cfg_on cloud_notifications; then
+    CLOUD_LAST_ERR='cloud notifications are disabled in local mode; enable cloud_notifications locally to share email content'
+    return 1
+  fi
   cloud_configured && cloud_linked || {
     CLOUD_LAST_ERR='the machine must be linked before using the web channel'
     return 1
@@ -618,15 +698,24 @@ cloud_collect_full() {
   sleep 1
   proc_sample 1000 "$prows" "$psort" 2>/dev/null || true
   cloud_payload_v
+  local_store_snapshot || { warn 'cannot save local telemetry; check local disk permissions/space'; return 1; }
 }
 
 cloud_ingest_collected() {
-  local quiet=${1:-0} token body f
+  local quiet=${1:-0} token body f rpc=hyn_ingest
   CLOUD_INGESTED=0
+  if [[ ${CFG[cloud_storage]:-local} != cloud ]]; then
+    if [[ -n ${CFG[cloud_url]:-} && -n ${CFG[cloud_anon_key]:-} ]]; then
+      CLOUD_LAST_ERR='local storage mode cannot upload readings directly to Supabase; use the hosted portal for transient viewing'
+      ((quiet)) || warn "$CLOUD_LAST_ERR"
+      return 1
+    fi
+    rpc=hyn_transient_snapshot
+  fi
   token=$(secret cloud_node_token)
   body="{\"p_node_token\": \"$(_jstr "$token")\", \"p_payload\": $CLOUD_PAYLOAD}"
   f=$(_cloud_push_stamp)
-  if _cloud_rpc hyn_ingest "$body"; then
+  if _cloud_rpc "$rpc" "$body"; then
     CLOUD_INGESTED=1
     _cloud_stamp "$f" "${EPOCHSECONDS:-0}" ok
     ((quiet)) || printf 'hyn: pushed to %s\n' "$(cloud_url)"
@@ -732,23 +821,28 @@ cloud_should_handoff() {
 # does not hold the minute check-in; the 20-minute database lease keeps the row
 # claimed meanwhile.
 #
-# ponytail: one pending slot, last write wins. A second command arriving during
-# an install overwrites the file rather than queueing. The database only ever has
-# one active command per node per kind, and a lost claim is re-claimed on the
-# next check-in once its lease expires, so a queue would be state to keep
-# consistent for no behaviour change.
+# One private pending slot. Additional portal commands stay in the database;
+# automatic checks wait rather than overwriting a claimed command.
 cloud_handoff_command() {
-  local id=$1 action=$2 f
+  local id=$1 action=$2 f tmp
   have systemctl || return 1
   systemctl cat hyn-update.service >/dev/null 2>&1 || return 1
   state_dir_v
   [[ -d $STATE_DIR ]] || mkdir -p "$STATE_DIR" 2>/dev/null || return 1
   f=$(cloud_pending_file)
-  printf '%s\t%s\n' "$id" "$action" >"$f.tmp" 2>/dev/null || return 1
-  mv -f "$f.tmp" "$f" 2>/dev/null || return 1
+  [[ $action == update || $action == sync ]] || return 1
+  [[ -z $id || $id =~ ^[0-9a-fA-F-]{36}$ ]] || return 1
+  # Publish only into an empty slot. A registry check must never overwrite a
+  # portal request, including while systemd is already starting that request.
+  tmp=$(mktemp "$STATE_DIR/.pending-command.XXXXXX") || return 1
+  printf '%s\t%s\n' "$id" "$action" >"$tmp" || { rm -f "$tmp"; return 1; }
+  if ! ln "$tmp" "$f" 2>/dev/null; then rm -f "$tmp"; return 1; fi
+  rm -f "$tmp"
+  rm -f "$f.retry"
   if ! systemctl start --no-block hyn-update.service >/dev/null 2>&1; then
-    rm -f -- "$f"
-    return 1
+    # Leave it for the boot/recovery timer. Losing the trigger is not losing
+    # the job, and callers must not start a second installer in their cgroup.
+    warn 'maintenance start failed; the saved job will be retried automatically'
   fi
   return 0
 }
@@ -756,21 +850,38 @@ cloud_handoff_command() {
 # Runs whatever hyn-update.service was started for. Entry point for
 # `hyn cloud run-command`.
 cloud_run_pending() {
-  local quiet=${1:-0} f id='' action=''
+  local lock_fd='' rc
+  state_dir_v
+  mkdir -p "$STATE_DIR" || return 1
+  if have flock; then
+    exec {lock_fd}>"$STATE_DIR/maintenance.lock" || return 1
+    flock -n "$lock_fd" || { exec {lock_fd}>&-; return 0; }
+  fi
+  _cloud_run_pending "$@"; rc=$?
+  [[ -z $lock_fd ]] || exec {lock_fd}>&-
+  return "$rc"
+}
+
+_cloud_run_pending() {
+  local quiet=${1:-0} f id='' action='' line='' rc=0 stamp='' now=${EPOCHSECONDS:-0}
   f=$(cloud_pending_file)
   if [[ ! -r $f ]]; then
     ((quiet)) || printf 'hyn: no maintenance command is pending\n'
     return 0
   fi
-  IFS=$'\t' read -r id action <"$f"
-  # Consumed before it runs, not after: a command that crashes the installer
-  # must not be retried in a loop by every subsequent start of this unit. The
-  # portal lease re-offers it if it really was lost.
-  rm -f -- "$f"
+  IFS= read -r line <"$f"
+  # IFS=TAB read collapses a leading empty field: an automatic job has no id.
+  [[ $line == *$'\t'* ]] || { warn 'invalid pending maintenance job'; rm -f "$f"; return 1; }
+  id=${line%%$'\t'*}; action=${line#*$'\t'}
+  [[ -z $id || $id =~ ^[0-9a-fA-F-]{36}$ ]] || { warn 'invalid maintenance command id'; rm -f "$f"; return 1; }
   case $action in
     update | sync) ;;
-    *) warn "unknown pending maintenance action: ${action:-none}"; return 1 ;;
+    *) warn "unknown pending maintenance action: ${action:-none}"; rm -f "$f"; return 1 ;;
   esac
+  [[ -r $f.retry ]] && read -r stamp <"$f.retry"
+  if [[ $stamp =~ ^[0-9]+$ ]] && ((now >= stamp && now - stamp < 900)); then return 0; fi
+  # An operator can cancel automatic installs by switching the policy off.
+  if [[ -z $id && ${CFG[auto_update]} != install ]]; then rm -f "$f" "$f.retry"; return 0; fi
   # Linkage is required to *report* on a portal command, not to install a
   # package. A command with no id was queued by this machine for itself -- the
   # auto-update path -- and refusing it because the box is unpaired is how the
@@ -784,6 +895,21 @@ cloud_run_pending() {
     warn 'this machine is not linked to the portal; nothing to run'
     return 1
   fi
+  # Recheck current permissions after a reboot or delayed handoff. Do not
+  # install on the strength of an old claim after the node was suspended.
+  if [[ -n $id ]]; then
+    if ! cloud_config_pull 1; then return 1; fi
+    if [[ $CLOUD_NODE_STATUS != active ]]; then
+      warn 'maintenance refused: node is no longer active'
+      rm -f "$f" "$f.retry"
+      return 1
+    fi
+    cfg_load
+  fi
+  (umask 077; printf '%s\n' "$now" >"$f.retry") || return 1
+  if [[ -z $id ]]; then
+    (umask 077; printf '%s\n' "$now" >"$STATE_DIR/automatic-update-attempt") || return 1
+  fi
   CLOUD_COMMAND_ID=$id
   CLOUD_COMMAND_TARGET=''
   CLOUD_COMMAND_CLAIMED=1
@@ -792,7 +918,12 @@ cloud_run_pending() {
   # still cannot install and hand it straight back -- a restart loop on a unit
   # that runs as root.
   CLOUD_IN_MAINTENANCE=1
-  cloud_command_execute "$action" "$quiet"
+  cloud_command_execute "$action" "$quiet"; rc=$?
+  # Completed attempts release the slot so an automatic failure cannot starve
+  # explicit portal commands. The automatic retry timestamp is separate. A
+  # process killed before this point leaves its job for the recovery timer.
+  rm -f "$f" "$f.retry"
+  return "$rc"
 }
 
 # Claim at most one command per check-in. Update commands are idempotent: a
@@ -808,6 +939,9 @@ cloud_command_poll() {
   # This path is only ever reached from a check-in, never from the maintenance
   # unit, so a handoff is allowed from here.
   CLOUD_IN_MAINTENANCE=0
+  # Preserve the server's unclaimed command while a local job occupies the
+  # maintenance slot. It will be claimed after that job finishes.
+  [[ ! -e $(cloud_pending_file) ]] || return 0
 
   token=$(secret cloud_node_token)
   body="{\"p_node_token\": \"$(_jstr "$token")\"}"
@@ -836,7 +970,10 @@ cloud_command_execute() {
 
   if [[ $action == sync ]]; then
     cloud_command_report running collecting 'Collecting a complete system snapshot' '' '' || true
-    cloud_collect_full
+    if ! cloud_collect_full; then
+      cloud_command_report failed failed 'Could not save the local snapshot; check disk space and permissions' '' '' || true
+      return 1
+    fi
     cloud_command_report running uploading 'Uploading current telemetry to HYN-view' '' '' || true
     if ! cloud_ingest_collected 1 || ((CLOUD_INGESTED == 0)); then
       cloud_command_report failed failed \
@@ -861,7 +998,8 @@ cloud_command_execute() {
       ((quiet)) || printf 'hyn: update handed to hyn-update.service\n'
       return 0
     fi
-    ((quiet)) || warn 'could not start hyn-update.service; installing here instead'
+    ((quiet)) || warn 'maintenance service is busy; the command will be retried after its lease expires'
+    return 1
   fi
   if ! cloud_can_install; then
     cloud_command_report failed failed \
@@ -873,6 +1011,9 @@ cloud_command_execute() {
 
   if ! cloud_command_report running checking 'Checking the npm registry for the newest hyn-view release' '' ''; then
     ((quiet)) || warn "could not report command progress: $CLOUD_LAST_ERR"
+    # This also validates that a recovered portal job is still running, rather
+    # than already completed/expired while the machine was offline.
+    return 1
   fi
   if ! update_check_now; then
     local check_error=${UPD_LAST_ERR:-could not reach the npm registry}
@@ -901,7 +1042,10 @@ cloud_command_execute() {
     cloud_command_report running verifying \
       "Synchronizing fresh telemetry from hyn-view $HYN_VERSION" \
       "$CLOUD_COMMAND_TARGET" "$HYN_VERSION" || true
-    cloud_collect_full
+    if ! cloud_collect_full; then
+      cloud_command_report failed failed 'Update installed, but local snapshot could not be saved' "$CLOUD_COMMAND_TARGET" "$HYN_VERSION" || true
+      return 1
+    fi
     if ! cloud_ingest_collected 1 || ((CLOUD_INGESTED == 0)); then
       cloud_command_report failed failed \
         "hyn-view $HYN_VERSION was installed and its services restarted, but fresh telemetry did not reach the portal: ${CLOUD_LAST_ERR:-upload failed; run sudo hyn doctor}" \
@@ -933,6 +1077,17 @@ cloud_push() {
     return 1
   }
 
+  if ((respect_interval)); then
+    state_dir_v
+    local check_ts='' check_min=${CFG[cloud_checkin_min]:-5}
+    [[ $check_min =~ ^[1-9][0-9]{0,2}$ ]] && ((check_min <= 60)) || check_min=5
+    [[ -r $STATE_DIR/cloud-checkin ]] && read -r check_ts <"$STATE_DIR/cloud-checkin"
+    if [[ $check_ts =~ ^[0-9]+$ ]] && ((${EPOCHSECONDS:-0} >= check_ts && ${EPOCHSECONDS:-0} - check_ts < check_min * 60)); then
+      return 0
+    fi
+    _cloud_stamp "$STATE_DIR/cloud-checkin" "${EPOCHSECONDS:-0}"
+  fi
+
   # A check-in is also the node's opportunity to receive dashboard-managed
   # settings and email presentation. Reload CFG after a successful pull so the
   # new values affect this same cycle. Only the narrow portal allowlist wins;
@@ -946,11 +1101,10 @@ cloud_push() {
   CLOUD_CONFIG_CHANGED=0
   if cloud_config_pull 1; then
     pulled=1
-  else
-    sleep 2
-    cloud_config_pull 1 && pulled=1
   fi
-  ((pulled)) && cfg_load
+  if ((pulled)); then
+    config_apply || warn 'portal settings saved; automatic maintenance will retry applying schedules'
+  fi
 
   # Polled whether or not the settings fetch succeeded. A queued update is an
   # explicit request from the operator; making it wait on an unrelated RPC is
@@ -965,6 +1119,10 @@ cloud_push() {
   # automatic updater. With no command, a policy change to auto_update still
   # takes effect in this same check-in.
   ((CLOUD_COMMAND_CLAIMED)) || update_startup
+
+  # Local recording has its own timer, independent of network health. Scheduled
+  # check-ins exchange control data only; explicit push/sync shares one reading.
+  if ((respect_interval)) && [[ ${CFG[cloud_storage]:-local} != cloud ]]; then return 0; fi
 
   # The timer wakes every minute so a dashboard change is picked up quickly.
   # Expensive collection and ingestion still happen only at cloud_push_min --
@@ -985,7 +1143,7 @@ cloud_push() {
     fi
   fi
 
-  cloud_collect_full
+  cloud_collect_full || return 1
   cloud_ingest_collected "$quiet"
 }
 
@@ -1063,6 +1221,7 @@ cloud_link() {
   [[ -n $user_code && -n $device_code ]] || die 'pairing response was malformed'
 
   local link_url=${CFG[cloud_portal_url]}
+  if cloud_official_url && [[ -n $CLOUD_RESOLVED_URL ]]; then link_url=${CLOUD_RESOLVED_URL%/api/agent/v1}; fi
   link_url=${link_url%/}
   [[ -n $link_url ]] && link_url="$link_url/link"
 
@@ -1216,7 +1375,11 @@ cloud_config_pull() {
   local token body
   token=$(secret cloud_node_token)
   body="{\"p_node_token\": \"$(_jstr "$token")\"}"
-  _cloud_rpc hyn_fetch_config "$body" || {
+  local config_rpc=hyn_fetch_config
+  if [[ ${CFG[cloud_storage]:-local} != cloud ]] && ! cfg_on cloud_notifications; then
+    config_rpc=hyn_fetch_local_config
+  fi
+  _cloud_rpc "$config_rpc" "$body" || {
     ((quiet)) || warn "config pull failed: $CLOUD_LAST_ERR"
     return 1
   }
@@ -1373,6 +1536,8 @@ cloud_status() {
   url=$(cloud_url)
   token=$(secret cloud_node_token)
   printf 'cloud    %s\n' "$(cfg_on cloud_enabled && printf enabled || printf disabled)"
+  printf 'storage  %s (history: %s/local)\n' "${CFG[cloud_storage]:-local}" "$(state_dir)"
+  printf 'check-in every %s minute(s)\n' "${CFG[cloud_checkin_min]:-5}"
   printf 'url      %s\n' "${url:-(not set)}"
   printf 'anon key %s\n' "$([[ -n ${CFG[cloud_anon_key]} ]] && printf 'set' || printf '(not set)')"
   printf 'portal   %s\n' "${CFG[cloud_portal_url]:-(not set)}"

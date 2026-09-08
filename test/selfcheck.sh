@@ -1362,6 +1362,7 @@ CFG[highway_track]=off
 # digest is captured by standing in for it. The subject of these checks is the
 # alert engine -- severity gating, the digest, hysteresis, the cooldown -- not the
 # transport, which test/cloud-integration.sh drives against a real endpoint.
+CFG[cloud_notifications]=on
 notify_configured() { return 0; }
 ch_web() {
   printf -- '--- [%s] %s\n%s\n' "$4" "$1" "$2"
@@ -1408,6 +1409,7 @@ eq 'three problems, one digest' '1' "$(printf '%s\n' "$out" | grep -c '^--- \[')
 contains 'digest subject counts them' '3 issues' "$out"
 contains 'digest leads with severity' 'CRITICAL' "$out"
 contains 'digest lists each problem' 'problem three' "$out"
+CFG[cloud_notifications]=off
 
 # The daily send cap is the backstop against a flapping rule burning quota.
 CFG[notify_max_per_day]=2
@@ -2264,7 +2266,7 @@ _schema="$ROOT/supabase/schema.sql"
 _nodecfg="$ROOT/web-portal/lib/node-config.ts"
 _agent_keys=$(sed -n '/^_cfg_cloud_allowed()/,/^}/p' "$HYN_LIB/core.sh" |
   grep -oE '[a-z_]+ \||[a-z_]+\)' | tr -d ' |)' | grep -v '^$' | sort -u)
-eq 'the agent declares twelve managed settings' 12 "$(printf '%s\n' "$_agent_keys" | grep -c .)"
+eq 'the agent declares eighteen managed settings' 18 "$(printf '%s\n' "$_agent_keys" | grep -c .)"
 # The database and portal declarations live in the repository, not in the npm
 # package, so this half of the comparison only runs where they exist. Stated as a
 # skip rather than silently passing: a check that quietly does nothing is worse
@@ -3051,9 +3053,9 @@ eq 'a too-fast beat is clamped up'  '5'    "$AGENT_INTERVAL"
 CFG[heartbeat_sec]=99999; agent_interval_v
 eq 'a too-slow beat is clamped down' '3600' "$AGENT_INTERVAL"
 CFG[heartbeat_sec]='; rm -rf /'; agent_interval_v
-eq 'a junk interval falls back'     '24'   "$AGENT_INTERVAL"
+eq 'a junk interval falls back'     '60'   "$AGENT_INTERVAL"
 CFG[heartbeat_sec]=0; agent_interval_v
-eq 'zero would spin, so it falls back' '24' "$AGENT_INTERVAL"
+eq 'zero would spin, so it falls back' '60' "$AGENT_INTERVAL"
 CFG[heartbeat_sec]=24
 
 # Liveness is measured, not assumed: this is the difference between a loop that
@@ -3217,6 +3219,7 @@ _heal_log="$TMP/heal-systemctl"
 _fake_heal_systemctl() {
   case "$*" in
     'cat hyn-agent.service') return 0 ;;
+    'is-enabled --quiet hyn-agent.service') return 0 ;;
     'is-active hyn-agent.service') printf '%s\n' "$_heal_state"; [[ $_heal_state == active ]] ;;
     *) printf '%s\n' "$*" >>"$_heal_log" ;;
   esac

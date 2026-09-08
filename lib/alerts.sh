@@ -373,6 +373,10 @@ alerts_evaluate() {
 # sends at most one message covering all of it.
 alerts_notify() {
   local force=${1:-0}
+  if ((force == 0)) && [[ ${CFG[cloud_storage]:-local} != cloud ]] && ! cfg_on cloud_notifications; then
+    AL_NOTIFY=0
+    return 0
+  fi
   local minsev=${CFG[alert_min_severity]:-warn}
   local minrank repeat now=${EPOCHSECONDS:-0}
   minrank=$(_sev_rank "$minsev")

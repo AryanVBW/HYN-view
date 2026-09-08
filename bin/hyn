@@ -498,6 +498,7 @@ cmd_speedtest() {
 }
 
 cmd_history() {
+  if [[ ${1:-} == --local ]]; then local_history "${2:-1}"; return $?; fi
   local json=0 n=20 a
   for a in "$@"; do
     case $a in
@@ -665,7 +666,7 @@ cmd_notify() {
   node      ${CFG[cloud_node_id]:-unknown}
 
 Nothing is wrong; you asked for a test."
-      if NOTIFY_CATEGORY=test notify_send info "[hyn] Test from $HOSTNAME_S" "$body"; then
+      if NOTIFY_CATEGORY='test' notify_send info "[hyn] Test from $HOSTNAME_S" "$body"; then
         printf 'hyn: queued with the portal. It resolves the recipient and sends.\n'
         printf '     delivery, including any failure, is recorded on the Account page.\n'
       else
@@ -717,20 +718,29 @@ cmd_config() {
       done
       ;;
     get) [[ -n ${2:-} ]] || die 'usage: hyn config get <key>'; printf '%s\n' "${CFG[$2]:-}" ;;
-    pull) cloud_config_pull 0 ;;
+    pull) cloud_config_pull 0 || return 1; config_apply || return 1 ;;
+    apply) config_apply || return 1 ;;
     set)
-      [[ -n ${2:-} && $# -ge 3 ]] || die 'usage: hyn config set <key> <value>'
-      config_set "$2" "$3"
-      printf 'hyn: %s = %s (in %s)\n' "$2" "$3" "$(config_file_rw)"
+      shift
+      config_set "$@" || return 1
+      config_apply || { warn 'saved, but schedules could not be applied; automatic maintenance will retry'; return 1; }
+      while (($#)); do
+        printf 'hyn: %s = %s (in %s)\n' "$1" "$2" "$(config_file_rw)"
+        if [[ ${CFG[$1]:-} != "$2" ]]; then
+          printf 'hyn: effective value is %s; the portal manages this property. Clear or change it in portal settings.\n' "${CFG[$1]:-}"
+        fi
+        shift 2
+      done
       ;;
     edit)
       local f
       f=$(config_file_rw)
       mkdir -p "${f%/*}" 2>/dev/null
       [[ -f $f ]] || printf '# hyn-view config -- see `hyn config show` for keys\n' >"$f"
-      "${EDITOR:-vi}" "$f"
+      "${EDITOR:-vi}" "$f" || return 1
+      config_apply || return 1
       ;;
-    *) die 'usage: hyn config [show|get <k>|set <k> <v>|pull|path|edit]' ;;
+    *) die 'usage: hyn config [show|get <k>|set <k> <v> [<k> <v>...]|pull|apply|path|edit]' ;;
   esac
   return 0
 }
@@ -904,7 +914,7 @@ cmd_doctor() {
       # Read straight out of the config, so validate before it reaches bash
       # arithmetic below. The resident loop clamps the same value for the same
       # reason; doctor must not be the one place a typo produces an error.
-      hbi=${CFG[heartbeat_sec]:-24}
+      hbi=${CFG[heartbeat_sec]:-60}
       [[ $hbi =~ ^[1-9][0-9]{0,4}$ ]] || hbi=24
       ast=$(systemctl is-active hyn-agent.service 2>/dev/null)
       if [[ $ast == active ]]; then
@@ -1043,14 +1053,19 @@ cmd_help() {
     '  heartbeat             send one liveness beat now' \
     '  agent                 run the resident loop in the foreground (debugging;' \
     '                        hyn-agent.service is what normally runs it)' \
+    '  autostart [status|enable|repair]  verify or repair unattended boot services' \
     '  cloud status          portal URL, node id, and when the last push was' \
+    '  cloud usage           local HTTP totals and free-plan budget references' \
+    '  cloud optimize        use local history, 60s beats and 5min check-ins' \
+    '  history --local [N]   print the last N private local snapshots as JSONL' \
+    '  logs [N]              read local alert and service diagnostics' \
     '  config pull           fetch monitoring settings from the portal' \
     '' \
     '  update [--check] [--yes]  check npm for a newer release, or install it' \
     '  about                 author, licence and version detail' \
     '' \
     '  theme list | set <name> | current | preview <name>' \
-    '  config show | get <k> | set <k> <v> | path | edit' \
+    '  config show | get <k> | set <k> <v> [<k> <v>...] | apply | path | edit' \
     '  doctor                check the environment end to end' \
     '  doctor --fix          reinstall the units and timers, then push (root)' \
     '  onboard               full guided setup: mode, theme, alerts, reports' \
@@ -1094,6 +1109,9 @@ main() {
     setup | install-service)
       source "$HYN_LIB/setup.sh" || die 'cannot load setup helpers'
       setup_run "$@" ;;
+    autostart)
+      source "$HYN_LIB/setup.sh" || die 'cannot load setup helpers'
+      autostart_run "$@" ;;
     wizard | configure)
       die 'there is no local notification setup any more: recipients, provider and schedule live in the portal. Pair with `sudo hyn link`, then use its Account page. For local display and threshold options run `hyn onboard`.' ;;
     onboard | onboarding | firstrun)
@@ -1117,16 +1135,28 @@ main() {
     cloud)
       case ${1:-status} in
         status | '') cloud_status ;;
+        usage) cloud_usage "${2:-1}" ;;
+        optimize)
+          config_set cloud_storage local && config_set cloud_notifications off && config_set heartbeat_sec 60 &&
+            config_set cloud_checkin_min 5 || return 1
+          printf 'hyn: local history enabled; resident agent reloads within 5 minutes.\n'
+          cloud_usage ;;
         push) cloud_push 0 0 ;;
-        pull | config) cloud_config_pull 0 ;;
-        run-command | command) cloud_run_pending 0 ;;
+        pull | config) cloud_config_pull 0 || return 1; config_apply || return 1 ;;
+        run-command | command)
+          # The recovery timer also repairs a wedged resident loop when local
+          # sampling has deliberately been scheduled less often than five minutes.
+          is_root && { source "$HYN_LIB/setup.sh" 2>/dev/null && setup_self_heal; } || true
+          cloud_run_pending 0 ;;
         link) shift; cloud_link "$@" ;;
         unlink) shift; cloud_unlink "$@" ;;
         *) die "unknown cloud subcommand: $1 (try 'hyn cloud status')" ;;
       esac ;;
     report) cmd_report "$@" ;;
+    logs) local_logs "${1:-50}" ;;
     record)
-      record_sample
+      local recorded=0
+      record_sample || recorded=$?
       # The record timer is the only one enabled unconditionally, paired or not,
       # so it is the only place an update check is guaranteed to happen on every
       # installed machine. Without this an unpaired box -- one nobody logs into and
@@ -1141,6 +1171,7 @@ main() {
       # run `hyn doctor --fix` by hand. Root-only and a no-op when nothing has
       # drifted, so it costs nothing on the runs where everything is fine.
       is_root && { source "$HYN_LIB/setup.sh" 2>/dev/null && setup_self_heal; } || true
+      return "$recorded"
       ;;
     notify) cmd_notify "$@" ;;
     uninstall | remove)
