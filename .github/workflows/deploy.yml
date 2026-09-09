@@ -1,30 +1,66 @@
-name: Deploy to Vercel
+name: Deploy portal to Heroku
 
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
+# Never interrupt a release that is already building on Heroku.
+concurrency:
+  group: portal-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  deploy:
+  validate:
     runs-on: ubuntu-latest
-    environment: production
-    permissions:
-      contents: read
-    env:
-      VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
-      VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm lint
 
-      - name: Install Vercel CLI
-        run: npm install --global vercel@latest
-
-      - name: Pull Vercel environment
-        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
-
-      - name: Build
-        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
-
-      - name: Deploy
-        run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: https://hyn-view-40fdf9204819.herokuapp.com
+    env:
+      HEROKU_APP_NAME: hyn-view
+      HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install Heroku CLI
+        run: npm install --global heroku@11.10.0
+      - name: Deploy exact GitHub commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${HEROKU_API_KEY:?Set the production HEROKU_API_KEY secret}"
+          # Keep credentials out of remote URLs and command output.
+          umask 077
+          printf 'machine git.heroku.com\nlogin heroku\npassword %s\n' "$HEROKU_API_KEY" > "$HOME/.netrc"
+          trap 'rm -f "$HOME/.netrc"' EXIT
+          heroku git:remote --app "$HEROKU_APP_NAME"
+          git push heroku HEAD:refs/heads/main
+          heroku releases --app "$HEROKU_APP_NAME" --num 3
+      - name: Smoke test production
+        run: bash scripts/smoke-production.sh https://hyn-view-40fdf9204819.herokuapp.com
