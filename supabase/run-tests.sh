@@ -171,14 +171,24 @@ for migration in "$HERE"/migrations/*.sql; do
   [[ ${migration##*/} > 20260909120000_portal_roles.sql ]] || continue
   psql -f "$migration" >"$WORK/upgrade.log" 2>&1 || { cat "$WORK/upgrade.log"; exit 1; }
 done
+psql -f "$HERE/owner-linking-test.sql" >"$WORK/owner-test.log" 2>&1 || { cat "$WORK/owner-test.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/owner-test.log"
 psql -f "$HERE/shared-observability-test.sql" >"$WORK/upgrade-test.log" 2>&1 || { cat "$WORK/upgrade-test.log"; exit 1; }
 printf 'PASS  shared observability works from migrations before schema reapplication\n'
 psql -f "$HERE/schema.sql" >"$WORK/final-schema.log" 2>&1 || { cat "$WORK/final-schema.log"; exit 1; }
 psql -c "do \$\$ begin if (select role from public.profiles where email='legacy-user@roles.test')<>'admin' then raise exception 'reapply elevated admin'; end if; end \$\$; delete from auth.users where email in ('legacy-admin@roles.test','legacy-user@roles.test')" || exit 1
+psql -f "$HERE/owner-linking-test.sql" >"$WORK/owner-schema-test.log" 2>&1 || { cat "$WORK/owner-schema-test.log"; exit 1; }
+printf 'PASS  full schema preserves self-service owner linking\n'
 printf 'PASS  legacy roles migrate once and reapply preserves restricted Admins\n'
 psql -f "$HERE/roles-test.sql" >"$WORK/roles-test.log" 2>&1 || { cat "$WORK/roles-test.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/roles-test.log"
-psql -f "$HERE/migrations/20260910120000_server_access_bandwidth.sql" >"$WORK/access-migration.log" 2>&1 || { cat "$WORK/access-migration.log"; exit 1; }
+# Reapply later migrations in order so final overrides remain installed.
+for migration in "$HERE"/migrations/*.sql; do
+  [[ ${migration##*/} > 20260909120000_portal_roles.sql ]] || continue
+  psql -f "$migration" >"$WORK/access-migration.log" 2>&1 || { cat "$WORK/access-migration.log"; exit 1; }
+done
+psql -f "$HERE/owner-linking-test.sql" >"$WORK/owner-test.log" 2>&1 || { cat "$WORK/owner-test.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/owner-test.log"
 psql -f "$HERE/server-access-bandwidth-test.sql" >"$WORK/access-test.log" 2>&1 || { cat "$WORK/access-test.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/access-test.log"
 psql -f "$HERE/shared-observability-test.sql" >"$WORK/shared-test.log" 2>&1 || { cat "$WORK/shared-test.log"; exit 1; }

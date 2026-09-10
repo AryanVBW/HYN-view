@@ -57,7 +57,7 @@ begin
     denied:=false;
     begin execute call_sql;
     exception when raise_exception then
-      if sqlerrm not in ('super administrator role required','monitor or super administrator role required') then raise; end if;
+      if sqlerrm not in ('super administrator role required','monitor or super administrator role required','an active Monitor, Admin or Super admin account is required to link a server') then raise; end if;
       denied:=true;
     end;
     if not denied then raise exception 'viewer wrote using %',call_sql; end if;
