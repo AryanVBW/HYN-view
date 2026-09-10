@@ -16,6 +16,7 @@
 #   1 ts  2 cpu  3 steal  4 iowait  5 mem  6 swap  7 load_milli  8 disk_max_pct
 #   9 rx_bps 10 tx_bps 11 rx_total 12 tx_total 13 retrans_pm 14 lat_us
 #  15 ct_pct 16 hw_active 17 hw_rss 18 hw_cpu 19 procs 20 hw_restarts
+#  21 power_deciwatts 22 boot_id 23 wan_iface
 
 metrics_file() {
   state_dir_v
@@ -74,12 +75,15 @@ record_sample() {
   # defaults it, so a 20-column row simply has no power history. An unreadable
   # sensor records as empty, never 0: averaging a fabricated zero into the day
   # would understate every figure in the report.
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  local boot='-'
+  [[ ! -r $HYN_PROC/sys/kernel/random/boot_id ]] || read -r boot <"$HYN_PROC/sys/kernel/random/boot_id"
+  [[ $boot =~ ^[A-Za-z0-9-]{1,64}$ ]] || boot='-'
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${EPOCHSECONDS:-0}" "$CPU_PCT" "$CPU_STEAL" "$CPU_IOWAIT" "$MEM_PCT" "$SWAP_PCT" \
     "$loadm" "$diskmax" "${NET_RXR[$ifc]:-0}" "${NET_TXR[$ifc]:-0}" \
     "${NET_RX[$ifc]:-0}" "${NET_TX[$ifc]:-0}" "$NET_RETRANS_PM" "$lat" \
     "${CT_PCT:-0}" "${HW_ACTIVE:-0}" "${HW_RSS:-0}" "${HW_CPU:-0}" \
-    "${PROC_TOTAL:-0}" "$hwrest" "${PWR_INPUT_DW:-}" >>"$f"
+    "${PROC_TOTAL:-0}" "$hwrest" "${PWR_INPUT_DW:--}" "$boot" "${ifc:--}" >>"$f"
 
   # Trim by age rather than line count, so changing the record interval does not
   # silently change how much history is kept.
@@ -177,7 +181,7 @@ report_aggregate() {
   local cpu_s=0 cpu_max=0 steal_s=0 steal_max=0 io_s=0 io_max=0
   local mem_s=0 mem_max=0 swap_max=0 load_s=0 load_max=0
   local disk_first=-1 disk_last=0 disk_max=0
-  local rx_max=0 tx_max=0 rxt_first=-1 rxt_last=0 txt_first=-1 txt_last=0
+  local rx_max=0 tx_max=0 rxt_last=-1 txt_last=-1 rx_bytes=0 tx_bytes=0 resets=0
   local retr_s=0 retr_max=0 lat_s=0 lat_n=0 lat_max=0 ct_max=0
   local hw_up=0 hw_rss_max=0 hw_cpu_s=0 hw_rest_max=0 hw_rest_first=-1
   local procs_max=0 first_ts=0 last_ts=0
@@ -186,6 +190,7 @@ report_aggregate() {
   # absent: a box with no sensor, or a run before this release, contributes no
   # sample rather than a zero. pwr_n is therefore not n.
   local pwr_s=0 pwr_n=0 pwr_max=0 pwr_min=-1
+  local pwr boot iface last_boot='' last_iface=''
   local -a s_cpu=() s_mem=() s_disk=() s_rx=() s_tx=()
 
   local busy_cpu=${CFG[report_busy_cpu_pct]:-80}
@@ -193,7 +198,7 @@ report_aggregate() {
   [[ $busy_cpu =~ ^[0-9]+$ ]] || busy_cpu=80
   [[ $busy_mem =~ ^[0-9]+$ ]] || busy_mem=85
 
-  while IFS=$'\t' read -r ts cpu steal iowait mem swap loadm diskmax rxb txb rxt txt retr lat ctp hwa hwr hwc procs hwrest pwr; do
+  while IFS=$'\t' read -r ts cpu steal iowait mem swap loadm diskmax rxb txb rxt txt retr lat ctp hwa hwr hwc procs hwrest pwr boot iface; do
     [[ $ts =~ ^[0-9]+$ ]] || continue
     ((ts < cutoff)) && continue
     ((n == 0)) && first_ts=$ts
@@ -213,16 +218,22 @@ report_aggregate() {
     ((diskmax > disk_max)) && disk_max=$diskmax
     rxb=${rxb:-0}; ((rxb > rx_max)) && rx_max=$rxb
     txb=${txb:-0}; ((txb > tx_max)) && tx_max=$txb
-    rxt=${rxt:-0}
-    ((rxt_first < 0)) && rxt_first=$rxt
-    # A counter reset means a reboot or NIC reset; restart the accumulator
-    # rather than reporting a negative day's transfer.
-    ((rxt < rxt_last)) && rxt_first=$rxt
+    rxt=${rxt:-0}; txt=${txt:-0}
+    # Sum observed deltas across resets. A new baseline must never erase bytes
+    # already observed earlier in the reporting window.
+    if ((rxt_last >= 0 && txt_last >= 0)); then
+      if ((rxt >= rxt_last && txt >= txt_last)) &&
+         [[ $boot == "$last_boot" && $iface == "$last_iface" ]]; then
+        ((rx_bytes += rxt - rxt_last))
+        ((tx_bytes += txt - txt_last))
+      else
+        ((resets++))
+      fi
+    fi
     rxt_last=$rxt
     txt=${txt:-0}
-    ((txt_first < 0)) && txt_first=$txt
-    ((txt < txt_last)) && txt_first=$txt
     txt_last=$txt
+    last_boot=$boot; last_iface=$iface
     retr=${retr:-0}; ((retr_s += retr)); ((retr > retr_max)) && retr_max=$retr
     lat=${lat:-0}
     if ((lat > 0)); then ((lat_s += lat)); ((lat_n++)); ((lat > lat_max)) && lat_max=$lat; fi
@@ -261,10 +272,9 @@ report_aggregate() {
   R[disk_now]=$disk_last; R[disk_max]=$disk_max
   R[disk_delta]=$((disk_last - (disk_first < 0 ? disk_last : disk_first)))
   R[rx_peak]=$rx_max; R[tx_peak]=$tx_max
-  R[rx_bytes]=$((rxt_last - (rxt_first < 0 ? rxt_last : rxt_first)))
-  R[tx_bytes]=$((txt_last - (txt_first < 0 ? txt_last : txt_first)))
-  ((R[rx_bytes] < 0)) && R[rx_bytes]=0
-  ((R[tx_bytes] < 0)) && R[tx_bytes]=0
+  R[rx_bytes]=$rx_bytes
+  R[tx_bytes]=$tx_bytes
+  R[network_resets]=$resets
   R[retrans_avg]=$((retr_s / n)); R[retrans_max]=$retr_max
   R[lat_avg]=$((lat_n > 0 ? lat_s / lat_n : 0)); R[lat_max]=$lat_max
   R[ct_max]=$ct_max
@@ -463,6 +473,7 @@ report_text() {
       fmt_size_v "${R[rx_bytes]}"; local rxb=$FMT_OUT
       fmt_size_v "${R[tx_bytes]}"
       printf '  transferred      %s down / %s up in %sh\n' "$rxb" "$FMT_OUT" "$hours"
+      ((${R[network_resets]:-0} == 0)) || printf '  coverage         %s counter reset(s); unobserved traffic excluded\n' "${R[network_resets]}"
       fmt_rate_v "${R[rx_peak]}"; local rxp=$FMT_OUT
       fmt_rate_v "${R[tx_peak]}"
       printf '  peak rate        %s down / %s up\n' "$rxp" "$FMT_OUT"
@@ -772,6 +783,7 @@ report_html() {
       e_kv_open
       e_kv 'Interface' "${NET_WAN:-none}${NET_IDENT_LABEL:+ ($NET_IDENT_LABEL)}"
       e_kv 'Transferred' "$(fmt_size "${R[rx_bytes]:-0}") down / $(fmt_size "${R[tx_bytes]:-0}") up"
+      ((${R[network_resets]:-0} == 0)) || e_kv 'Network coverage' "${R[network_resets]} counter reset(s); unobserved traffic excluded"
       e_kv 'Peak rate' "$(fmt_rate "${R[rx_peak]:-0}") down / $(fmt_rate "${R[tx_peak]:-0}") up"
       local rcol=$E_INK
       ((${R[retrans_max]:-0} > 50)) && rcol=$E_WARN

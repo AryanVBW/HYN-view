@@ -1459,6 +1459,13 @@ eq 'days until full'  '9'    "${R[disk_days]}"
 printf '%s\t10\t0\t0\t50\t0\t100\t82\t10\t10\t50\t20\t0\t0\t0\t1\t0\t0\t10\t0\n' $((now + 1)) >>"$mf"
 report_aggregate 24
 truthy 'transfer never goes negative' '(( ${R[rx_bytes]} >= 0 ))'
+eq 'reset preserves earlier received bytes' '2000' "${R[rx_bytes]}"
+eq 'reset preserves earlier sent bytes' '400' "${R[tx_bytes]}"
+eq 'counter reset is reported' '1' "${R[network_resets]}"
+printf '%s\t10\t0\t0\t50\t0\t100\t82\t10\t10\t150\t70\t0\t0\t0\t1\t0\t0\t10\t0\n' $((now + 2)) >>"$mf"
+report_aggregate 24
+eq 'received bytes continue after reset' '2100' "${R[rx_bytes]}"
+eq 'sent bytes continue after reset' '450' "${R[tx_bytes]}"
 
 # Rows older than the window are excluded.
 printf '%s\t99\t0\t0\t99\t0\t100\t99\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\n' $((now - 200000)) >>"$mf"

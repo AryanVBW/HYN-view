@@ -602,6 +602,31 @@ cloud_heartbeat_age_v() {
   return 0
 }
 
+# Send WAN counters only; detailed readings and logs remain local. A subshell
+# preserves the successful heartbeat result if an older portal lacks this RPC.
+cloud_record_bandwidth() (
+  local token=$1 iface boot line name rx tx body
+  declare -F net_find_wan >/dev/null || return 0
+  net_find_wan || return 0
+  iface=$NET_WAN
+  [[ $iface =~ ^[a-zA-Z0-9_.:-]{1,64}$ ]] || return 0
+  [[ -r $HYN_PROC/sys/kernel/random/boot_id && -r $HYN_PROC/net/dev ]] || return 0
+  read -r boot <"$HYN_PROC/sys/kernel/random/boot_id"
+  [[ $boot =~ ^[a-zA-Z0-9-]{1,64}$ ]] || return 0
+  local -a fields=()
+  while IFS= read -r line; do
+    [[ $line == *:* ]] || continue
+    name=${line%%:*}; name=${name//[[:space:]]/}
+    [[ $name == "$iface" ]] || continue
+    read -r -a fields <<<"${line#*:}"
+    rx=${fields[0]:-}; tx=${fields[8]:-}
+    [[ $rx =~ ^[0-9]{1,20}$ && $tx =~ ^[0-9]{1,20}$ ]] || return 0
+    body="{\"p_node_token\":\"$(_jstr "$token")\",\"p_iface\":\"$(_jstr "$iface")\",\"p_boot_id\":\"$boot\",\"p_rx\":$rx,\"p_tx\":$tx}"
+    _cloud_rpc hyn_record_bandwidth "$body" >/dev/null 2>&1 || true
+    return 0
+  done <"$HYN_PROC/net/dev"
+)
+
 cloud_heartbeat() {
   local quiet=${1:-0} token body f rpc=hyn_heartbeat
   CLOUD_HEARTBEAT_STATUS=''
@@ -627,6 +652,7 @@ cloud_heartbeat() {
     _cloud_stamp "$f" "${EPOCHSECONDS:-0}" ok "${CLOUD_HEARTBEAT_STATUS:-active}"
     ((quiet)) || printf 'hyn: heartbeat accepted by %s%s\n' "$(cloud_url)" \
       "$([[ -n $CLOUD_HEARTBEAT_STATUS && $CLOUD_HEARTBEAT_STATUS != active ]] && printf ' (node %s)' "$CLOUD_HEARTBEAT_STATUS")"
+    [[ ${CLOUD_HEARTBEAT_STATUS:-active} == active ]] && cloud_record_bandwidth "$token"
     return 0
   fi
   # A portal that has not been taught this RPC yet (an older deployment, or a

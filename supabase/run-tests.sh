@@ -61,7 +61,7 @@ if [[ ${HYN_TEST_MIGRATIONS:-0} == 1 ]]; then
   # This mode catches patches that work in schema.sql but fail on an existing
   # project because a legacy column, constraint, grant, or row is still present.
   for migration in "$HERE"/migrations/*.sql; do
-    if [[ ${migration##*/} == 20260909120000_portal_roles.sql ]]; then continue; fi
+    if [[ ${migration##*/} > 20260909110000 ]]; then continue; fi
     if [[ ${migration##*/} == 20260821120000_hash_pairing_codes_and_expire.sql ]]; then
       # Simulate an in-flight pairing created by the previous production schema.
       psql -c "insert into public.device_codes (user_code, device_code_hash, hostname, os, agent_version, expires_at) values ('7ABC-DEFG', public._hyn_sha256('legacy-device-code'), 'legacy-host', 'Ubuntu', 'legacy', now() + interval '10 minutes')" >/dev/null
@@ -165,10 +165,23 @@ psql -c "do \$\$ begin if (select role from public.profiles where email='legacy-
 psql -f "$HERE/migrations/20260909120000_portal_roles.sql" >"$WORK/roles.log" 2>&1 || { cat "$WORK/roles.log"; exit 1; }
 # Also apply the complete fresh-install schema over final roles; old definitions
 # must not undo the last role block or promote a restricted Admin.
+# First exercise later migrations and their authorization tests WITHOUT the
+# complete schema filling in missing migration definitions.
+for migration in "$HERE"/migrations/*.sql; do
+  [[ ${migration##*/} > 20260909120000_portal_roles.sql ]] || continue
+  psql -f "$migration" >"$WORK/upgrade.log" 2>&1 || { cat "$WORK/upgrade.log"; exit 1; }
+done
+psql -f "$HERE/shared-observability-test.sql" >"$WORK/upgrade-test.log" 2>&1 || { cat "$WORK/upgrade-test.log"; exit 1; }
+printf 'PASS  shared observability works from migrations before schema reapplication\n'
 psql -f "$HERE/schema.sql" >"$WORK/final-schema.log" 2>&1 || { cat "$WORK/final-schema.log"; exit 1; }
 psql -c "do \$\$ begin if (select role from public.profiles where email='legacy-user@roles.test')<>'admin' then raise exception 'reapply elevated admin'; end if; end \$\$; delete from auth.users where email in ('legacy-admin@roles.test','legacy-user@roles.test')" || exit 1
 printf 'PASS  legacy roles migrate once and reapply preserves restricted Admins\n'
 psql -f "$HERE/roles-test.sql" >"$WORK/roles-test.log" 2>&1 || { cat "$WORK/roles-test.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/roles-test.log"
-printf 'run-tests: final role authorization checks passed\n'
+psql -f "$HERE/migrations/20260910120000_server_access_bandwidth.sql" >"$WORK/access-migration.log" 2>&1 || { cat "$WORK/access-migration.log"; exit 1; }
+psql -f "$HERE/server-access-bandwidth-test.sql" >"$WORK/access-test.log" 2>&1 || { cat "$WORK/access-test.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/access-test.log"
+psql -f "$HERE/shared-observability-test.sql" >"$WORK/shared-test.log" 2>&1 || { cat "$WORK/shared-test.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/shared-test.log"
+printf 'run-tests: final role and server authorization checks passed\n'
 exit 0

@@ -63,16 +63,29 @@ net_iface_hidden() {
 # with the RTF_GATEWAY flag is the default.
 net_find_wan() {
   if [[ ${CFG[wan_iface]} != auto ]]; then NET_WAN=${CFG[wan_iface]}; return 0; fi
-  local ifn dest flags rest best='' bestmetric=999999 metric
+  local ifn dest flags rest best='' bestmetric=4294967296 metric prefix
   local -a f=()
-  [[ -r $HYN_PROC/net/route ]] || { NET_WAN=''; return 1; }
+  if [[ -r $HYN_PROC/net/route ]]; then
   while read -r ifn dest _ flags _ _ metric rest; do
     [[ $ifn == Iface ]] && continue
     [[ $dest == 00000000 ]] || continue
-    ((0x$flags & 0x2)) || continue
+    [[ $flags =~ ^[0-9a-fA-F]+$ ]] || continue
+    ((0x$flags & 0x1)) || continue
     [[ $metric =~ ^[0-9]+$ ]] || metric=0
     if ((metric < bestmetric)); then bestmetric=$metric best=$ifn; fi
   done <"$HYN_PROC/net/route" 2>/dev/null
+  fi
+  # IPv6-only hosts have no IPv4 default. Ignore reject/loopback routes and
+  # prefer the lowest metric, including when no traffic has been sampled yet.
+  if [[ -z $best && -r $HYN_PROC/net/ipv6_route ]]; then
+    while read -r dest prefix _ _ _ metric _ _ flags ifn; do
+      [[ $dest == 00000000000000000000000000000000 && $prefix == 00 && $ifn != lo ]] || continue
+      [[ $metric =~ ^[0-9a-fA-F]{1,8}$ && $flags =~ ^[0-9a-fA-F]{1,8}$ ]] || continue
+      (( (0x$flags & 0x1) && !(0x$flags & 0x200) )) || continue
+      metric=$((16#$metric))
+      if ((metric < bestmetric)); then bestmetric=$metric best=$ifn; fi
+    done <"$HYN_PROC/net/ipv6_route" 2>/dev/null
+  fi
   if [[ -z $best ]]; then
     # No default route (or IPv6-only). Fall back to the busiest non-hidden link.
     local top=0
@@ -149,7 +162,8 @@ net_sample() {
     ring_push "HTX_$safe" "${NET_TXR[$ifn]}"
   done <"$HYN_PROC/net/dev"
 
-  [[ -z $NET_WAN ]] && net_find_wan
+  # Auto mode follows route failover instead of holding a stale NIC forever.
+  net_find_wan
   return 0
 }
 
