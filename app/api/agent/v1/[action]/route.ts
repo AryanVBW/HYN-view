@@ -16,6 +16,7 @@ import {
   retryNodeCommandNotification,
 } from "@/lib/web-notification";
 import { monitorNodeHeartbeat } from "@/workflows/heartbeat-watchdog";
+import { acceptTransientSnapshot } from "@/lib/transient-snapshot";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -65,6 +66,12 @@ export async function POST(
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
+  if (rpc === "hyn_transient_snapshot") {
+    const result = await acceptTransientSnapshot(body, (name, args) => supabase.rpc(name, args));
+    return NextResponse.json(result, {
+      status: result.status, headers: { "Cache-Control": "no-store" },
+    });
+  }
   const { data, error } = await supabase.rpc(rpc, body);
   if (error) {
     const message = error.message || "agent request failed";
@@ -119,7 +126,7 @@ export async function POST(
           console.error("[node-command] completion email retry failed", notificationError);
         }
       }
-      if (nodeId && watchdog?.created === true) {
+      if (nodeId && watchdog?.created === true && process.env.HYN_ENABLE_WORKFLOW_WATCHDOG === "true") {
         try {
           const run = await start(monitorNodeHeartbeat, [nodeId]);
           const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";

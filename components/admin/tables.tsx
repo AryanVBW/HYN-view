@@ -1,12 +1,17 @@
 "use client";
 
+import { portalRoles, roleLabels, normalizeRole } from "@/lib/permissions";
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Loader2, Pause, Play, ShieldOff, Unplug } from "lucide-react";
 import { DeleteNodeButton } from "@/components/admin/delete-node-button";
 import { createClient } from "@/lib/supabase/client";
-import { compareVersions, formatRelative, newestVersion } from "@/lib/dashboard-data";
+import {
+  compareVersions,
+  formatRelative,
+  newestVersion,
+} from "@/lib/dashboard-data";
 import { fleetFreshness, neverLinked } from "@/lib/admin-data";
 import type { AdminClient, AdminNode } from "@/lib/types";
 
@@ -30,7 +35,13 @@ function staleness(node: AdminNode): { label: string; tone: string } {
   return fleetFreshness(node);
 }
 
-export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
+export function NodeTable({
+  nodes,
+  canWrite = false,
+}: {
+  nodes: AdminNode[];
+  canWrite?: boolean;
+}) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -39,13 +50,13 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
   const unlinkedCount = nodes.filter(neverLinked).length;
   const rows = onlyUnlinked ? nodes.filter(neverLinked) : nodes;
   const newestAgent = newestVersion(
-    nodes.filter((n) => !n.is_demo).map((n) => n.agent_version)
+    nodes.filter((n) => !n.is_demo).map((n) => n.agent_version),
   );
 
   async function act(
     nodeId: string,
     fn: "hyn_admin_set_node_status" | "hyn_admin_set_node_revoked",
-    params: Record<string, unknown>
+    params: Record<string, unknown>,
   ) {
     setBusyId(nodeId);
     setError(null);
@@ -62,7 +73,7 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
   function pause(node: AdminNode) {
     const raw = window.prompt(
       `Pause ${node.name} for how many minutes?\n\nLeave blank for an indefinite pause. A timed pause resumes by itself, which is safer: monitoring you forgot to switch back on is worse than none.`,
-      "60"
+      "60",
     );
     if (raw === null) return;
     const minutes = raw.trim() === "" ? null : Number(raw);
@@ -70,7 +81,9 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
       setError("Pause duration must be a positive number of minutes.");
       return;
     }
-    const reason = window.prompt("Reason (recorded in the audit trail):", "maintenance") ?? "";
+    const reason =
+      window.prompt("Reason (recorded in the audit trail):", "maintenance") ??
+      "";
     act(node.id, "hyn_admin_set_node_status", {
       p_node_id: node.id,
       p_status: "paused",
@@ -82,7 +95,7 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
   function suspend(node: AdminNode) {
     const reason = window.prompt(
       `Suspend ${node.name}? It stops accepting data until an administrator reinstates it.\n\nReason (recorded in the audit trail):`,
-      ""
+      "",
     );
     if (reason === null) return;
     act(node.id, "hyn_admin_set_node_status", {
@@ -105,7 +118,7 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
   function revoke(node: AdminNode) {
     if (
       !window.confirm(
-        `Revoke ${node.name}'s credential?\n\nThis is not reversible from here: the machine must be paired again with sudo hyn link. To stop data temporarily, pause it instead.`
+        `Revoke ${node.name}'s credential?\n\nThis is not reversible from here: the machine must be paired again with sudo hyn link. To stop data temporarily, pause it instead.`,
       )
     )
       return;
@@ -136,15 +149,22 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                   : "border-border text-muted-foreground hover:border-[color:var(--chart-2)]/60 hover:text-[color:var(--chart-2)]"
               }`}
             >
-              {onlyUnlinked ? "show all machines" : `never linked (${unlinkedCount})`}
+              {onlyUnlinked
+                ? "show all machines"
+                : `never linked (${unlinkedCount})`}
             </button>
           ) : null}
         </div>
-        {pending ? <Loader2 className="size-4 animate-spin text-primary" /> : null}
+        {pending ? (
+          <Loader2 className="size-4 animate-spin text-primary" />
+        ) : null}
       </div>
 
       {error ? (
-        <p role="alert" className="mt-4 rounded-md border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs text-destructive">
+        <p
+          role="alert"
+          className="mt-4 rounded-md border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs text-destructive"
+        >
           {error}
         </p>
       ) : null}
@@ -170,7 +190,10 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
               const s = staleness(node);
               const busy = busyId === node.id;
               return (
-                <tr key={node.id} className="border-b border-border/40 align-top transition-colors hover:bg-card/40">
+                <tr
+                  key={node.id}
+                  className="border-b border-border/40 align-top transition-colors hover:bg-card/40"
+                >
                   <td className="py-3 pr-4 pl-4">
                     <Link
                       href={`/admin?tab=client&client=${node.owner_id ?? ""}&node=${node.id}`}
@@ -183,7 +206,9 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                       {node.is_demo ? " · demo" : ""}
                     </span>
                     <span className="block text-muted-foreground">
-                      {node.agent_version ? `hyn ${node.agent_version}` : "version unknown"}
+                      {node.agent_version
+                        ? `hyn ${node.agent_version}`
+                        : "version unknown"}
                     </span>
                     {isBehind(node, newestAgent) ? (
                       <span className="block text-[color:var(--chart-2)]">
@@ -192,7 +217,8 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                     ) : null}
                     {neverLinked(node) ? (
                       <span className="block text-[color:var(--chart-2)]">
-                        never linked · approved {formatRelative(node.created_at)}
+                        never linked · approved{" "}
+                        {formatRelative(node.created_at)}
                       </span>
                     ) : null}
                   </td>
@@ -208,7 +234,9 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                       <span className="text-card-foreground/80">—</span>
                     )}
                     {node.owner_status === "suspended" ? (
-                      <span className="block text-destructive">account suspended</span>
+                      <span className="block text-destructive">
+                        account suspended
+                      </span>
                     ) : null}
                   </td>
                   <td className="py-3 pr-4 whitespace-nowrap">
@@ -222,22 +250,40 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                       </span>
                     ) : null}
                     {node.status_reason ? (
-                      <span className="block text-muted-foreground">{node.status_reason}</span>
+                      <span className="block text-muted-foreground">
+                        {node.status_reason}
+                      </span>
                     ) : null}
                   </td>
-                  <td className="py-3 pr-4 text-card-foreground/80">{pct(node.last_cpu_pct)}</td>
                   <td className="py-3 pr-4 text-card-foreground/80">
-                    {node.last_temp_c === null ? "—" : `${Math.round(Number(node.last_temp_c))}°C`}
+                    {pct(node.last_cpu_pct)}
                   </td>
-                  <td className="py-3 pr-4 text-card-foreground/80">{pct(node.last_mem_pct)}</td>
-                  <td className="py-3 pr-4 text-card-foreground/80">{pct(node.last_disk_pct)}</td>
+                  <td className="py-3 pr-4 text-card-foreground/80">
+                    {node.last_temp_c === null
+                      ? "—"
+                      : `${Math.round(Number(node.last_temp_c))}°C`}
+                  </td>
+                  <td className="py-3 pr-4 text-card-foreground/80">
+                    {pct(node.last_mem_pct)}
+                  </td>
+                  <td className="py-3 pr-4 text-card-foreground/80">
+                    {pct(node.last_disk_pct)}
+                  </td>
                   <td className="py-3 pr-4">
-                    <span className={node.alerts_open > 0 ? "text-destructive" : "text-muted-foreground"}>
+                    <span
+                      className={
+                        node.alerts_open > 0
+                          ? "text-destructive"
+                          : "text-muted-foreground"
+                      }
+                    >
                       {node.alerts_open}
                     </span>
                   </td>
                   <td className="py-3 pr-4">
-                    <span className="text-card-foreground/80">{node.notifications_24h}</span>
+                    <span className="text-card-foreground/80">
+                      {node.notifications_24h}
+                    </span>
                     {node.notifications_failed_24h > 0 ? (
                       <span className="block text-destructive">
                         {node.notifications_failed_24h} failed
@@ -246,7 +292,9 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
                   </td>
                   <td className="py-3 pr-4">
                     <div className="flex flex-wrap items-center gap-1.5">
-                      {busy ? (
+                      {!canWrite ? (
+                        <span className="text-muted-foreground">View only</span>
+                      ) : busy ? (
                         <Loader2 className="size-4 animate-spin text-primary" />
                       ) : (
                         <>
@@ -304,157 +352,225 @@ export function NodeTable({ nodes }: { nodes: AdminNode[] }) {
   );
 }
 
-export function ClientTable({ clients, selfId }: { clients: AdminClient[]; selfId: string }) {
+export function ClientTable({
+  clients,
+  selfId,
+  canWrite = false,
+}: {
+  clients: AdminClient[];
+  selfId: string;
+  canWrite?: boolean;
+}) {
   const router = useRouter();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
+  const [query, setQuery] = useState("");
+  const [roleFilter, setRoleFilter] = useState("");
+  const rows = clients.filter(
+    (client) =>
+      (!roleFilter || client.role === roleFilter) &&
+      `${client.email ?? ""} ${client.full_name ?? ""}`
+        .toLowerCase()
+        .includes(query.toLowerCase()),
+  );
   async function call(id: string, fn: string, params: Record<string, unknown>) {
     setBusyId(id);
     setError(null);
-    const supabase = createClient();
-    const { error } = await supabase.rpc(fn, params);
-    setBusyId(null);
-    if (error) {
-      setError(error.message);
-      return;
+    try {
+      const { error: saveError } = await createClient().rpc(fn, params);
+      if (saveError) setError(saveError.message);
+      else router.refresh();
+    } catch {
+      setError("Could not save the account change. Try again.");
+    } finally {
+      setBusyId(null);
     }
-    router.refresh();
   }
-
   return (
-    <div className="terminal-panel rounded-xl p-6 duration-500 animate-in fade-in slide-in-from-bottom-2 md:p-7">
-      <div>
-        <p className="section-kicker">// every client</p>
-        <p className="mt-2 font-sentient text-2xl text-card-foreground">
-          Accounts ({clients.length})
-        </p>
+    <section
+      className="terminal-panel rounded-xl p-6 md:p-7"
+      aria-labelledby="accounts-title"
+    >
+      <p className="section-kicker">// people and permissions</p>
+      <h2 id="accounts-title" className="mt-2 font-sentient text-2xl">
+        Accounts ({clients.length})
+      </h2>
+      <p className="mt-2 font-mono text-xs leading-6 text-muted-foreground">
+        {canWrite
+          ? "Manage account roles, dashboard access, and account status."
+          : "Browse every account or promote a Viewer or Monitor to Admin."}
+      </p>
+      <div className="mt-5 grid gap-3 sm:grid-cols-4">
+        {portalRoles.map((role) => (
+          <button
+            key={role}
+            type="button"
+            aria-pressed={roleFilter === role}
+            onClick={() => setRoleFilter(roleFilter === role ? "" : role)}
+            className={`rounded-lg border p-4 text-left transition-colors ${roleFilter === role ? "border-primary bg-primary/10" : "border-border hover:border-primary/60"}`}
+          >
+            <span className="block font-mono text-xs text-muted-foreground">
+              {roleLabels[role]}
+            </span>
+            <span className="mt-2 block font-sentient text-3xl">
+              {clients.filter((c) => c.role === role).length}
+            </span>
+          </button>
+        ))}
       </div>
-
+      <label className="mt-5 block font-mono text-xs text-muted-foreground">
+        Search accounts
+        <input
+          type="search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search name or email"
+          className="mt-2 w-full rounded-md border border-input bg-background px-3 py-2.5 text-sm text-foreground focus-visible:outline-primary"
+        />
+      </label>
       {error ? (
-        <p role="alert" className="mt-4 rounded-md border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs text-destructive">
+        <p role="alert" className="mt-4 text-sm text-destructive">
           {error}
         </p>
       ) : null}
-
-      <div className="mt-6 overflow-x-auto rounded-lg border border-border/60">
-        <table className="w-full min-w-[860px] border-collapse font-mono text-xs">
-          <thead>
-            <tr className="border-b border-border bg-card/60 text-left uppercase text-muted-foreground">
-              <th className="py-3 pr-4 pl-4 font-normal">email</th>
-              <th className="py-3 pr-4 font-normal">role</th>
-              <th className="py-3 pr-4 font-normal">state</th>
-              <th className="py-3 pr-4 font-normal">machines</th>
-              <th className="py-3 pr-4 font-normal">notifs 30d</th>
-              <th className="py-3 pr-4 font-normal">last seen</th>
-              <th className="py-3 pr-4 font-normal">control</th>
+      <div className="mt-5 overflow-x-auto rounded-lg border border-border">
+        <table className="w-full min-w-[720px] text-left font-mono text-xs">
+          <thead className="border-b border-border bg-card/60 text-muted-foreground">
+            <tr>
+              {[
+                "Account",
+                "Role",
+                "Status",
+                "Machines",
+                "Last seen",
+                "Access",
+              ].map((label) => (
+                <th key={label} className="p-3 font-normal">
+                  {label}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
-            {clients.map((c) => (
-              <tr key={c.id} className="border-b border-border/40 align-top transition-colors hover:bg-card/40">
-                <td className="py-3 pr-4 pl-4 text-card-foreground/90">
+            {rows.map((c) => (
+              <tr
+                key={c.id}
+                className="border-b border-border/40 align-top hover:bg-card/40"
+              >
+                <td className="p-3">
                   <Link
                     href={`/admin?tab=client&client=${c.id}`}
-                    className="hover:text-primary"
+                    className="text-foreground hover:text-primary"
                   >
-                    {c.email ?? c.full_name ?? "Unnamed client"}
+                    {c.full_name || c.email || "Unnamed account"}
                   </Link>
-                  {c.id === selfId ? <span className="text-primary"> (you)</span> : null}
+                  {c.id === selfId ? " (you)" : null}
+                  {c.full_name ? (
+                    <p className="mt-1 text-muted-foreground">{c.email}</p>
+                  ) : null}
                 </td>
-                <td className="py-3 pr-4">
-                  <span className={c.role === "admin" ? "text-primary" : "text-muted-foreground"}>
-                    {c.role}
-                  </span>
+                <td className="p-3 text-primary">
+                  {roleLabels[normalizeRole(c.role)]}
                 </td>
-                <td className="py-3 pr-4">
-                  <span className={c.status === "suspended" ? "text-destructive" : "text-primary"}>
-                    {c.status}
-                  </span>
+                <td
+                  className={`p-3 ${c.status === "suspended" ? "text-destructive" : "text-muted-foreground"}`}
+                >
+                  {c.status}
                   {c.suspended_reason ? (
-                    <span className="block text-muted-foreground">{c.suspended_reason}</span>
+                    <p className="mt-1">{c.suspended_reason}</p>
                   ) : null}
                 </td>
-                <td className="py-3 pr-4 text-card-foreground/80">
-                  {c.nodes_active}/{c.nodes}
-                  {c.nodes_unlinked > 0 ? (
-                    <span className="block text-[color:var(--chart-2)]">
+                <td className="p-3">
+                  {c.nodes_active}/{c.nodes} active
+                  {c.nodes_unlinked ? (
+                    <p className="mt-1 text-muted-foreground">
                       {c.nodes_unlinked} never linked
-                    </span>
+                    </p>
                   ) : null}
                 </td>
-                <td className="py-3 pr-4 text-card-foreground/80">
-                  {c.notifications_30d}
-                  {c.notifications_failed_30d > 0 ? (
-                    <span className="block text-destructive">
-                      {c.notifications_failed_30d} failed
-                    </span>
-                  ) : null}
-                </td>
-                <td className="py-3 pr-4 text-muted-foreground">
+                <td className="p-3 text-muted-foreground">
                   {formatRelative(c.last_seen_at)}
                 </td>
-                <td className="py-3 pr-4">
-                  {busyId === c.id ? (
-                    <Loader2 className="size-4 animate-spin text-primary" />
-                  ) : (
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      {c.status === "active" ? (
+                <td className="p-3">
+                  <div className="flex flex-wrap gap-2">
+                    {canWrite ? (
+                      <>
+                        <select
+                          aria-label={`Role for ${c.email || c.full_name || c.id}`}
+                          value={c.role}
+                          disabled={busyId !== null || c.id === selfId}
+                          onChange={(event) =>
+                            call(c.id, "hyn_admin_set_role", {
+                              p_user_id: c.id,
+                              p_role: event.target.value,
+                            })
+                          }
+                          className="rounded border border-input bg-background p-2 disabled:opacity-40"
+                        >
+                          {portalRoles.map((role) => (
+                            <option key={role} value={role}>
+                              {roleLabels[role]}
+                            </option>
+                          ))}
+                        </select>
                         <button
-                          type="button"
-                          disabled={c.id === selfId}
+                          disabled={busyId !== null || c.id === selfId}
                           onClick={() => {
-                            const reason = window.prompt(
-                              `Suspend ${c.email}? Their machines stop reporting immediately.\n\nReason (recorded in the audit trail):`,
-                              ""
-                            );
-                            if (reason === null) return;
+                            const reason =
+                              c.status === "active"
+                                ? window.prompt(
+                                    `Suspend ${c.email || c.full_name}? Their machines will stop reporting. Reason:`,
+                                    "",
+                                  )
+                                : null;
+                            if (c.status === "active" && reason === null)
+                              return;
                             call(c.id, "hyn_admin_set_user_status", {
                               p_user_id: c.id,
-                              p_status: "suspended",
+                              p_status:
+                                c.status === "active" ? "suspended" : "active",
                               p_reason: reason,
                             });
                           }}
-                          title={c.id === selfId ? "You cannot suspend yourself" : "Suspend this client"}
-                          className="rounded-full border border-border px-2.5 py-1 uppercase text-muted-foreground transition-colors hover:border-destructive/60 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
+                          className="rounded border border-border px-2 py-1 text-muted-foreground hover:text-destructive disabled:opacity-40"
                         >
-                          suspend
+                          {c.status === "active" ? "Suspend" : "Reinstate"}
                         </button>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            call(c.id, "hyn_admin_set_user_status", {
-                              p_user_id: c.id,
-                              p_status: "active",
-                              p_reason: null,
-                            })
-                          }
-                          className="rounded-full border border-primary/50 px-2.5 py-1 uppercase text-primary transition-colors hover:bg-primary/10"
-                        >
-                          reinstate
-                        </button>
-                      )}
+                      </>
+                    ) : c.role === "viewer" || c.role === "monitor" ? (
                       <button
-                        type="button"
+                        disabled={busyId !== null}
                         onClick={() =>
                           call(c.id, "hyn_admin_set_role", {
                             p_user_id: c.id,
-                            p_role: c.role === "admin" ? "user" : "admin",
+                            p_role: "admin",
                           })
                         }
-                        className="rounded-full border border-border px-2.5 py-1 uppercase text-muted-foreground transition-colors hover:border-primary/60 hover:text-primary"
+                        className="rounded border border-primary/40 px-3 py-2 text-primary disabled:opacity-40"
                       >
-                        make {c.role === "admin" ? "user" : "admin"}
+                        Make Admin
                       </button>
-                    </div>
-                  )}
+                    ) : (
+                      <span className="text-muted-foreground">View only</span>
+                    )}
+                    {busyId === c.id ? (
+                      <Loader2
+                        className="size-4 animate-spin text-primary"
+                        aria-label="Saving"
+                      />
+                    ) : null}
+                  </div>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
+        {!rows.length ? (
+          <p className="p-6 font-mono text-sm text-muted-foreground">
+            No accounts match this search.
+          </p>
+        ) : null}
       </div>
-    </div>
+    </section>
   );
 }

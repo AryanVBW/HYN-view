@@ -66,9 +66,9 @@ export function MachineCommandModal({
       readStatus().catch((reason: unknown) => {
         setError(reason instanceof Error ? reason.message : "Could not refresh command progress");
       });
-    }, 2_000);
+    }, command?.status === "queued" ? 15_000 : 5_000);
     return () => window.clearInterval(timer);
-  }, [active, open, statusUrl]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [active, open, statusUrl, command?.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function requestCommand() {
     setOpen(true);

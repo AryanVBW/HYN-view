@@ -24,12 +24,14 @@ export function AdminClientDashboard({
   current,
   metrics,
   relayers,
+  canWrite = false,
 }: {
   client: AdminClient;
   nodes: AdminNode[];
   current: AdminNode | null;
   metrics: Metric[];
   relayers?: React.ReactNode;
+  canWrite?: boolean;
 }) {
   return (
     <div className="space-y-8">
@@ -90,7 +92,7 @@ export function AdminClientDashboard({
         </div>
       </section>
 
-      <AdminClientActions client={client} nodes={nodes} current={current} />
+      {canWrite ? <AdminClientActions client={client} nodes={nodes} current={current} /> : null}
 
       {relayers}
 
@@ -111,7 +113,7 @@ export function AdminClientDashboard({
                   checked in
                 </p>
               ) : null}
-              <DeleteNodeButton node={current} />
+              {canWrite ? <DeleteNodeButton node={current} /> : null}
             </div>
           </div>
 
@@ -139,7 +141,9 @@ export function AdminClientDashboard({
             </>
           ) : (
             <div className="terminal-panel rounded-xl p-8 font-mono text-xs leading-6 text-muted-foreground">
-              No telemetry has arrived for this machine in the last 24 hours.
+              {current.telemetry_mode === "local"
+                ? "History stays on this machine. Use Sync selected to view a current reading for five minutes."
+                : "No telemetry has arrived for this machine in the last 24 hours."}
             </div>
           )}
         </>

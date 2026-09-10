@@ -1,3 +1,4 @@
+import type { PortalRole } from "./permissions";
 // Row shapes from supabase/schema.sql. Hand-written rather than generated so
 // the repo has no dependency on the Supabase CLI being run first; if you do
 // generate types later, these are the names to match.
@@ -19,6 +20,7 @@ export type Node = {
   config: Record<string, unknown>;
   last_config_pull_at: string | null;
   last_heartbeat_at: string | null;
+  telemetry_mode?: "local" | "cloud";
 };
 
 // Every column of `nodes` a browser session is allowed to read. `token_hash` is
@@ -28,7 +30,7 @@ export type Node = {
 // supabase-js parses the select string at the type level and infers an error
 // type for a plain `string`.
 export const NODE_COLUMNS =
-  "id, owner, name, hostname, os, agent_version, is_demo, revoked, created_at, last_seen_at, status, paused_until, status_reason, config, last_config_pull_at, last_heartbeat_at" as const;
+  "id, owner, name, hostname, os, agent_version, is_demo, revoked, created_at, last_seen_at, status, paused_until, status_reason, config, last_config_pull_at, last_heartbeat_at, telemetry_mode" as const;
 
 export type Metric = {
   id: number;
@@ -93,7 +95,7 @@ export type Profile = {
   id: string;
   email: string | null;
   full_name: string | null;
-  role: "user" | "admin";
+  role: PortalRole;
   status: "active" | "suspended";
   suspended_reason: string | null;
   created_at: string;
@@ -164,6 +166,7 @@ export type EmailPreference = {
 };
 
 export type AdminNode = {
+  telemetry_mode?: "local" | "cloud";
   id: string;
   name: string;
   hostname: string | null;
@@ -202,7 +205,7 @@ export type AdminClient = {
   id: string;
   email: string | null;
   full_name: string | null;
-  role: "user" | "admin";
+  role: PortalRole;
   status: "active" | "suspended";
   suspended_reason: string | null;
   created_at: string;

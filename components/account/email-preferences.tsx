@@ -132,6 +132,12 @@ export function EmailPreferences({
         </div>
       </div>
 
+      {real.find((node) => node.id === selected)?.telemetry_mode === "local" ? (
+        <p className="border-b border-border px-6 py-4 font-mono text-xs leading-6 text-muted-foreground">
+          This machine keeps its history locally. Cloud history digests are paused.
+          Sending reports from the CLI requires enabling cloud_notifications on the machine.
+        </p>
+      ) : null}
       <div className="grid gap-px bg-border lg:grid-cols-3">
         {streams.map((stream) => {
           const active = draft[stream.key];

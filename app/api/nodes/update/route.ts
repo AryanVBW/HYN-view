@@ -56,7 +56,7 @@ export async function POST(request: Request) {
   }
 
   let workflowRunId: string | null = null;
-  if (raw?.created === true) {
+  if (process.env.HYN_ENABLE_WORKFLOW_WATCHDOG === "true" && raw?.created === true) {
     try {
       const run = await start(monitorNodeUpdate, [command.id]);
       workflowRunId = run.runId;
