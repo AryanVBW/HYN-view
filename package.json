@@ -11,7 +11,7 @@
     "build": "next build",
     "dev": "next dev",
     "lint": "eslint .",
-    "test": "node --test --experimental-strip-types lib/*.test.ts && pnpm run test:ui && pnpm run test:routes",
+    "test": "node --test --experimental-strip-types lib/*.test.ts scripts/*.test.mjs && pnpm run test:ui && pnpm run test:routes",
     "test:ui": "tsx --test tests/*.test.tsx",
     "test:routes": "node --import tsx --experimental-test-module-mocks --test tests/*-api.test.ts",
     "start": "next start",
