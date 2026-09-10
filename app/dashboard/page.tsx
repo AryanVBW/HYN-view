@@ -1,5 +1,7 @@
 import { BandwidthPanel } from "@/components/admin/bandwidth-panel";
 import { NodeSettings } from "@/components/account/node-settings";
+import { ServerSwitcher } from "@/components/dashboard/server-switcher";
+import { selectDashboard } from "@/lib/dashboard-selection";
 import { DashboardContext } from "@/components/dashboard/dashboard-context";
 import { permissions, type DashboardAccount } from "@/lib/permissions";
 import type { Metadata } from "next";
@@ -94,20 +96,12 @@ export default async function DashboardPage({
     return <Shell email={auth.user.email}><div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">Dashboard access unavailable</h1><p className="mt-4 font-mono text-sm leading-7">{profileResult.data?.status === "suspended" ? "Your account is suspended. Contact a Super admin." : "Ask a Super admin to finish the portal roles setup, then refresh this page."}</p></div></Shell>;
   }
   const accounts = (accountsResult.data ?? []) as DashboardAccount[];
-  const owner = requestedOwner ?? auth.user.id;
-  if (!accounts.some(account => account.id === owner)) {
-    return <Shell email={auth.user.email}><div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">This dashboard has not been shared with you</h1><Link href="/dashboard" className="mt-4 inline-block text-primary underline">Return to your dashboards</Link></div></Shell>;
-  }
   const access = permissions(profileResult.data.role);
-  const context = { role: profileResult.data.role, accounts, owner };
-  const canViewRelayers = accounts.find(account => account.id === owner)?.relayers !== false;
-  const relayerOwner = owner === auth.user.id ? undefined : owner;
 
   // Real nodes first, demo last, so a paired machine is what you land on.
   const { data: nodeRows, error: nodesError } = await supabase
     .from("nodes")
     .select(NODE_COLUMNS)
-    .eq("owner", owner)
     .eq("revoked", false)
     .order("is_demo", { ascending: true })
     .order("created_at", { ascending: true });
@@ -132,18 +126,23 @@ export default async function DashboardPage({
     );
   }
 
-  const nodes = (nodeRows ?? []) as Node[];
+  const selection = selectDashboard({selfId: auth.user.id, canAdmin: access.canAdmin, accounts,
+    nodes: (nodeRows ?? []) as Node[], requestedOwner, requestedNode});
+  if (!selection) return <Shell email={auth.user.email}><div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">This server or dashboard is unavailable</h1><p className="mt-3 text-sm text-muted-foreground">It may have been unlinked or access may have changed.</p><Link href="/dashboard" className="mt-4 inline-block text-primary underline">Return to your dashboards</Link></div></Shell>;
+  const {owner, nodes, node} = selection;
+  const context = {role: profileResult.data.role, accounts, owner};
+  const canViewRelayers = owner === "all" || accounts.find(account => account.id === owner)?.relayers !== false;
+  const relayerOwner = owner === auth.user.id ? undefined : owner;
 
-  if (nodes.length === 0) {
+  if (!node) {
     return (
       <Shell email={auth.user.email} context={context}>
         <div className="mb-12">{canViewRelayers ? <RelayerDashboard key={owner} ownerId={relayerOwner} /> : null}</div>
-        {access.canWrite && owner === auth.user.id ? <NoNodesState /> : <div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">No machines on this dashboard</h1><p className="mt-3 font-mono text-sm leading-7 text-muted-foreground">A Super admin can link a machine or share another dashboard with you. Assigned relayers appear above independently of linked machines.</p></div>}
+        {access.canLink && owner === auth.user.id ? <NoNodesState canDemo={access.canWrite} /> : <div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">No machines on this dashboard</h1><p className="mt-3 font-mono text-sm leading-7 text-muted-foreground">Devices you link appear in My devices immediately. A Super admin can share other servers with you. Highway relayers are managed separately.</p></div>}
       </Shell>
     );
   }
 
-  const node = nodes.find((n) => n.id === requestedNode) ?? nodes[0];
   const localMode = node.telemetry_mode === "local";
   const transient = localMode && node.status === "active" ? readTransientSnapshot(node.id) : null;
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -421,24 +420,7 @@ function Shell({
       <DashboardMagicRings />
       <main className="container pt-32 pb-10 md:pt-44">
         {context ? <><DashboardContext {...context} /><div className="mb-6 flex gap-5 text-sm text-primary"><Link href="/notifications" className="underline">Server notifications</Link><Link href="/usage" className="underline">Overall data usage</Link></div></> : null}
-        {nodes && nodes.length > 1 ? (
-          <nav className="mb-8 flex flex-wrap gap-2" aria-label="Linked nodes">
-            {nodes.map((n) => (
-              <Link
-                key={n.id}
-                href={`/dashboard?node=${n.id}${context ? `&owner=${context.owner}` : ""}`}
-                className={`border px-3 py-1.5 font-mono text-xs transition-colors ${
-                  n.id === current?.id
-                    ? "border-primary text-primary"
-                    : "border-border text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                {n.name}
-                {n.is_demo ? " (demo)" : ""}
-              </Link>
-            ))}
-          </nav>
-        ) : null}
+        {nodes && context ? <div className="mb-8"><ServerSwitcher nodes={nodes} current={current?.id} baseHref={`/dashboard?owner=${context.owner}`} accounts={context.owner === "all" ? context.accounts : []} /></div> : null}
 
         {children}
         {current && !current.is_demo ? <div className="mt-10 space-y-6">
@@ -455,7 +437,7 @@ function Shell({
           <Link href="/legal" className="hover:text-foreground">Disclaimer</Link>
         </span>
         <span className="flex flex-wrap items-center gap-4">
-          {permissions(context?.role).canWrite ? <Link href="/link" className="hover:text-foreground">Link another server</Link> : null}
+          {permissions(context?.role).canLink ? <Link href="/link" className="hover:text-foreground">Link another server</Link> : null}
           {email ? (
             <>
               <span>{email}</span>

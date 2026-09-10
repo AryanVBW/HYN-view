@@ -39,14 +39,14 @@ export function ServerAccess({ clients, nodes, grants, events, error }: {
   const input = "w-full rounded-md border border-input bg-background px-3 py-3 text-sm focus-visible:outline-primary";
   return <section className="terminal-panel rounded-xl p-6 md:p-8" aria-labelledby="server-access-title">
     <h2 id="server-access-title" className="font-sentient text-3xl">Server access</h2>
-    <p className="mt-3 max-w-2xl text-sm leading-7 text-muted-foreground">Share one server with multiple Viewers or Monitors. They can see its statistics and settings; only a Super admin can change the server or install updates. Blocking a server overrides ownership and dashboard sharing. Administrators retain fleet access.</p>
+    <p className="mt-3 max-w-2xl text-sm leading-7 text-muted-foreground">Share one server with multiple Viewers or Monitors. They can see its statistics and settings; only a Super admin can change the server or install updates. Owners see devices they link automatically; they do not need an assignment. Blocking only affects additional users, including dashboard shares. Administrators retain fleet access.</p>
     {error ? <p role="alert" className="mt-4 text-destructive">{error}</p> : null}
     <form className="mt-6 grid items-end gap-4 lg:grid-cols-2" onSubmit={e => { e.preventDefault(); save(viewers,node,true); }}>
       <label className="space-y-2 text-sm">Users<select multiple size={5} required className={input} value={viewers} onChange={e=>setViewers(Array.from(e.target.selectedOptions, option=>option.value))}>
-        {clients.filter(c=>c.status === "active" && (c.role === "viewer" || c.role === "monitor")).map(c=><option key={c.id} value={c.id}>{person(c.id)}</option>)}
+        {clients.filter(c=>c.id !== nodes.find(n=>n.id === node)?.owner_id && c.status === "active" && (c.role === "viewer" || c.role === "monitor")).map(c=><option key={c.id} value={c.id}>{person(c.id)}</option>)}
       </select><span className="block text-xs text-muted-foreground">Choose several accounts with Ctrl or Command. {viewers.length} selected.</span></label>
       <label className="space-y-2 text-sm">Find a server<input className={input} placeholder="Server, hostname, or owner" value={search} onChange={e=>setSearch(e.target.value)} /></label>
-      <label className="space-y-2 text-sm lg:col-span-2">Server<select required className={input} value={node} onChange={e=>setNode(e.target.value)}>
+      <label className="space-y-2 text-sm lg:col-span-2">Server<select required className={input} value={node} onChange={e=>{ const id=e.target.value; setNode(id); setViewers(previous=>previous.filter(viewer=>viewer !== nodes.find(n=>n.id === id)?.owner_id)); }}>
         <option value="">Choose from the fleet</option>
         {nodes.filter(n=>!n.revoked && `${n.name} ${n.hostname} ${n.owner_email}`.toLowerCase().includes(search.toLowerCase())).map(n=><option key={n.id} value={n.id}>{n.name} — {n.owner_email || "No owner email"}</option>)}
       </select></label>
@@ -59,7 +59,7 @@ export function ServerAccess({ clients, nodes, grants, events, error }: {
     {message ? <p role="status" className="mt-4 text-sm">{message}</p> : null}
     <h3 className="mt-9 text-lg font-medium">Server permissions</h3>
     <ul className="mt-3 divide-y divide-border">
-      {grants.filter(g=>!viewers.length || viewers.includes(g.viewer_id)).map(g=><li key={`${g.viewer_id}:${g.node_id}`} className="flex flex-wrap items-center justify-between gap-3 py-4 text-sm">
+      {grants.filter(g=>g.viewer_id !== nodes.find(n=>n.id === g.node_id)?.owner_id && (!viewers.length || viewers.includes(g.viewer_id))).map(g=><li key={`${g.viewer_id}:${g.node_id}`} className="flex flex-wrap items-center justify-between gap-3 py-4 text-sm">
         <span>{person(g.viewer_id)} <span className="text-muted-foreground">{g.allowed ? "can view" : "is blocked from"}</span> {server(g.node_id)}</span>
         {g.allowed ? <label className="flex items-center gap-2"><input type="checkbox" checked={g.notifications_allowed !== false} disabled={pending || !!error} onChange={e=>save([g.viewer_id],g.node_id,true,e.target.checked)} />Notifications<span className="sr-only"> for {person(g.viewer_id)} on {server(g.node_id)}</span></label> : null}
         <button disabled={pending || !!error} onClick={()=>save([g.viewer_id],g.node_id,!g.allowed,g.notifications_allowed !== false)} className="rounded border border-border px-3 py-2 disabled:opacity-40">{g.allowed ? "Block access" : "Grant access"}<span className="sr-only"> for {person(g.viewer_id)} to {server(g.node_id)}</span></button>

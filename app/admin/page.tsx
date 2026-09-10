@@ -433,7 +433,7 @@ export default async function AdminPage({
                   ownerName={selectedClient.full_name || selectedClient.email || "this client"}
                   assignments={(assignmentResult?.data ?? []) as RelayerAssignment[]}
                   error={assignmentResult?.error ? "Apply the relayer database migration to enable assignments."
-                    : selectedClient.status !== "active" ? "Restore this account before assigning a relayer." : null} /> : <RelayerDashboard ownerId={selectedClient.id} />}
+                    : selectedClient.status !== "active" ? "Restore this account before assigning a relayer." : null} /> : <RelayerDashboard key={selectedClient.id} ownerId={selectedClient.id} />}
               />
             ) : undefined
           }

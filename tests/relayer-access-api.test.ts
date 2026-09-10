@@ -4,6 +4,7 @@ let allowed = false;
 let active = true;
 let signedIn = true;
 let canMonitor = false;
+let canAdmin = false;
 const reads: string[] = [];
 const checks: unknown[] = [];
 let providerReads = 0;
@@ -27,6 +28,8 @@ mock.module("../lib/supabase/server.ts", {
           data:
             name === "hyn_is_active"
               ? active
+              : name === "hyn_is_admin"
+                ? canAdmin
               : name === "hyn_can_monitor"
                 ? canMonitor
                 : false,
@@ -104,4 +107,16 @@ test("signed-out and suspended sessions never read provider telemetry", async ()
   assert.equal((await get()).status, 403);
   active = true;
   assert.equal(providerReads, 0);
+});
+
+test("all-relayer view is restricted to admins and never filters owner to the literal all", async () => {
+  reads.length = 0;
+  providerReads = 0;
+  assert.equal((await get("all")).status,403);
+  assert.equal(providerReads,0);
+  canAdmin = true;
+  assert.equal((await get("all")).status,200);
+  assert.deepEqual(reads,[]);
+  assert.equal(providerReads,1);
+  canAdmin = false;
 });

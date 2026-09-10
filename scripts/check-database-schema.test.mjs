@@ -32,7 +32,7 @@ async function runGate(reply) {
 
 const denied = () => ({ status: 401, body: { code: "42501", message: "permission denied" } });
 
-for (const missing of ["hyn_dashboard_accounts", "hyn_is_super_admin"]) {
+for (const missing of ["hyn_dashboard_accounts", "hyn_is_super_admin", "hyn_can_link"]) {
   test(`release fails when ${missing} is missing even if server access functions exist`, async () => {
     const result = await runGate(name => name === missing
       ? { status: 404, body: { code: "PGRST202", message: "function missing" } }

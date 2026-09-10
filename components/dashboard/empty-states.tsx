@@ -25,7 +25,7 @@ function CommandBlock({ lines }: { lines: string[] }) {
 
 // Shown when the account has no nodes at all. The instructions are the real
 // ones, in the order they have to happen.
-export function NoNodesState() {
+export function NoNodesState({ canDemo = false }: { canDemo?: boolean }) {
   return (
     <div className="terminal-panel animate-in fade-in slide-in-from-bottom-2 p-8 duration-500 md:p-12">
       <div className="mx-auto max-w-xl text-center">
@@ -34,9 +34,8 @@ export function NoNodesState() {
           No server is linked yet
         </h2>
         <p className="mt-3 font-mono text-sm leading-7 text-muted-foreground">
-          This dashboard only shows real telemetry, so there is nothing to draw
-          until a machine reports in. Pair your Ubuntu server — it needs no
-          browser of its own.
+          Link your Ubuntu server and it appears here immediately. No admin
+          assignment is needed. Readings appear when the agent checks in.
         </p>
       </div>
 
@@ -67,13 +66,13 @@ export function NoNodesState() {
         />
       </div>
 
-      <div className="mx-auto mt-10 flex max-w-xl flex-col items-center gap-3 border-t border-border pt-8 text-center">
+      {canDemo ? <div className="mx-auto mt-10 flex max-w-xl flex-col items-center gap-3 border-t border-border pt-8 text-center">
         <p className="font-mono text-xs leading-6 text-muted-foreground">
           Just looking around? Load a demo node with synthetic readings. It is
           labelled as demo everywhere and you can remove it in one click.
         </p>
         <DemoDataButton mode="seed" />
-      </div>
+      </div> : null}
     </div>
   );
 }

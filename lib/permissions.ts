@@ -14,8 +14,8 @@ export const roleLabels: Record<PortalRole, string> = {
 export const roleDescriptions: Record<PortalRole, string> = {
   viewer: "View dashboards shared with you.",
   monitor:
-    "View assigned dashboards, refresh readings, and request relayer access.",
-  admin: "View every dashboard and add other admins.",
+    "Link your devices, view shared servers, refresh readings, and request relayer access.",
+  admin: "Link your devices, view every dashboard, and add other admins.",
   super_admin:
     "Manage machines, relayers, settings, roles, and dashboard sharing.",
 };
@@ -27,6 +27,7 @@ export function normalizeRole(role: unknown): PortalRole {
 export function permissions(role: unknown) {
   return {
     canWrite: role === "super_admin",
+    canLink: role === "monitor" || role === "admin" || role === "super_admin",
     canSync: role === "super_admin" || role === "monitor",
     canRequest: role === "super_admin" || role === "monitor",
     canAdmin: role === "super_admin" || role === "admin",
