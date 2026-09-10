@@ -2,6 +2,10 @@ import type { NextConfig } from "next";
 import { withWorkflow } from "workflow/next";
 
 const nextConfig: NextConfig = {
+  // This portal is an independent checkout nested beside the Bash agent.
+  // Parent lockfiles must not change its dependency resolution or file tracing.
+  turbopack: { root: import.meta.dirname },
+  outputFileTracingRoot: import.meta.dirname,
   images: {
     unoptimized: true,
   },

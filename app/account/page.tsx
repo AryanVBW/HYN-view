@@ -54,7 +54,7 @@ export default async function AccountPage() {
 
   const [profileRes, nodesRes, logRes, emailPrefsRes] = await Promise.all([
     supabase.from("profiles").select("*").eq("id", auth.user.id).maybeSingle(),
-    supabase.from("nodes").select(NODE_COLUMNS).eq("owner", auth.user.id).eq("revoked", false).order("created_at"),
+    supabase.from("nodes").select(NODE_COLUMNS).eq("revoked", false).order("created_at"),
     supabase
       .from("notification_log")
       .select("*")
@@ -124,9 +124,11 @@ export default async function AccountPage() {
         </div>
 
         {profile?.status === "active" && permissions(profile?.role).canWrite ? <>
-          <EmailPreferences nodes={nodes} preferences={emailPreferences} accountEmail={auth.user.email ?? ""} />
-          <NodeSettings nodes={nodes} />
+          <EmailPreferences nodes={nodes.filter(node => node.owner === auth.user.id)} preferences={emailPreferences} accountEmail={auth.user.email ?? ""} />
+          <NodeSettings nodes={nodes} canWrite />
         </> : <p className="terminal-panel p-6 font-mono text-sm leading-7">Your role is {roleLabels[normalizeRole(profile?.role)]}. A Super admin manages machine settings and email delivery preferences.</p>}
+        {profile?.status === "active" && !permissions(profile?.role).canWrite ? <NodeSettings nodes={nodes} /> : null}
+        <Link href="/notifications" className="inline-block text-primary underline">Server notifications</Link>
 
         <DeliveryHistory log={visibleLog} byKind={byKind} cleared={logCleared} />
       </div>

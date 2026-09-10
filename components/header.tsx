@@ -45,6 +45,7 @@ export const Header = () => {
           >
             Dashboard
           </Link>
+          {signedIn ? <Link href="/notifications" className="font-mono text-xs uppercase text-foreground/70 hover:text-foreground">Notifications</Link> : null}
           {signedIn ? (
             <Link
               href="/account"

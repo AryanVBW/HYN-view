@@ -32,4 +32,4 @@ export function permissions(role: unknown) {
     canAdmin: role === "super_admin" || role === "admin",
   };
 }
-export type DashboardAccount = { id: string; name: string; own: boolean };
+export type DashboardAccount = { id: string; name: string; own: boolean; relayers?: boolean };

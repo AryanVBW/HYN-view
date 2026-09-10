@@ -9,6 +9,7 @@ const AGENT_RPCS = new Set([
   // purpose: it writes one column and has no after() work, which is what makes
   // it affordable every 24 seconds on every node.
   "hyn_heartbeat",
+  "hyn_record_bandwidth",
   "hyn_local_heartbeat",
   "hyn_fetch_local_config",
   "hyn_transient_snapshot",

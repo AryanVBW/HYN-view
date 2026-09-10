@@ -1,3 +1,5 @@
+import { BandwidthPanel } from "@/components/admin/bandwidth-panel";
+import { NodeSettings } from "@/components/account/node-settings";
 import { DashboardContext } from "@/components/dashboard/dashboard-context";
 import { permissions, type DashboardAccount } from "@/lib/permissions";
 import type { Metadata } from "next";
@@ -98,6 +100,7 @@ export default async function DashboardPage({
   }
   const access = permissions(profileResult.data.role);
   const context = { role: profileResult.data.role, accounts, owner };
+  const canViewRelayers = accounts.find(account => account.id === owner)?.relayers !== false;
   const relayerOwner = owner === auth.user.id ? undefined : owner;
 
   // Real nodes first, demo last, so a paired machine is what you land on.
@@ -134,7 +137,7 @@ export default async function DashboardPage({
   if (nodes.length === 0) {
     return (
       <Shell email={auth.user.email} context={context}>
-        <div className="mb-12"><RelayerDashboard key={owner} ownerId={relayerOwner} /></div>
+        <div className="mb-12">{canViewRelayers ? <RelayerDashboard key={owner} ownerId={relayerOwner} /> : null}</div>
         {access.canWrite && owner === auth.user.id ? <NoNodesState /> : <div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">No machines on this dashboard</h1><p className="mt-3 font-mono text-sm leading-7 text-muted-foreground">A Super admin can link a machine or share another dashboard with you. Assigned relayers appear above independently of linked machines.</p></div>}
       </Shell>
     );
@@ -175,14 +178,14 @@ export default async function DashboardPage({
   if (metrics.length === 0) {
     return (
       <Shell email={auth.user.email} nodes={nodes} current={node} context={context}>
-        <div className="mb-12"><RelayerDashboard key={owner} ownerId={relayerOwner} /></div>
+        <div className="mb-12">{canViewRelayers ? <RelayerDashboard key={owner} ownerId={relayerOwner} /> : null}</div>
         {localMode ? (
           <div className="space-y-6">
             <LiveRefresh />
             <p className="font-mono text-sm text-muted-foreground">History stays on {node.name}. Request a reading to view it for five minutes. A sleeping or restarting portal may need another request.</p>
             <AgentUpdateControl canSync={access.canSync} canWrite={access.canWrite} nodeId={node.id} nodeName={node.name} currentVersion={node.agent_version}
               release={{ latest: null, available: false, checkedAt: null }}
-              automatic={node.config?.auto_update !== "off"} blocked={commandBlockedReason(node)} />
+              automatic={node.config?.auto_update === "install"} blocked={commandBlockedReason(node)} />
           </div>
         ) : <AwaitingFirstPushState nodeName={node.name} />}
       </Shell>
@@ -221,7 +224,7 @@ export default async function DashboardPage({
   return (
     <Shell email={auth.user.email} nodes={nodes} current={node} context={context}>
       <div className="space-y-12">
-        <RelayerDashboard key={owner} ownerId={relayerOwner} />
+        {canViewRelayers ? <RelayerDashboard key={owner} ownerId={relayerOwner} /> : null}
         <div className="flex flex-col gap-4 border-b border-border pb-8 md:flex-row md:items-end md:justify-between">
           <div>
             <p className="section-kicker">// live dashboard</p>
@@ -417,7 +420,7 @@ function Shell({
       <ParticleField blur="subtle" />
       <DashboardMagicRings />
       <main className="container pt-32 pb-10 md:pt-44">
-        {context ? <DashboardContext {...context} /> : null}
+        {context ? <><DashboardContext {...context} /><div className="mb-6 flex gap-5 text-sm text-primary"><Link href="/notifications" className="underline">Server notifications</Link><Link href="/usage" className="underline">Overall data usage</Link></div></> : null}
         {nodes && nodes.length > 1 ? (
           <nav className="mb-8 flex flex-wrap gap-2" aria-label="Linked nodes">
             {nodes.map((n) => (
@@ -438,6 +441,10 @@ function Shell({
         ) : null}
 
         {children}
+        {current && !current.is_demo ? <div className="mt-10 space-y-6">
+          <BandwidthPanel key={current.id} nodes={nodes ?? []} initialNodeId={current.id} />
+          <details className="terminal-panel rounded-xl p-6"><summary className="cursor-pointer text-lg">Server settings and automatic operation</summary><div className="mt-6"><NodeSettings key={current.id} nodes={[current]} canWrite={permissions(context?.role).canWrite} /></div></details>
+        </div> : null}
       </main>
 
       <footer className="container flex flex-col gap-3 border-t border-border py-8 font-mono text-xs text-muted-foreground md:flex-row md:items-center md:justify-between">

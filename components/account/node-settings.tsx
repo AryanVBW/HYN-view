@@ -82,7 +82,7 @@ const FIELDS: {
   },
 ];
 
-export function NodeSettings({ nodes }: { nodes: Node[] }) {
+export function NodeSettings({ nodes, canWrite = false }: { nodes: Node[]; canWrite?: boolean }) {
   const router = useRouter();
   const real = nodes.filter((n) => !n.is_demo);
   const [selected, setSelected] = useState(real[0]?.id ?? "");
@@ -113,13 +113,13 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
   };
 
   async function save() {
-    if (!node) return;
+    if (!node || !canWrite) return;
     setBusy(true);
     setError(null);
     setSaved(false);
     const merged = mergePortalConfig(node.config ?? {}, draft);
     const supabase = createClient();
-    const { error } = await supabase.rpc("hyn_update_node_config", {
+    const { error } = await supabase.rpc("hyn_admin_set_node_config", {
       p_node_id: node.id,
       p_config: merged,
     });
@@ -141,6 +141,7 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
           <p className="mt-2 font-sentient text-2xl text-card-foreground">
             Monitoring and automatic operation
           </p>
+          {!canWrite ? <p className="mt-2 text-sm text-muted-foreground">Read-only settings. A Super admin manages thresholds, schedules, and updates.</p> : null}
           <p className="mt-2 max-w-xl font-mono text-xs leading-6 text-muted-foreground">
             Saved here and applied automatically on the next check-in, normally within five minutes.
             CLI 1.10+ applies the unattended settings without a terminal session. A value left
@@ -156,6 +157,7 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
         </div>
         {real.length > 1 ? (
           <select
+            aria-label="Server settings"
             value={selected}
             onChange={(event) => {
               setSelected(event.target.value);
@@ -184,6 +186,7 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
                 </span>
                 {f.type === "select" ? (
                   <select
+                    disabled={!canWrite || busy}
                     value={current(f.key)}
                     onChange={(event) => {
                       setDraft({ ...draft, [f.key]: event.target.value });
@@ -199,6 +202,7 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
                 ) : (
                   <input
                     type={f.type === "number" ? "number" : f.type === "time" ? "time" : "text"}
+                    disabled={!canWrite || busy}
                     value={current(f.key)}
                     placeholder="default"
                     min={f.min ?? (f.key === "cloud_push_min" ? 1 : f.type === "number" ? 0 : undefined)}
@@ -234,7 +238,7 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
         </p>
       ) : null}
 
-      <Button
+      {canWrite ? <Button
         type="button"
         size="sm"
         onClick={save}
@@ -243,7 +247,7 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
       >
         {busy ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" aria-hidden />}
         Save settings
-      </Button>
+      </Button> : null}
     </div>
   );
 }

@@ -1,3 +1,5 @@
+import { ServerAccess, type ServerGrant, type AccessEvent } from "@/components/admin/server-access";
+import { BandwidthPanel } from "@/components/admin/bandwidth-panel";
 import { permissions, roleLabels, roleDescriptions, normalizeRole } from "@/lib/permissions";
 import { DashboardAccess, type DashboardShare } from "@/components/admin/dashboard-access";
 import { RelayerDashboard } from "@/components/dashboard/relayer-dashboard";
@@ -166,6 +168,8 @@ export default async function AdminPage({
   const overview = overviewRes.data as AdminOverview;
   const nodes = (nodesRes.data ?? []) as AdminNode[];
   const clients = (clientsRes.data ?? []) as AdminClient[];
+  const serverGrants = canWrite ? await supabase.from("server_access").select("viewer_id,node_id,allowed,notifications_allowed").order("updated_at", { ascending: false }) : null;
+  const accessEvents = canWrite ? await supabase.from("server_access_events").select("id,ts,actor,viewer_id,node_id,allowed").order("ts", { ascending: false }).limit(50) : null;
   const shareResult = canWrite ? await supabase.from("dashboard_access").select("viewer_id,owner_id").order("created_at", {ascending:false}) : null;
   const pendingRequests = await supabase.from("relayer_requests")
     .select("id,owner,relayer_id,relayer_name,status,created_at").eq("status","pending")
@@ -246,7 +250,7 @@ export default async function AdminPage({
     selectedMetrics = transient ? [snapshotMetric(selectedNode.id, transient)] : (data ?? []) as Metric[];
   }
 
-  const allowedTabs: AdminTabId[] = ["overview", "clients", "client", "fleet", "templates", "notifications", "audit"];
+  const allowedTabs: AdminTabId[] = ["overview", "clients", "client", "fleet", "templates", "notifications", "audit", "access", "bandwidth"];
   const requestedTab = allowedTabs.includes(query.tab as AdminTabId)
     ? (query.tab as AdminTabId)
     : selectedClient
@@ -406,6 +410,8 @@ export default async function AdminPage({
       <p className="mt-5 rounded-lg border border-primary/30 bg-primary/5 px-5 py-4 font-mono text-xs leading-6"><strong className="text-primary">{roleLabels[normalizeRole(profile.role)]}</strong> · {roleDescriptions[normalizeRole(profile.role)]}</p>
       <div className="mt-10">
         <AdminTabs
+          access={canWrite ? <ServerAccess clients={clients} nodes={nodes} grants={(serverGrants?.data ?? []) as ServerGrant[]} events={(accessEvents?.data ?? []) as AccessEvent[]} error={serverGrants?.error || accessEvents?.error ? "Server access is unavailable. Finish the server permissions setup, then refresh." : null} /> : undefined}
+          bandwidth={<BandwidthPanel nodes={nodes} />}
           overview={overviewPanel}
           clients={<div className="space-y-8">
             <RelayerRequestQueue canWrite={canWrite} requests={(pendingRequests.data ?? []).map(request=>{

@@ -17,6 +17,7 @@ export const MobileMenu = ({ className, signedIn = false, email = null }: Mobile
 
   const menuItems = [
     { name: "Dashboard", href: "/dashboard" },
+    ...(signedIn ? [{ name: "Notifications", href: "/notifications" }, { name: "Data usage", href: "/usage" }] : []),
     { name: "Link server", href: "/link" },
     signedIn
       ? { name: "My account", href: "/account" }

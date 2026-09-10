@@ -19,7 +19,9 @@ export type AdminTabId =
   | "fleet"
   | "templates"
   | "notifications"
-  | "audit";
+  | "audit"
+  | "access"
+  | "bandwidth";
 
 const BASE_TABS: { id: AdminTabId; label: string; icon: typeof Activity }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -43,8 +45,12 @@ export function AdminTabs({
   notifications,
   audit,
   badges,
+  access,
+  bandwidth,
   initialActive = "overview",
 }: {
+  access?: ReactNode;
+  bandwidth?: ReactNode;
   overview: ReactNode;
   clients: ReactNode;
   client?: ReactNode;
@@ -55,13 +61,14 @@ export function AdminTabs({
   badges: Partial<Record<AdminTabId, number>>;
   initialActive?: AdminTabId;
 }) {
+  const baseTabs = [...BASE_TABS, ...(access ? [{ id: "access" as const, label: "Server access", icon: Users }] : []), ...(bandwidth ? [{ id: "bandwidth" as const, label: "Bandwidth", icon: Activity }] : [])];
   const tabs = client
     ? [
-        ...BASE_TABS.slice(0, 2),
+        ...baseTabs.slice(0, 2),
         { id: "client" as const, label: "Client view", icon: LayoutDashboard },
-        ...BASE_TABS.slice(2),
+        ...baseTabs.slice(2),
       ]
-    : BASE_TABS;
+    : baseTabs;
   // Client links and browser history must select the panel as well as load it.
   // Reading only the initial prop left newly loaded client controls hidden.
   const searchParams = useSearchParams();
@@ -77,6 +84,8 @@ export function AdminTabs({
     window.history.pushState(null, "", `${url.pathname}${url.search}${url.hash}`);
   }
   const panels: Record<AdminTabId, ReactNode> = {
+    access,
+    bandwidth,
     overview,
     clients,
     client: client ?? null,
