@@ -9,6 +9,7 @@ const probes = [
   // The dashboard needs the roles migration even before it loads a server.
   ["hyn_dashboard_accounts", {}, "not authenticated"],
   ["hyn_is_super_admin", {}, "not authenticated"],
+  ["hyn_can_link", {}, "not authenticated"],
   ["hyn_admin_set_server_access", {p_viewer:null,p_node:null,p_allow:false}, "not authenticated"],
   ["hyn_bandwidth_report", {p_node:null,p_days:30}, "not authenticated"],
   ["hyn_admin_share_server", {p_viewers:[],p_node:null,p_allow:false,p_notify:false}, "not authenticated"],

@@ -11,6 +11,7 @@ test("only super admins can change machines, configuration, and sharing", () => 
 test("admins can promote admins but cannot operate machines", () => {
   assert.deepEqual(permissions("admin"), {
     canWrite: false,
+    canLink: true,
     canSync: false,
     canRequest: false,
     canAdmin: true,
@@ -21,6 +22,7 @@ test("monitors can refresh readings and request relayers; viewers are read only"
   assert.equal(permissions("monitor").canRequest, true);
   assert.deepEqual(permissions("viewer"), {
     canWrite: false,
+    canLink: false,
     canSync: false,
     canRequest: false,
     canAdmin: false,
@@ -31,4 +33,9 @@ test("missing or legacy roles fail closed until the database is migrated", () =>
     assert.equal(normalizeRole(role), "viewer");
     assert.equal(permissions(role).canWrite, false);
   }
+});
+
+test("active account roles can pair their own devices without operational admin rights", () => {
+  for (const role of ["monitor", "admin", "super_admin"]) assert.equal(permissions(role).canLink, true, role);
+  for (const role of ["viewer", "user", null, undefined]) assert.equal(permissions(role).canLink, false);
 });

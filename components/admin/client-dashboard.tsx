@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { ServerSwitcher } from "@/components/dashboard/server-switcher";
 import { ArrowLeft, Bell, Server } from "lucide-react";
 import { CpuUsageChart } from "@/components/dashboard/cpu-usage-chart";
 import { HighwayPanel } from "@/components/dashboard/highway-panel";
@@ -67,28 +68,9 @@ export function AdminClientDashboard({
           </div>
         </div>
 
-        <div className="flex flex-wrap gap-2 p-4" aria-label="Client machines">
-          {nodes.length > 0 ? (
-            nodes.map((node) => (
-              <Link
-                key={node.id}
-                href={`/admin?tab=client&client=${client.id}&node=${node.id}`}
-                className={`rounded-full border px-3 py-2 font-mono text-xs transition-colors ${
-                  node.id === current?.id
-                    ? "border-primary bg-primary/10 text-primary"
-                    : "border-border text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                {node.name}
-                {node.status !== "active" ? ` · ${node.status}` : ""}
-                {neverLinked(node) ? " · never linked" : ""}
-              </Link>
-            ))
-          ) : (
-            <p className="font-mono text-xs text-muted-foreground">
-              This client has not linked a machine yet.
-            </p>
-          )}
+        <div className="p-4">
+          <ServerSwitcher nodes={nodes.map(node => ({...node, owner: node.owner_id ?? ""}))} current={current?.id} baseHref={`/admin?tab=client&client=${client.id}`} />
+          <Link href="/dashboard?owner=all" className="mt-3 inline-block font-mono text-xs text-primary underline underline-offset-4">View all servers and relayers →</Link>
         </div>
       </section>
 

@@ -81,15 +81,16 @@ export function LinkForm({ nodeCount }: { nodeCount: number }) {
       setError(STATUS_COPY[row?.status ?? ""] ?? `Unexpected status: ${row?.status}`);
       return;
     }
+    setApproved({ node_id: row.node_id!, node_name: row.node_name! });
     const emailResponse = await fetch("/api/email/device-linked", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ nodeId: row.node_id }),
+      signal: AbortSignal.timeout(10_000),
     }).catch(() => null);
     if (!emailResponse?.ok) {
       setEmailNotice("The machine is linked, but the confirmation email could not be delivered yet. The first telemetry email will retry on check-in.");
     }
-    setApproved({ node_id: row.node_id!, node_name: row.node_name! });
   }
 
   if (approved) {
@@ -101,14 +102,12 @@ export function LinkForm({ nodeCount }: { nodeCount: number }) {
             {approved.node_name} is linked
           </p>
           <p className="mt-2 font-mono text-xs leading-6 text-muted-foreground">
-            The server is polling and will pick up its token within a few seconds.
-            It measures the connection and sends a full first report immediately,
-            then follows the Account interval (10 minutes by default). Configuration
-            is checked every minute and the recurring timer is installed automatically.
+            This device is now in your dashboard. No assignment is needed.
+            Readings will appear when the server finishes linking and checks in.
           </p>
           {emailNotice ? <p className="mt-3 font-mono text-xs leading-6 text-[#e8a400]">{emailNotice}</p> : null}
         </div>
-        <Link href="/dashboard" className="contents">
+        <Link href={`/dashboard?node=${encodeURIComponent(approved.node_id)}`} className="contents">
           <Button size="sm" className="w-full">
             Open dashboard
           </Button>

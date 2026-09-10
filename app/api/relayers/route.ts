@@ -22,18 +22,21 @@ export async function GET(request: Request) {
     return fail("An active account is required.", 403);
   const requestedOwner = new URL(request.url).searchParams.get("owner");
   const owner = requestedOwner ?? auth.user.id;
-  if (owner !== auth.user.id) {
+  const all = owner === "all";
+  if (all) {
+    const {data: admin, error} = await supabase.rpc("hyn_is_admin");
+    if (error || admin !== true) return fail("An Admin or Super admin account is required to view all relayers.",403);
+  } else if (owner !== auth.user.id) {
     const { data: admin, error } = await supabase.rpc("hyn_can_view_dashboard", { p_owner: owner });
     if (error || admin !== true)
       return fail("You cannot view another account's relayers.", 403);
   }
-  // Never accept a relayer ID from a customer as authorization. Even an admin
-  // preview is scoped to the assignments of the selected account.
-  const { data, error } = await supabase
-    .from("relayer_assignments")
-    .select("id,owner,relayer_id,relayer_name,created_at")
-    .eq("owner", owner)
-    .order("created_at");
+  // Every scope reads authorized assignment rows through RLS. A URL relayer ID
+  // only chooses which of those assignments to enrich with provider readings.
+  let assignments = supabase.from("relayer_assignments")
+    .select("id,owner,relayer_id,relayer_name,created_at");
+  if (!all) assignments = assignments.eq("owner",owner);
+  const {data, error} = await assignments.order("created_at");
   if (error)
     return fail(
       "Relayer assignments could not be loaded. Ask an administrator to apply the relayer database migration.",

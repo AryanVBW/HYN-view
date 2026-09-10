@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { usePathname, useSearchParams } from "next/navigation";
+import { ResourceSwitcher } from "./resource-switcher";
 import {
   Activity,
   ArrowUpRight,
@@ -11,7 +13,6 @@ import {
   Copy,
   Radio,
   RefreshCw,
-  Search,
   ShieldCheck,
   Wallet,
   X,
@@ -59,8 +60,10 @@ export function RelayerDashboard({
   const [data, setData] = useState<RelayerDashboardData | null>(null);
   const [loading, setLoading] = useState(false);
   const [reload, setReload] = useState(0);
-  const [selected, setSelected] = useState<number | null>(null);
-  const [query, setQuery] = useState("");
+  const params = useSearchParams();
+  const pathname = usePathname();
+  const candidate = Number(params.get("relayer"));
+  const selected = Number.isSafeInteger(candidate) && candidate > 0 ? candidate : null;
   const [now, setNow] = useState(() => Date.now());
   const refresh = useCallback(() => setReload((n) => n + 1), []);
 
@@ -137,12 +140,7 @@ export function RelayerDashboard({
 
   const readings = data?.readings ?? [];
   const reading =
-    readings.find((r) => r.assignment.relayer_id === selected) ?? readings[0];
-  const matching = readings.filter((r) =>
-    `${r.relayer?.name ?? r.assignment.relayer_name} ${r.assignment.relayer_id}`
-      .toLowerCase()
-      .includes(query.toLowerCase()),
-  );
+    selected ? readings.find((r) => r.assignment.relayer_id === selected) : readings[0];
   return (
     <section className="relayer-view" aria-label="Highway relayer dashboard">
       <div className="relayer-heading">
@@ -150,7 +148,7 @@ export function RelayerDashboard({
           <div className="relayer-wordmark">
             <Radio size={17} aria-hidden /> Highway network
           </div>
-          <h2>Your relayer, at a glance.</h2>
+          <h2>{ownerId === "all" ? "All Highway relayers" : "Highway relayers"}</h2>
           <p>Service health, check-ins and on-chain earnings in one place.</p>
         </div>
         <button
@@ -179,12 +177,12 @@ export function RelayerDashboard({
           <p>Reading service status and the finalized registry.</p>
         </div>
       ) : null}
-      {data && !reading && !data.error ? (
+      {data && !readings.length && !data.error ? (
         <div className="relayer-empty">
           <Radio size={26} aria-hidden />
-          <h3>No relayer assigned yet</h3>
+          <h3>No Highway relayers in this view</h3>
           <p>
-            {ownerId || !data?.canRequest ? "A Super admin can assign a Highway relayer to this dashboard."
+            {ownerId || !data?.canRequest ? "A Super admin can add Highway relayers to an account. Linked servers appear independently in the server dashboard."
               : "Request your relayer below. Once an administrator approves it, your service details will appear here automatically."}
           </p>
         </div>
@@ -195,37 +193,15 @@ export function RelayerDashboard({
           <RelayerRequestForm requests={data.requests ?? []} error={data.requestsError ?? null} manageHref={data.manageHref} onChanged={refresh} />
         </details>
       ) : null}
-      {readings.length > 1 ? (
-        <div className="relayer-picker">
-          <label className="relayer-search">
-            <Search size={16} aria-hidden />
-            <input
-              aria-label="Search your assigned relayers"
-              placeholder="Search your relayers by name or ID"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-          </label>
-          <div
-            className="relayer-picker-options"
-            aria-label="Your assigned relayers"
-          >
-            {matching.map((r) => (
-              <button
-                key={r.assignment.id}
-                aria-pressed={reading?.assignment.id === r.assignment.id}
-                onClick={() => setSelected(r.assignment.relayer_id)}
-              >
-                {r.relayer?.name ?? r.assignment.relayer_name}
-                <span>#{r.assignment.relayer_id}</span>
-              </button>
-            ))}
-            {!matching.length ? (
-              <p>No assigned relayers match this search.</p>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
+      {selected && data && readings.length > 0 && !reading ? <p role="status" className="relayer-notice">The selected relayer is no longer available in this view. Choose a relayer below.</p> : null}
+      {readings.length ? <div className="my-6">
+        <ResourceSwitcher label="Relayers" current={reading ? String(reading.assignment.relayer_id) : undefined} items={readings.map(r => {
+          const next = new URLSearchParams(params.toString());
+          next.set("relayer",String(r.assignment.relayer_id));
+          return {id: String(r.assignment.relayer_id), name: r.relayer?.name ?? r.assignment.relayer_name,
+            detail: `#${r.assignment.relayer_id}`, href: `${pathname}?${next}`};
+        })} />
+      </div> : null}
       {reading ? (
         <RelayerPanel key={reading.assignment.id} reading={reading} now={now} />
       ) : null}

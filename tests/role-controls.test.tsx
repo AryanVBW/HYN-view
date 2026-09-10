@@ -4,6 +4,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime.js";
 import { AgentUpdateControl } from "../components/dashboard/agent-update-control";
 import { ClientTable } from "../components/admin/tables";
+import { SearchParamsContext } from "next/dist/shared/lib/hooks-client-context.shared-runtime.js";
+import { ServerSwitcher } from "../components/dashboard/server-switcher";
 import { DashboardContext } from "../components/dashboard/dashboard-context";
 import { permissions } from "../lib/permissions";
 import type { AdminClient } from "../lib/types";
@@ -83,4 +85,26 @@ test("Viewer dashboard selector contains only supplied accessible dashboards", (
   assert.match(html, /Shared with me/);
   assert.match(html, /Viewer/);
   assert.doesNotMatch(html, /Admin dashboard|Link another server/);
+});
+
+test("Monitors can link devices and staff get all-server navigation", () => {
+  for (const role of ["viewer","monitor","admin","super_admin"]) {
+    const html=render(<DashboardContext role={role} owner="me" accounts={[{id:"me",name:"Owner",own:true}]}/>);
+    assert.equal(html.includes("+ Link server"),permissions(role).canLink,role);
+    assert.equal(html.includes("All servers"),permissions(role).canAdmin,role);
+    assert.match(html,/My devices/);
+    assert.match(html,/aria-current="page"/);
+  }
+});
+
+test("server switching preserves scope and relayer while identifying the selected device", () => {
+  const html=render(<SearchParamsContext.Provider value={new URLSearchParams("owner=all&node=first&relayer=42")}>
+    <ServerSwitcher current="first" baseHref="/dashboard?owner=all" accounts={[{id:"me",name:"Owner",own:true},{id:"team",name:"Team",own:false}]} nodes={[
+      {id:"first",name:"Gateway",hostname:"wan-01",owner:"me",is_demo:false,status:"active"},
+      {id:"second",name:"Gateway",hostname:"wan-02",owner:"team",is_demo:false,status:"active"},
+    ]}/>
+  </SearchParamsContext.Provider>);
+  assert.match(html,/href="\/dashboard\?owner=all&amp;node=second&amp;relayer=42"/);
+  assert.match(html,/aria-current="page"[^>]*title="Gateway · Mine"/);
+  assert.match(html,/Gateway · Team/);
 });
