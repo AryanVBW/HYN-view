@@ -3,8 +3,8 @@
 | Role | Dashboard access | Actions |
 | --- | --- | --- |
 | Viewer | Own dashboard and dashboards explicitly shared with them | Read only |
-| Monitor | Own dashboard and dashboards explicitly shared with them | Refresh readings; request or cancel their own relayer access requests |
-| Admin | Every dashboard and the admin dashboard | View data and promote existing Viewers/Monitors to Admin |
+| Monitor | Own dashboard and dashboards explicitly shared with them | Link their own devices; refresh readings; request or cancel their own relayer access requests |
+| Admin | Every dashboard and the admin dashboard | Link their own devices; view data and promote existing Viewers/Monitors to Admin |
 | Super admin | Every dashboard and the admin dashboard | Write settings, link/update/control machines, manage relayers, review requests, change roles, and share dashboards |
 
 Changing display mode or hiding delivery history in the current browser is a
@@ -12,8 +12,18 @@ personal view preference; it does not change stored monitoring data.
 
 ## Use the dashboard
 
-The role badge explains the signed-in account's capabilities. **Viewing dashboard**
-switches between authorized dashboards; machine tabs stay within that dashboard.
+The role badge explains the signed-in account's capabilities. Dashboard pills
+switch between **My devices**, shared accounts, and **All servers** for Admins
+and Super admins. Server and Highway relayer pills support search and keep the
+selection in the URL. Administrators can switch across the entire authorized
+fleet without opening each client separately.
+
+Active Monitors, Admins and Super admins can use **Link server** with a pairing
+code from `sudo hyn link`. The signed-in account becomes the owner and sees the
+device immediately, even before its first report. No admin assignment is needed.
+Sharing one server with additional users remains a Super admin feature. Sharing
+blocks cannot override ownership; suspend an account or revoke a server when
+access must be disabled. Viewers remain read-only.
 Shared dashboard labels use the owner's display name, with a short ID fallback.
 Sharing does not expose another person's account profile or email preferences.
 
@@ -26,7 +36,7 @@ Super admins can change an account's role with the role selector. They can use
 machines and assigned relayers, then **Revoke access** to remove it. Access is
 checked for every database query and relayer API request.
 
-To resolve **No relayer assigned yet**, a Monitor submits **Request a relayer**
+To resolve **No Highway relayers in this view**, a Monitor submits **Request a relayer**
 with the Highway name or numeric ID. A Super admin verifies ownership at
 **Admin → Clients → Relayer requests** and selects **Approve relayer**.
 Super admins can also assign directly from the client's detail view. A pending
@@ -41,6 +51,8 @@ by the portal. This release includes:
 2. `20260908110000_unattended_settings.sql`
 3. `20260909090000_relayer_requests.sql`
 4. `20260909120000_portal_roles.sql`
+5. `20260910120000_server_access_bandwidth.sql`
+6. `20260910200000_owner_linking.sql`
 
 The existing relayer assignments migration is a prerequisite. Fresh installs
 can use `supabase/schema.sql`. Existing installs should use the pending focused
