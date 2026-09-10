@@ -175,10 +175,18 @@ psql -f "$HERE/owner-linking-test.sql" >"$WORK/owner-test.log" 2>&1 || { cat "$W
 sed -n '/PASS /p' "$WORK/owner-test.log"
 psql -f "$HERE/shared-observability-test.sql" >"$WORK/upgrade-test.log" 2>&1 || { cat "$WORK/upgrade-test.log"; exit 1; }
 printf 'PASS  shared observability works from migrations before schema reapplication\n'
+psql -f "$HERE/node-relayer-test.sql" >"$WORK/node-relayer-upgrade.log" 2>&1 || { cat "$WORK/node-relayer-upgrade.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/node-relayer-upgrade.log"
+psql -f "$HERE/user-server-assignments-test.sql" >"$WORK/user-assignments-upgrade.log" 2>&1 || { cat "$WORK/user-assignments-upgrade.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/user-assignments-upgrade.log"
 psql -f "$HERE/schema.sql" >"$WORK/final-schema.log" 2>&1 || { cat "$WORK/final-schema.log"; exit 1; }
 psql -c "do \$\$ begin if (select role from public.profiles where email='legacy-user@roles.test')<>'admin' then raise exception 'reapply elevated admin'; end if; end \$\$; delete from auth.users where email in ('legacy-admin@roles.test','legacy-user@roles.test')" || exit 1
 psql -f "$HERE/owner-linking-test.sql" >"$WORK/owner-schema-test.log" 2>&1 || { cat "$WORK/owner-schema-test.log"; exit 1; }
 printf 'PASS  full schema preserves self-service owner linking\n'
+psql -f "$HERE/node-relayer-test.sql" >"$WORK/node-relayer-schema.log" 2>&1 || { cat "$WORK/node-relayer-schema.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/node-relayer-schema.log"
+psql -f "$HERE/user-server-assignments-test.sql" >"$WORK/user-assignments-schema.log" 2>&1 || { cat "$WORK/user-assignments-schema.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/user-assignments-schema.log"
 printf 'PASS  legacy roles migrate once and reapply preserves restricted Admins\n'
 psql -f "$HERE/roles-test.sql" >"$WORK/roles-test.log" 2>&1 || { cat "$WORK/roles-test.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/roles-test.log"
