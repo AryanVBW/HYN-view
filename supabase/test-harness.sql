@@ -14,7 +14,7 @@ do $$ begin
   create role authenticated nologin;
 exception when duplicate_object then null; end $$;
 
-grant usage on schema public, extensions to anon, authenticated;
+grant usage on schema public, extensions, auth to anon, authenticated;
 
 -- Supabase's own default privileges, which are the difference between "revoked
 -- from PUBLIC" and actually unreachable. A project grants EXECUTE on every new

@@ -155,6 +155,8 @@ NET_RX[nebula1]=88000000 NET_TX[nebula1]=44000000
 NET_RDROP_R[nebula1]=1 NET_TDROP_R[nebula1]=0
 TUNE[cc]=bbr
 
+# This suite preserves the explicitly selected legacy archive contract.
+config_set cloud_storage cloud
 printf 'cloud integration\n'
 
 # ---------------------------------------------------------------------------
@@ -213,6 +215,7 @@ truthy 'portal update completes only after fresh telemetry is accepted' \
 printf '%s\tok\n' "${EPOCHSECONDS:-0}" >"$(_cloud_push_stamp)"
 before_sync_ingest=$(grep -c hyn_ingest "$REQLOG")
 curl -sS "http://127.0.0.1:$PORT/command/sync" >/dev/null
+rm -f "$HYN_VAR/cloud-checkin"
 cloud_push 0 1
 sync_rc=$?
 after_sync_ingest=$(grep -c hyn_ingest "$REQLOG")
@@ -237,6 +240,7 @@ HYN_VERSION=1.7.0
 curl -sS "http://127.0.0.1:$PORT/command/queue" >/dev/null
 before_handoff_ingest=$(grep -c hyn_ingest "$REQLOG")
 printf '%s\tok\n' "${EPOCHSECONDS:-0}" >"$(_cloud_push_stamp)"
+rm -f "$HYN_VAR/cloud-checkin" # simulate the next scheduled control check
 cloud_push 1 1
 eq 'a delegated update sends no telemetry of its own' \
   "$before_handoff_ingest" "$(grep -c hyn_ingest "$REQLOG")"
@@ -497,6 +501,7 @@ eq 'an identical pull is not a change' 0 "$CLOUD_CONFIG_CHANGED"
 # With nothing changed and a fresh reading already sent, the check-in stays cheap.
 printf '%s\tok\n' "${EPOCHSECONDS:-0}" >"$(_cloud_push_stamp)"
 before_quiet=$(grep -c hyn_ingest "$REQLOG")
+rm -f "$HYN_VAR/cloud-checkin" # simulate the next scheduled control check
 cloud_push 1 1
 eq 'an unchanged check-in sends no reading' "$before_quiet" "$(grep -c hyn_ingest "$REQLOG")"
 # Now make the portal return something different and confirm the reading follows
@@ -504,6 +509,7 @@ eq 'an unchanged check-in sends no reading' "$before_quiet" "$(grep -c hyn_inges
 curl -sS "http://127.0.0.1:$PORT/config/report_at/09:15" >/dev/null
 printf '%s\tok\n' "${EPOCHSECONDS:-0}" >"$(_cloud_push_stamp)"
 before_changed=$(grep -c hyn_ingest "$REQLOG")
+rm -f "$HYN_VAR/cloud-checkin" # simulate the next scheduled control check
 cloud_push 1 1
 eq 'a changed setting is pushed in the same check-in' \
   "$((before_changed + 1))" "$(grep -c hyn_ingest "$REQLOG")"
@@ -583,10 +589,12 @@ truthy 'push succeeds when linked' 'cloud_push 1'
 # The system timer wakes every minute so dashboard config changes are fetched
 # promptly, but collection/ingest still honours the per-node push interval.
 before_ingest=$(grep -c hyn_ingest "$REQLOG")
+rm -f "$HYN_VAR/cloud-checkin" # simulate the next scheduled control check
 truthy 'scheduled push exits cleanly before its interval' 'cloud_push 1 1'
 after_ingest=$(grep -c hyn_ingest "$REQLOG")
 eq 'scheduled push does not collect early' "$before_ingest" "$after_ingest"
 printf '%s\tok\n' "$((EPOCHSECONDS - 600))" >"$(_cloud_push_stamp)"
+rm -f "$HYN_VAR/cloud-checkin" # simulate the next scheduled control check
 truthy 'scheduled push sends after its interval' 'cloud_push 1 1'
 after_due_ingest=$(grep -c hyn_ingest "$REQLOG")
 eq 'due scheduled push reaches ingest' "$((before_ingest + 1))" "$after_due_ingest"

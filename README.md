@@ -1,7 +1,36 @@
 # hyn-view
 
-A network-first terminal monitor for Ubuntu Server, for boxes that run 24/7 and
-are watched by a human.
+**CLI 1.10 stores history locally by default.** The website runs on Heroku using
+GitHub Student Developer Pack credits, with Supabase Free for authentication,
+permissions and managed settings. Scheduled checks do not upload full telemetry.
+An explicit sync shares one temporary reading with the portal for five minutes.
+Historical cloud charts and report delivery described below require explicit
+cloud storage/notification opt-in.
+
+```sh
+sudo hyn autostart enable # one-time boot, recovery and keep-awake setup
+hyn autostart status      # verify automatic operation
+sudo hyn cloud optimize  # apply the low-consumption profile to an existing install
+sudo hyn cloud usage     # local request/byte totals and hosting budget references
+sudo hyn history --local 12      # recent private local snapshots, as JSONL
+sudo hyn logs 100        # local diagnostics
+```
+
+See [local storage, free-plan budgets and Heroku rollout](docs/local-storage-and-hosting.md)
+for retention, permissions, on-demand viewing and the required portal/database
+upgrade order. The CLI checks both `https://www.hyn-view.in` and
+`https://hyn-view.in`, caches the working HTTPS endpoint, and preserves custom
+endpoint settings.
+
+Once installed and paired, use the portal's **Update CLI** and **Account →
+Server settings** controls. Updates, schedule changes and service restarts run
+without a terminal session. The agent starts whenever Linux boots and prevents
+idle sleep by default. To boot after a power outage, the computer also needs its
+BIOS/UEFI **Restore on AC Power Loss** option enabled; software cannot power on
+its own switched-off machine.
+
+A network-first terminal monitor and unattended agent for Ubuntu Server boxes
+that run 24/7.
 
 It covers what `htop` and `btop` cover, but inverts the priority: the network is
 the headline, not the CPU. It also tracks a [Highway](https://highwayp2p.com)
@@ -14,7 +43,7 @@ curl -fsSL https://www.hyn-view.in/install.sh | sudo bash
 One command, one password prompt, nothing to answer. It installs node if the box
 has none, installs the CLI globally from npm, writes `/etc/hyn-view/config`,
 installs and starts the systemd units — including the resident agent that beats
-every 24 seconds and updates itself — and then *verifies* that the agent is
+every 60 seconds and updates itself — and then *verifies* that the agent is
 actually running rather than trusting that it must be.
 
 If you would rather do it by hand, npm is the same installation:
@@ -301,6 +330,15 @@ rather than a unit apparently using 16 EiB.
 
 ### Administration
 
+The portal has **Viewer**, **Monitor**, **Admin**, and **Super admin** roles.
+Viewers can read dashboards explicitly shared with them. Monitors can also
+refresh readings and request relayers. Admins can view every dashboard and add
+other admins. Super admins manage machines, settings, relayers, roles, and
+sharing. New accounts default to Monitor; existing admins migrate to Super admin.
+See [Portal roles and dashboard sharing](docs/portal-roles.md) for the permission
+matrix, assignment steps, and migration order. The operational controls below
+require a Super admin.
+
 An administrator sees every client and every machine at `/admin`: animated fleet
 totals, 24-hour CPU and network trends, node-state distribution, which boxes have
 gone quiet, open alerts, notification volume and failures per client, the
@@ -342,18 +380,19 @@ treats a pause as an administrative decision rather than a fault and exits zero,
 so a maintenance window does not fill the journal with what looks like a broken
 agent.
 
-Two guard rails are enforced in the database: an admin cannot suspend their own
-account, and the last remaining administrator cannot be demoted.
+The database prevents changing your own role or suspending your own account.
+Role and status updates serialize so concurrent changes cannot remove the last
+active Super admin.
 
-The first administrator is made by hand, once:
+The first Super admin is made by hand, once:
 
 ```sql
-update public.profiles set role = 'admin' where email = 'you@example.com';
+update public.profiles set role = 'super_admin' where email = 'you@example.com';
 ```
 
-After that, an admin can promote others from `/admin`. The third route is an
-allow list — addresses that are promoted automatically the next time they sign
-in:
+After that, Admins can add other Admins from `/admin`; Super admins can assign
+any role. The database-only bootstrap allowlist grants Super admin on the next
+sign-in and consumes the entry once:
 
 ```sql
 insert into public.admin_allowlist (email) values ('you@example.com');

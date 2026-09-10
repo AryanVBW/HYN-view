@@ -180,7 +180,7 @@ mkdir -p "$HYN_ROOT/bin"
 cat >"$HYN_ROOT/bin/hyn" <<EOS
 #!/usr/bin/env bash
 case \${1:-} in
-  --version) printf 'hyn-view %s\n' "\$(cat "$TMP/installed")" ;;
+  --version) printf 'hyn-view %s\nCopyright HYN-view contributors\n' "\$(cat "$TMP/installed")" ;;
   setup) printf 'setup ran\n' >>"$TMP/setup.log" ;;
 esac
 exit 0
@@ -216,7 +216,7 @@ update_check_now >/dev/null
 NPM_RESULT=1
 : >"$NPM_LOG"
 falsy    'a failed npm install is a failed update' 'update_apply 0 2>/dev/null'
-contains 'and says nothing was changed' 'nothing was changed' "$UPD_LAST_ERR"
+contains 'and admits a partial installation is possible' 'may be incomplete' "$UPD_LAST_ERR"
 eq       'the running version is unchanged' '1.8.0' "$HYN_VERSION"
 
 # npm succeeds but installs the wrong thing: caught by verifying afterwards.
@@ -257,7 +257,7 @@ missing 'auto_update=check never installs' 'installing' "$UPD_STATE"
 # release again, and there is no second mechanism that could reach it. The record
 # timer is the only one enabled unconditionally, so the check belongs there too.
 truthy 'the record job also checks for updates' \
-  'grep -A9 "^    record)" "$ROOT/bin/hyn" | grep  update_startup'
+  'sed -n "/^    record)/,/^    notify)/p" "$ROOT/bin/hyn" | grep update_startup'
 truthy 'the record timer is enabled unconditionally' \
   'grep  "_toggle_timer hyn-record.timer 1" "$HYN_LIB/setup.sh"'
 # ...and doctor must say so when the policy would stop it anyway.

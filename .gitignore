@@ -7,3 +7,5 @@ node_modules/
 supabase/.temp/
 /web-portal/
 .worktrees/
+
+.pnpm-store/

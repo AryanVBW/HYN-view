@@ -61,6 +61,7 @@ if [[ ${HYN_TEST_MIGRATIONS:-0} == 1 ]]; then
   # This mode catches patches that work in schema.sql but fail on an existing
   # project because a legacy column, constraint, grant, or row is still present.
   for migration in "$HERE"/migrations/*.sql; do
+    if [[ ${migration##*/} > 20260909110000 ]]; then continue; fi
     if [[ ${migration##*/} == 20260821120000_hash_pairing_codes_and_expire.sql ]]; then
       # Simulate an in-flight pairing created by the previous production schema.
       psql -c "insert into public.device_codes (user_code, device_code_hash, hostname, os, agent_version, expires_at) values ('7ABC-DEFG', public._hyn_sha256('legacy-device-code'), 'legacy-host', 'Ubuntu', 'legacy', now() + interval '10 minutes')" >/dev/null
@@ -74,7 +75,7 @@ if [[ ${HYN_TEST_MIGRATIONS:-0} == 1 ]]; then
       # Simulate config smuggled through the direct API before the allowlist.
       psql -c "insert into auth.users (id, email) values ('66666666-6666-6666-6666-666666666666', 'legacy-config@example.com'); insert into public.nodes (owner, name, config) values ('66666666-6666-6666-6666-666666666666', 'legacy-config-node', '{\"alert_mem_pct\":\"81\",\"alert_disk_pct\":\"08\",\"report_at\":\"06:15\",\"webhook_url\":\"https://attacker.example/hook\",\"heartbeat_url\":\"https://attacker.example/ping\",\"cloud_url\":\"https://attacker.example\"}'::jsonb)" >/dev/null
     fi
-    psql -f "$migration" 2>&1 | grep -viE 'NOTICE|does not exist, skipping' >&2
+    psql -f "$migration" >"$WORK/migration.log" 2>&1 || { cat "$WORK/migration.log" >&2; exit 1; }
     if [[ ${migration##*/} == 20260821121000_remove_central_notification_credentials.sql ]]; then
       # The migration must remove notification state, not the account itself;
       # remove only this test fixture before the common flow assertions count
@@ -84,14 +85,17 @@ if [[ ${HYN_TEST_MIGRATIONS:-0} == 1 ]]; then
   done
   psql -f "$HERE/migration-upgrade-test.sql"
 else
+  # Verify historical protocol behavior before tightening portal permissions.
+  # The final role schema is tested separately below, including every write RPC.
+  sed '/^-- HYN PORTAL ROLES V1/,$d' "$HERE/schema.sql" >"$WORK/legacy-schema.sql"
   # Policy "does not exist, skipping" notices are expected on a first apply.
-  psql -f "$HERE/schema.sql" 2>&1 | grep -viE 'NOTICE|does not exist, skipping' >&2
+  psql -f "$WORK/legacy-schema.sql" >"$WORK/schema.log" 2>&1 || { cat "$WORK/schema.log" >&2; exit 1; }
   if [[ ${HYN_TEST_SCHEMA_REAPPLY:-0} == 1 ]]; then
     # Recreate legacy central notification stores, including an actual provider
     # secret, so a schema reapplication proves it removes old deployed state.
     psql -c "create table public.notification_channels (id uuid primary key default gen_random_uuid(), owner uuid, kind text, target text, secret text); insert into public.notification_channels (kind, target, secret) values ('resend', 'legacy-target@example.com', 'legacy-central-secret'); create table public.notify_prefs (user_id uuid primary key, notify_email text, notify_phone text, admin_id uuid, updated_at timestamptz default now()); insert into public.notify_prefs (user_id, notify_email, notify_phone) values ('55555555-5555-5555-5555-555555555555', 'legacy-target@example.com', '+910000000000')" >/dev/null
     psql -c "alter table public.nodes drop constraint if exists nodes_config_portal_keys_check; insert into auth.users (id, email) values ('77777777-7777-7777-7777-777777777777', 'reapply-config@example.com'); insert into public.nodes (owner, name, config) values ('77777777-7777-7777-7777-777777777777', 'reapply-config-node', '{\"alert_mem_pct\":\"82\",\"alert_disk_pct\":\"08\",\"webhook_url\":\"https://attacker.example/hook\"}'::jsonb)" >/dev/null
-    psql -f "$HERE/schema.sql" 2>&1 | grep -viE 'NOTICE|does not exist, skipping' >&2
+    psql -f "$WORK/legacy-schema.sql" >"$WORK/schema.log" 2>&1 || { cat "$WORK/schema.log" >&2; exit 1; }
     if [[ $(psql -Atc "select count(*) from public.nodes where owner = '77777777-7777-7777-7777-777777777777' and (config ? 'webhook_url' or config ? 'alert_disk_pct' or config->>'alert_mem_pct' <> '82')") != 0 ]]; then
       printf 'run-tests: schema reapply did not sanitise legacy node config\n' >&2
       exit 1
@@ -154,4 +158,30 @@ fi
 passes=$(printf '%s\n' "$out" | grep -c 'PASS ')
 printf '\nrun-tests: %d checks passed\n' "$passes"
 ((passes > 0)) || { printf 'run-tests: no assertions ran\n' >&2; exit 1; }
+# Upgrade real legacy roles, then prove a second apply cannot elevate new Admins.
+psql -c "insert into auth.users(id,email) values ('90000000-0000-4000-8000-000000000001','legacy-admin@roles.test'),('90000000-0000-4000-8000-000000000002','legacy-user@roles.test'); update public.profiles set role='admin' where email='legacy-admin@roles.test'" || exit 1
+psql -f "$HERE/migrations/20260909120000_portal_roles.sql" >"$WORK/roles.log" 2>&1 || { cat "$WORK/roles.log"; exit 1; }
+psql -c "do \$\$ begin if (select role from public.profiles where email='legacy-admin@roles.test')<>'super_admin' or (select role from public.profiles where email='legacy-user@roles.test')<>'monitor' then raise exception 'legacy roles not migrated'; end if; end \$\$; update public.profiles set role='admin' where email='legacy-user@roles.test'" || exit 1
+psql -f "$HERE/migrations/20260909120000_portal_roles.sql" >"$WORK/roles.log" 2>&1 || { cat "$WORK/roles.log"; exit 1; }
+# Also apply the complete fresh-install schema over final roles; old definitions
+# must not undo the last role block or promote a restricted Admin.
+# First exercise later migrations and their authorization tests WITHOUT the
+# complete schema filling in missing migration definitions.
+for migration in "$HERE"/migrations/*.sql; do
+  [[ ${migration##*/} > 20260909120000_portal_roles.sql ]] || continue
+  psql -f "$migration" >"$WORK/upgrade.log" 2>&1 || { cat "$WORK/upgrade.log"; exit 1; }
+done
+psql -f "$HERE/shared-observability-test.sql" >"$WORK/upgrade-test.log" 2>&1 || { cat "$WORK/upgrade-test.log"; exit 1; }
+printf 'PASS  shared observability works from migrations before schema reapplication\n'
+psql -f "$HERE/schema.sql" >"$WORK/final-schema.log" 2>&1 || { cat "$WORK/final-schema.log"; exit 1; }
+psql -c "do \$\$ begin if (select role from public.profiles where email='legacy-user@roles.test')<>'admin' then raise exception 'reapply elevated admin'; end if; end \$\$; delete from auth.users where email in ('legacy-admin@roles.test','legacy-user@roles.test')" || exit 1
+printf 'PASS  legacy roles migrate once and reapply preserves restricted Admins\n'
+psql -f "$HERE/roles-test.sql" >"$WORK/roles-test.log" 2>&1 || { cat "$WORK/roles-test.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/roles-test.log"
+psql -f "$HERE/migrations/20260910120000_server_access_bandwidth.sql" >"$WORK/access-migration.log" 2>&1 || { cat "$WORK/access-migration.log"; exit 1; }
+psql -f "$HERE/server-access-bandwidth-test.sql" >"$WORK/access-test.log" 2>&1 || { cat "$WORK/access-test.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/access-test.log"
+psql -f "$HERE/shared-observability-test.sql" >"$WORK/shared-test.log" 2>&1 || { cat "$WORK/shared-test.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/shared-test.log"
+printf 'run-tests: final role and server authorization checks passed\n'
 exit 0

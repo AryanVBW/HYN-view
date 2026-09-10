@@ -41,7 +41,8 @@ AGENT_SLEEP_PID=0
 AGENT_BEATS=0
 AGENT_BEAT_OK=0
 AGENT_BEAT_FAIL=0
-AGENT_INTERVAL=24
+AGENT_INTERVAL=60
+AGENT_RETRY_AT=0
 # Set only by `hyn agent --interval=N`, and re-applied after every config reload
 # so a debugging override is not thrown away by the first maintenance pass.
 AGENT_INTERVAL_ARG=''
@@ -66,8 +67,8 @@ agent_stamp_stale() {
   [[ -r $f ]] || return 1
   read -r ts <"$f" 2>/dev/null
   [[ $ts =~ ^[0-9]+$ ]] || return 0
-  interval=${CFG[heartbeat_sec]:-24}
-  [[ $interval =~ ^[0-9]+$ ]] || interval=24
+  interval=${CFG[heartbeat_sec]:-60}
+  [[ $interval =~ ^[0-9]+$ ]] || interval=60
   slack=$((interval * 3))
   ((slack < 120)) && slack=120
   ((now - ts > slack))
@@ -76,8 +77,8 @@ agent_stamp_stale() {
 # heartbeat_sec, clamped. A 1-second beat would be a denial of service against
 # our own API and a 0 would spin; anything past an hour is not a heartbeat.
 agent_interval_v() {
-  AGENT_INTERVAL=${CFG[heartbeat_sec]:-24}
-  [[ $AGENT_INTERVAL =~ ^[1-9][0-9]{0,4}$ ]] || AGENT_INTERVAL=24
+  AGENT_INTERVAL=${CFG[heartbeat_sec]:-60}
+  [[ $AGENT_INTERVAL =~ ^[1-9][0-9]{0,4}$ ]] || AGENT_INTERVAL=60
   ((AGENT_INTERVAL < 5)) && AGENT_INTERVAL=5
   ((AGENT_INTERVAL > 3600)) && AGENT_INTERVAL=3600
   return 0
@@ -129,6 +130,7 @@ _agent_sleep() {
 # reported, which is the same reason the alert engine has hysteresis.
 agent_beat() {
   local before=$AGENT_BEAT_OK
+  ((${EPOCHSECONDS:-0} < AGENT_RETRY_AT)) && return 0
   if ! cloud_configured || ! cloud_linked; then
     # Not an error. An unpaired machine is a working local monitor; the loop
     # stays up for the update and repair duties below and starts beating the
@@ -142,11 +144,17 @@ agent_beat() {
       printf 'hyn-agent: heartbeat restored after %d failed beat(s)\n' "$AGENT_BEAT_FAIL"
       AGENT_BEAT_FAIL=0
     fi
+    AGENT_RETRY_AT=0
     ((before == 0)) && printf 'hyn-agent: heartbeat established with %s every %ss\n' \
       "$(cloud_url)" "$AGENT_INTERVAL"
     return 0
   fi
   AGENT_BEAT_FAIL=$((AGENT_BEAT_FAIL + 1))
+  local exponent=$AGENT_BEAT_FAIL delay
+  ((exponent > 4)) && exponent=4
+  delay=$((AGENT_INTERVAL * (1 << exponent)))
+  ((delay > 900)) && delay=900
+  AGENT_RETRY_AT=$((${EPOCHSECONDS:-0} + delay))
   # Once, on the transition. Repeating an unreachable endpoint every 24 seconds
   # for a week is how a journal becomes useless.
   ((AGENT_BEAT_FAIL == 1)) && warn "heartbeat failed: ${CLOUD_LAST_ERR:-unknown error}"
@@ -192,7 +200,7 @@ agent_run() {
       --interval=*) AGENT_INTERVAL_ARG=${a#*=}; CFG[heartbeat_sec]=$AGENT_INTERVAL_ARG ;;
       -h | --help)
         printf 'usage: hyn agent [--once] [--interval=SECONDS]\n'
-        printf '  Resident loop: beats every heartbeat_sec (default 24), keeps the\n'
+        printf '  Resident loop: beats every heartbeat_sec (default 60), keeps the\n'
         printf '  package updated and re-arms drifted timers. Installed and\n'
         printf '  supervised as hyn-agent.service; run by hand only to debug.\n'
         return 0 ;;
