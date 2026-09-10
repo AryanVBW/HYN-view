@@ -8,7 +8,9 @@ export function selectDashboard<T extends {id: string; owner: string}>({
 }): {owner: string; nodes: T[]; node: T | undefined} | null {
   const requested = requestedNode ? nodes.find(n => n.id === requestedNode) : undefined;
   if (requestedNode && !requested) return null;
-  const owner = requestedOwner ?? requested?.owner ?? (canAdmin ? "all" : selfId);
+  const defaultOwner = canAdmin ? "all"
+    : nodes.some(node => node.owner === selfId) ? selfId : nodes[0]?.owner ?? selfId;
+  const owner = requestedOwner ?? requested?.owner ?? defaultOwner;
   if (owner === "all" ? !canAdmin : !accounts.some(a => a.id === owner)) return null;
   const visible = owner === "all" ? nodes : nodes.filter(n => n.owner === owner);
   if (requested && !visible.includes(requested)) return null;

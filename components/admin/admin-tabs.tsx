@@ -7,6 +7,7 @@ import {
   Bell,
   LayoutDashboard,
   Mail,
+  Radio,
   History,
   Server,
   Users,
@@ -21,7 +22,8 @@ export type AdminTabId =
   | "notifications"
   | "audit"
   | "access"
-  | "bandwidth";
+  | "bandwidth"
+  | "relayers";
 
 const BASE_TABS: { id: AdminTabId; label: string; icon: typeof Activity }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -47,10 +49,12 @@ export function AdminTabs({
   badges,
   access,
   bandwidth,
+  relayers,
   initialActive = "overview",
 }: {
   access?: ReactNode;
   bandwidth?: ReactNode;
+  relayers?: ReactNode;
   overview: ReactNode;
   clients: ReactNode;
   client?: ReactNode;
@@ -61,7 +65,7 @@ export function AdminTabs({
   badges: Partial<Record<AdminTabId, number>>;
   initialActive?: AdminTabId;
 }) {
-  const baseTabs = [...BASE_TABS, ...(access ? [{ id: "access" as const, label: "Server access", icon: Users }] : []), ...(bandwidth ? [{ id: "bandwidth" as const, label: "Bandwidth", icon: Activity }] : [])];
+  const baseTabs = [...BASE_TABS.slice(0, 3), ...(access ? [{ id: "access" as const, label: "Assignments", icon: Users }] : []), ...(relayers ? [{ id: "relayers" as const, label: "Relayers", icon: Radio }] : []), ...(bandwidth ? [{ id: "bandwidth" as const, label: "Bandwidth", icon: Activity }] : []), ...BASE_TABS.slice(3)];
   const tabs = client
     ? [
         ...baseTabs.slice(0, 2),
@@ -86,6 +90,7 @@ export function AdminTabs({
   const panels: Record<AdminTabId, ReactNode> = {
     access,
     bandwidth,
+    relayers,
     overview,
     clients,
     client: client ?? null,
@@ -114,7 +119,18 @@ export function AdminTabs({
               aria-selected={isActive}
               id={`admin-tab-${tab.id}`}
               aria-controls={`admin-panel-${tab.id}`}
+              tabIndex={isActive ? 0 : -1}
               onClick={() => selectTab(tab.id)}
+              onKeyDown={(event) => {
+                const index = tabs.findIndex(item => item.id === tab.id);
+                const next = event.key === "ArrowRight" ? (index + 1) % tabs.length
+                  : event.key === "ArrowLeft" ? (index - 1 + tabs.length) % tabs.length
+                  : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : null;
+                if (next === null) return;
+                event.preventDefault();
+                selectTab(tabs[next].id);
+                event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
+              }}
               className={`flex shrink-0 items-center gap-2 rounded-full border px-3 py-2 font-mono text-xs uppercase tracking-wide transition-colors ${
                 isActive
                   ? "border-primary/60 bg-primary/10 text-primary"
@@ -140,7 +156,7 @@ export function AdminTabs({
       <div className="mt-8 space-y-10">
         {tabs.map((tab) => (
           <div key={tab.id} id={`admin-panel-${tab.id}`} role="tabpanel" aria-labelledby={`admin-tab-${tab.id}`} hidden={active !== tab.id}>
-            {panels[tab.id]}
+            {tab.id === "relayers" && active !== tab.id ? null : panels[tab.id]}
           </div>
         ))}
       </div>

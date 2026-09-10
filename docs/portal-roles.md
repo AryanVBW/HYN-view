@@ -3,7 +3,7 @@
 | Role | Dashboard access | Actions |
 | --- | --- | --- |
 | Viewer | Own dashboard and dashboards explicitly shared with them | Read only |
-| Monitor | Own dashboard and dashboards explicitly shared with them | Link their own devices; refresh readings; request or cancel their own relayer access requests |
+| Monitor | Own dashboard and dashboards explicitly shared with them | Link their own devices; refresh readings; view assigned relayers |
 | Admin | Every dashboard and the admin dashboard | Link their own devices; view data and promote existing Viewers/Monitors to Admin |
 | Super admin | Every dashboard and the admin dashboard | Write settings, link/update/control machines, manage relayers, review requests, change roles, and share dashboards |
 
@@ -12,11 +12,29 @@ personal view preference; it does not change stored monitoring data.
 
 ## Use the dashboard
 
-The role badge explains the signed-in account's capabilities. Dashboard pills
-switch between **My devices**, shared accounts, and **All servers** for Admins
-and Super admins. Server and Highway relayer pills support search and keep the
-selection in the URL. Administrators can switch across the entire authorized
-fleet without opening each client separately.
+The user dashboard starts with **Servers**, **Relayers**, **Notifications**, and
+**Link server** (for accounts allowed to link). It keeps the existing **Simple**
+and **Advanced** monitoring views. There is no role banner, request form, fleet
+report, or server-settings editor on this page. Account switching appears only
+when there is more than one dashboard to choose from. Shared server access and
+URL-selected devices continue to use the existing database permissions.
+
+**Relayers** opens assigned relayers separately, with status and earnings. Users
+cannot submit linking requests from the dashboard. Administrators manage
+assignments from the admin dashboard; relayer access is separate from linking a
+server. Old dashboard URLs containing a relayer ID still open the relayer view.
+
+In **Advanced**, **Data usage** shows received, sent, and combined observed bytes
+for the selected server. Readings refresh with the dashboard, including while
+waiting for telemetry. Missing readings are shown as unavailable, never as zero.
+Detailed date filters and daily tables live at **Admin → Bandwidth**. Existing
+`/usage` bookmarks send active Admins and Super admins there and other accounts
+back to their dashboard.
+
+The role description appears on the admin dashboard. **Admin → Clients → client**
+contains server settings and automatic operation, consumption reports, and a link
+back to the monitoring view. Admins can inspect these settings; only active Super
+admins can edit them. Operational updates and assignment permissions are unchanged.
 
 Active Monitors, Admins and Super admins can use **Link server** with a pairing
 code from `sudo hyn link`. The signed-in account becomes the owner and sees the
@@ -36,11 +54,16 @@ Super admins can change an account's role with the role selector. They can use
 machines and assigned relayers, then **Revoke access** to remove it. Access is
 checked for every database query and relayer API request.
 
-To resolve **No Highway relayers in this view**, a Monitor submits **Request a relayer**
-with the Highway name or numeric ID. A Super admin verifies ownership at
-**Admin → Clients → Relayer requests** and selects **Approve relayer**.
-Super admins can also assign directly from the client's detail view. A pending
-request never grants access by itself.
+To resolve **No relayers linked yet**, a Super admin opens
+**Admin → Relayers → Choose a client**, selects the client, and uses
+**Assign Highway relayers** with the Highway name or numeric ID. The assignment
+appears automatically in that user's **Relayers** view. Existing pending requests
+remain reviewable at **Admin → Relayers**; a pending request never grants access.
+The legacy request API remains compatible, but the user dashboard no longer
+exposes its form.
+
+This dashboard simplification changes portal presentation only and adds no new
+database migration or permissions.
 
 ## Database upgrade and release order
 

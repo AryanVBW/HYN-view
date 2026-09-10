@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { JSDOM } from "jsdom";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AppRouterContext } from "next/dist/shared/lib/app-router-context.shared-runtime.js";
 import { AgentUpdateControl } from "../components/dashboard/agent-update-control";
@@ -83,7 +84,7 @@ test("Viewer dashboard selector contains only supplied accessible dashboards", (
     />,
   );
   assert.match(html, /Shared with me/);
-  assert.match(html, /Viewer/);
+  assert.doesNotMatch(html, /your workspace|>Viewer</);
   assert.doesNotMatch(html, /Admin dashboard|Link another server/);
 });
 
@@ -92,8 +93,29 @@ test("Monitors can link devices and staff get all-server navigation", () => {
     const html=render(<DashboardContext role={role} owner="me" accounts={[{id:"me",name:"Owner",own:true}]}/>);
     assert.equal(html.includes("+ Link server"),permissions(role).canLink,role);
     assert.equal(html.includes("All servers"),permissions(role).canAdmin,role);
-    assert.match(html,/My devices/);
+    assert.equal(html.includes("My devices"), permissions(role).canAdmin, role);
     assert.match(html,/aria-current="page"/);
+  }
+});
+
+test("dashboard navigation keeps the selected server and hides relayers for server-only shares", () => {
+  const accounts = [{id: "shared", name: "Shared account", own: false}];
+  const html = render(<DashboardContext role="monitor" owner="shared" accounts={accounts} nodeId="server" section="relayers" />);
+  assert.match(html, /href="\/dashboard\?owner=shared&amp;node=server"/);
+  const document = new JSDOM(html).window.document;
+  assert.equal(document.querySelector('nav [aria-current="page"]')?.getAttribute("href"), "/dashboard?owner=shared&node=server&section=relayers");
+  assert.doesNotMatch(html, /your workspace|Overall data usage|Request a relayer|Connect a Highway relayer|>Monitor</);
+  const shared = render(<DashboardContext role="viewer" owner="shared" accounts={accounts} canViewRelayers={false} />);
+  assert.doesNotMatch(shared, />Relayers<|Link server/);
+  assert.match(shared, />Servers<|Shared account/);
+});
+
+test("compact reading refresh never includes update or configuration controls", () => {
+  for (const role of ["viewer", "monitor", "admin", "super_admin"]) {
+    const access = permissions(role);
+    const html = render(<AgentUpdateControl compact nodeId="server" nodeName="Server" currentVersion="1.11.0" release={{available: true, latest: "1.12.0", checkedAt: null}} automatic {...access} />);
+    assert.equal(html.includes("Refresh reading"), access.canSync, role);
+    assert.doesNotMatch(html, /synchronized machine controls|Update to hyn|Automatic updates|CLI/);
   }
 });
 

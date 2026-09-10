@@ -10,6 +10,10 @@ export type RelayerAssignment = {
   relayer_name: string;
   created_at: string;
 };
+export type NodeRelayerLink = {
+  node_id: string;
+  assignment_id: string;
+};
 export type Relayer = {
   id: number;
   name: string;

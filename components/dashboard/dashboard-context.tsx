@@ -1,30 +1,34 @@
 "use client";
 
 import Link from "next/link";
-import { normalizeRole, permissions, roleDescriptions, roleLabels, type DashboardAccount } from "@/lib/permissions";
+import { permissions, type DashboardAccount } from "@/lib/permissions";
 import { ResourceSwitcher } from "./resource-switcher";
 
-export function DashboardContext({ role, accounts, owner }: {
+export function DashboardContext({ role, accounts, owner, section = "servers", nodeId, canViewRelayers = true }: {
   role: unknown; accounts: DashboardAccount[]; owner: string;
+  section?: "servers" | "relayers"; nodeId?: string; canViewRelayers?: boolean;
 }) {
-  const normalized = normalizeRole(role);
   const access = permissions(role);
-  const options = accounts.map(account => ({id: account.id, name: account.own ? "My devices" : account.name, href: `/dashboard?owner=${encodeURIComponent(account.id)}`}));
-  if (access.canAdmin) options.unshift({id: "all",name: "All servers",href: "/dashboard?owner=all"});
+  const query = new URLSearchParams({ owner });
+  if (nodeId) query.set("node", nodeId);
+  const serverHref = `/dashboard?${query}`;
+  query.set("section", "relayers");
+  const relayerHref = `/dashboard?${query}`;
+  const sectionQuery = section === "relayers" ? "&section=relayers" : "";
+  const options = accounts.map(account => ({id: account.id, name: account.own ? "My devices" : account.name, href: `/dashboard?owner=${encodeURIComponent(account.id)}${sectionQuery}`}));
+  if (access.canAdmin) options.unshift({id: "all",name: "All servers",href: `/dashboard?owner=all${sectionQuery}`});
   return <section className="mb-6 min-w-0 space-y-6 border-b border-border pb-6" aria-label="Dashboard access">
-    <div className="flex flex-wrap items-start justify-between gap-4">
-      <div>
-        <div className="flex flex-wrap items-center gap-3">
-          <p className="section-kicker">// your workspace</p>
-          <span className="rounded-full border border-primary/40 bg-primary/10 px-3 py-1 font-mono text-xs text-primary">{roleLabels[normalized]}</span>
-        </div>
-        <p className="mt-3 max-w-2xl font-mono text-xs leading-6 text-muted-foreground">{roleDescriptions[normalized]}</p>
-      </div>
-      <div className="flex flex-wrap gap-2 font-mono text-xs">
-        {access.canAdmin ? <Link href="/admin" className="rounded-full border border-border px-4 py-2.5 hover:border-primary hover:text-primary">Admin dashboard</Link> : null}
+    <div className="flex flex-wrap items-center justify-between gap-4 text-sm">
+      <nav aria-label="Dashboard sections" className="flex items-center gap-5">
+        <Link href={serverHref} aria-current={section === "servers" ? "page" : undefined} className={section === "servers" ? "font-medium text-foreground" : "text-muted-foreground hover:text-foreground"}>Servers</Link>
+        {canViewRelayers ? <Link href={relayerHref} aria-current={section === "relayers" ? "page" : undefined} className={section === "relayers" ? "font-medium text-foreground" : "text-muted-foreground hover:text-foreground"}>Relayers</Link> : null}
+        <Link href="/notifications" className="text-muted-foreground hover:text-foreground">Notifications</Link>
+      </nav>
+      <div className="flex flex-wrap items-center gap-4">
+        {access.canAdmin ? <Link href="/admin" className="text-muted-foreground hover:text-foreground">Admin dashboard</Link> : null}
         {access.canLink ? <Link href="/link" className="rounded-full border border-primary/50 px-4 py-2.5 text-primary hover:bg-primary/10">+ Link server</Link> : null}
       </div>
     </div>
-    <ResourceSwitcher label="Dashboards" items={options} current={owner} searchThreshold={6} />
+    {options.length > 1 ? <ResourceSwitcher label="Dashboards" items={options} current={owner} searchThreshold={6} /> : options[0] && !accounts[0]?.own ? <p className="text-sm text-muted-foreground">{options[0].name}</p> : null}
   </section>;
 }

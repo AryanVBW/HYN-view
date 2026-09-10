@@ -54,6 +54,26 @@ export async function assignRelayer(
     };
   }
 }
+export async function setNodeRelayer(nodeId: string, assignmentId: string | null): Promise<Result> {
+  if (typeof nodeId !== "string" || !UUID.test(nodeId) ||
+      (assignmentId !== null && (typeof assignmentId !== "string" || !UUID.test(assignmentId)))) {
+    return { ok: false, error: "Select a valid server and relayer assignment." };
+  }
+  try {
+    const supabase = await adminClient();
+    const { error } = await supabase.rpc("hyn_admin_set_node_relayer", {
+      p_node_id: nodeId,
+      p_assignment_id: assignmentId,
+    });
+    if (error) return { ok: false, error: error.message };
+    revalidatePath("/admin");
+    revalidatePath("/dashboard");
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "The server's relay link could not be saved." };
+  }
+}
+
 export async function removeRelayer(assignmentId: string): Promise<Result> {
   if (!UUID.test(assignmentId))
     return { ok: false, error: "Invalid assignment." };

@@ -27,6 +27,7 @@ test("client navigation reveals assignment controls and returning to Clients hid
             templates="Templates"
             notifications="Deliveries"
             audit="Audit"
+            relayers={<button>Review relayer assignments</button>}
             badges={{}}
             initialActive={client ? "client" : "clients"}
             client={client ? <button>Assign relayer</button> : undefined}
@@ -63,6 +64,16 @@ test("client navigation reveals assignment controls and returning to Clients hid
       new URL(window.location.href).searchParams.get("tab"),
       "clients",
     );
+    await render("tab=relayers", false);
+    assert.equal(document.querySelector('#admin-panel-relayers')?.hasAttribute("hidden"), false);
+    assert.match(document.querySelector('#admin-panel-relayers')?.textContent ?? "", /Review relayer assignments/);
+    const relayers = document.querySelector<HTMLButtonElement>('#admin-tab-relayers')!;
+    assert.equal(relayers.tabIndex, 0);
+    await act(async () => relayers.dispatchEvent(new dom.window.KeyboardEvent("keydown", {key: "ArrowLeft", bubbles: true})));
+    assert.equal(new URL(window.location.href).searchParams.get("tab"), "fleet");
+    assert.equal(document.activeElement?.id, "admin-tab-fleet");
+    await render("tab=overview", false);
+    assert.equal(document.querySelector('#admin-panel-relayers')?.textContent, "", "hidden relayers must not mount a polling dashboard");
   } finally {
     await act(async () => root.unmount());
     dom.window.close();

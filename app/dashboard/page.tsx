@@ -1,5 +1,4 @@
-import { BandwidthPanel } from "@/components/admin/bandwidth-panel";
-import { NodeSettings } from "@/components/account/node-settings";
+import { ServerBandwidth } from "@/components/dashboard/server-bandwidth";
 import { ServerSwitcher } from "@/components/dashboard/server-switcher";
 import { selectDashboard } from "@/lib/dashboard-selection";
 import { DashboardContext } from "@/components/dashboard/dashboard-context";
@@ -62,7 +61,7 @@ export const dynamic = "force-dynamic";
 export default async function DashboardPage({
   searchParams,
 }: {
-  searchParams: Promise<{ node?: string; owner?: string }>;
+  searchParams: Promise<{ node?: string; owner?: string; section?: string; relayer?: string; relayScope?: string }>;
 }) {
   if (!isSupabaseConfigured) {
     return (
@@ -87,7 +86,7 @@ export default async function DashboardPage({
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) redirect("/signin?next=%2Fdashboard");
 
-  const { node: requestedNode, owner: requestedOwner } = await searchParams;
+  const { node: requestedNode, owner: requestedOwner, section: requestedSection, relayer: requestedRelayer, relayScope } = await searchParams;
   const [profileResult, accountsResult] = await Promise.all([
     supabase.from("profiles").select("role,status").eq("id", auth.user.id).maybeSingle(),
     supabase.rpc("hyn_dashboard_accounts"),
@@ -130,18 +129,43 @@ export default async function DashboardPage({
     nodes: (nodeRows ?? []) as Node[], requestedOwner, requestedNode});
   if (!selection) return <Shell email={auth.user.email}><div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">This server or dashboard is unavailable</h1><p className="mt-3 text-sm text-muted-foreground">It may have been unlinked or access may have changed.</p><Link href="/dashboard" className="mt-4 inline-block text-primary underline">Return to your dashboards</Link></div></Shell>;
   const {owner, nodes, node} = selection;
-  const context = {role: profileResult.data.role, accounts, owner};
   const canViewRelayers = owner === "all" || accounts.find(account => account.id === owner)?.relayers !== false;
   const relayerOwner = owner === auth.user.id ? undefined : owner;
+  // Preserve old links that selected a relayer before there were separate sections.
+  const section = requestedSection === "relayers" || (!requestedSection && requestedRelayer) ? "relayers" : "servers";
+  const context = {role: profileResult.data.role, accounts, owner, section, nodeId: node?.id, canViewRelayers} as const;
+
+  if (section === "relayers") {
+    return <Shell email={auth.user.email} context={context}>
+      {relayScope === "server"
+        ? requestedNode && node && !node.is_demo
+          ? <RelayerDashboard key={node.id} nodeId={node.id} />
+          : <p className="py-8 text-sm text-muted-foreground">Select a server to see its linked relayer.</p>
+        : canViewRelayers ? <RelayerDashboard key={owner} ownerId={relayerOwner} /> : <p className="py-8 text-sm text-muted-foreground">No relayers are shared with this dashboard. Select another dashboard or return to Servers.</p>}
+    </Shell>;
+  }
 
   if (!node) {
     return (
       <Shell email={auth.user.email} context={context}>
-        <div className="mb-12">{canViewRelayers ? <RelayerDashboard key={owner} ownerId={relayerOwner} /> : null}</div>
         {access.canLink && owner === auth.user.id ? <NoNodesState canDemo={access.canWrite} /> : <div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">No machines on this dashboard</h1><p className="mt-3 font-mono text-sm leading-7 text-muted-foreground">Devices you link appear in My devices immediately. A Super admin can share other servers with you. Highway relayers are managed separately.</p></div>}
       </Shell>
     );
   }
+
+  // The DB-managed setting is the default an administrator or the account
+  // page picked for this node; the header's DashboardViewToggle is a personal,
+  // client-side override that wins when present, stored in a cookie (not
+  // localStorage) precisely so this server component can read it on every
+  // render without a client round-trip. Simple is the platform default for
+  // every node that hasn't been explicitly set to "dash" -- a node whose
+  // config never mentions the key, or mentions anything other than "dash",
+  // lands on simple; an admin who has deliberately chosen "dash" for a node
+  // keeps that choice.
+  const dbDefaultView = node.config?.dashboard_view === "dash" ? "dash" : "simple";
+  const viewOverride = (await cookies()).get("hyn_view_mode")?.value;
+  const dashboardView =
+    viewOverride === "simple" || viewOverride === "dash" ? viewOverride : dbDefaultView;
 
   const localMode = node.telemetry_mode === "local";
   const transient = localMode && node.status === "active" ? readTransientSnapshot(node.id) : null;
@@ -177,16 +201,16 @@ export default async function DashboardPage({
   if (metrics.length === 0) {
     return (
       <Shell email={auth.user.email} nodes={nodes} current={node} context={context}>
-        <div className="mb-12">{canViewRelayers ? <RelayerDashboard key={owner} ownerId={relayerOwner} /> : null}</div>
         {localMode ? (
           <div className="space-y-6">
             <LiveRefresh />
             <p className="font-mono text-sm text-muted-foreground">History stays on {node.name}. Request a reading to view it for five minutes. A sleeping or restarting portal may need another request.</p>
-            <AgentUpdateControl canSync={access.canSync} canWrite={access.canWrite} nodeId={node.id} nodeName={node.name} currentVersion={node.agent_version}
+            <AgentUpdateControl compact canSync={access.canSync} nodeId={node.id} nodeName={node.name} currentVersion={node.agent_version}
               release={{ latest: null, available: false, checkedAt: null }}
               automatic={node.config?.auto_update === "install"} blocked={commandBlockedReason(node)} />
           </div>
         ) : <AwaitingFirstPushState nodeName={node.name} />}
+        {dashboardView === "dash" && !node.is_demo ? <div className="mt-6"><ServerBandwidth nodeId={node.id} /></div> : null}
       </Shell>
     );
   }
@@ -206,24 +230,10 @@ export default async function DashboardPage({
   const heartbeatCapable = quietAfterSeconds === 180;
   const heartbeat = heartbeatState(durableHeartbeat, Date.now(), quietAfterSeconds);
   const agentRelease = readAgentRelease(latest.payload);
-  // The DB-managed setting is the default an administrator or the account
-  // page picked for this node; the header's DashboardViewToggle is a personal,
-  // client-side override that wins when present, stored in a cookie (not
-  // localStorage) precisely so this server component can read it on every
-  // render without a client round-trip. Simple is the platform default for
-  // every node that hasn't been explicitly set to "dash" -- a node whose
-  // config never mentions the key, or mentions anything other than "dash",
-  // lands on simple; an admin who has deliberately chosen "dash" for a node
-  // keeps that choice.
-  const dbDefaultView = node.config?.dashboard_view === "dash" ? "dash" : "simple";
-  const viewOverride = (await cookies()).get("hyn_view_mode")?.value;
-  const dashboardView =
-    viewOverride === "simple" || viewOverride === "dash" ? viewOverride : dbDefaultView;
 
   return (
     <Shell email={auth.user.email} nodes={nodes} current={node} context={context}>
       <div className="space-y-12">
-        {canViewRelayers ? <RelayerDashboard key={owner} ownerId={relayerOwner} /> : null}
         <div className="flex flex-col gap-4 border-b border-border pb-8 md:flex-row md:items-end md:justify-between">
           <div>
             <p className="section-kicker">// live dashboard</p>
@@ -293,7 +303,8 @@ export default async function DashboardPage({
         ) : null}
 
         {dashboardView === "simple" ? (
-          <SimpleDashboard node={node} latest={latest} speedtests={speedtests} metrics={metrics} />
+          <SimpleDashboard node={node} latest={latest} speedtests={speedtests} metrics={metrics}
+            relayerNodeId={!node.is_demo ? node.id : undefined} />
         ) : (
           <>
             <StatCards latest={latest} />
@@ -313,6 +324,7 @@ export default async function DashboardPage({
                 <ThroughputCard latest={latest} />
               </div>
               <SpeedChart data={toSpeedSeries(speedtests)} />
+              {!node.is_demo ? <ServerBandwidth nodeId={node.id} /> : null}
               {/* The counters that say whether the link itself is healthy, not just
                   how much went through it. Errors, drops, retransmits, socket states
                   and first-hop latency are the difference between "my connection is
@@ -372,7 +384,7 @@ export default async function DashboardPage({
             then "here is what you can do about it" -- rather than offering a
             button before the reader knows whether they need it. */}
         {!node.is_demo ? (
-          <AgentUpdateControl canSync={access.canSync} canWrite={access.canWrite}
+          <AgentUpdateControl compact canSync={access.canSync}
             nodeId={node.id}
             nodeName={node.name}
             currentVersion={node.agent_version}
@@ -411,7 +423,7 @@ function Shell({
   email?: string | null;
   nodes?: Node[];
   current?: Node;
-  context?: { role: unknown; accounts: DashboardAccount[]; owner: string };
+  context?: { role: unknown; accounts: DashboardAccount[]; owner: string; section: "servers" | "relayers"; nodeId?: string; canViewRelayers: boolean };
 }) {
   return (
     <div className="min-h-screen bg-background">
@@ -419,14 +431,10 @@ function Shell({
       <ParticleField blur="subtle" />
       <DashboardMagicRings />
       <main className="container pt-32 pb-10 md:pt-44">
-        {context ? <><DashboardContext {...context} /><div className="mb-6 flex gap-5 text-sm text-primary"><Link href="/notifications" className="underline">Server notifications</Link><Link href="/usage" className="underline">Overall data usage</Link></div></> : null}
-        {nodes && context ? <div className="mb-8"><ServerSwitcher nodes={nodes} current={current?.id} baseHref={`/dashboard?owner=${context.owner}`} accounts={context.owner === "all" ? context.accounts : []} /></div> : null}
+        {context ? <DashboardContext {...context} /> : null}
+        {nodes && context ? <div className="mb-8"><ServerSwitcher nodes={nodes} current={current?.id} baseHref={`/dashboard?owner=${context.owner}&section=servers`} accounts={context.owner === "all" ? context.accounts : []} /></div> : null}
 
         {children}
-        {current && !current.is_demo ? <div className="mt-10 space-y-6">
-          <BandwidthPanel key={current.id} nodes={nodes ?? []} initialNodeId={current.id} />
-          <details className="terminal-panel rounded-xl p-6"><summary className="cursor-pointer text-lg">Server settings and automatic operation</summary><div className="mt-6"><NodeSettings key={current.id} nodes={[current]} canWrite={permissions(context?.role).canWrite} /></div></details>
-        </div> : null}
       </main>
 
       <footer className="container flex flex-col gap-3 border-t border-border py-8 font-mono text-xs text-muted-foreground md:flex-row md:items-center md:justify-between">

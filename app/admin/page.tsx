@@ -12,8 +12,9 @@ import { AdminTabs, type AdminTabId } from "@/components/admin/admin-tabs";
 import { AgentVersions } from "@/components/admin/agent-versions";
 import { AdminClientDashboard } from "@/components/admin/client-dashboard";
 import { RelayerManager } from "@/components/admin/relayer-manager";
+import { NodeRelayerSetting } from "@/components/admin/node-relayer-setting";
 import { RelayerRequestQueue } from "@/components/admin/relayer-request-queue";
-import type { RelayerAssignment } from "@/lib/relayer";
+import type { NodeRelayerLink, RelayerAssignment } from "@/lib/relayer";
 import { ClearDeliveryLogButton } from "@/components/admin/clear-delivery-log-button";
 import { EmailTemplateManager } from "@/components/admin/email-template-manager";
 import {
@@ -217,6 +218,9 @@ export default async function AdminPage({
   const selectedClient = clients.find((client) => client.id === query.client) ?? null;
   const assignmentResult = selectedClient ? await supabase.from("relayer_assignments")
     .select("id,owner,relayer_id,relayer_name,created_at").eq("owner", selectedClient.id).order("created_at") : null;
+  const nodeRelayerResult = selectedClient ? await supabase.from("node_relayer_links")
+    .select("node_id,assignment_id").eq("owner", selectedClient.id) : null;
+  const nodeRelayerLinks = (nodeRelayerResult?.data ?? []) as NodeRelayerLink[];
   const selectedNodes = selectedClient
     ? nodes.filter((node) => node.owner_id === selectedClient.id)
     : [];
@@ -250,7 +254,7 @@ export default async function AdminPage({
     selectedMetrics = transient ? [snapshotMetric(selectedNode.id, transient)] : (data ?? []) as Metric[];
   }
 
-  const allowedTabs: AdminTabId[] = ["overview", "clients", "client", "fleet", "templates", "notifications", "audit", "access", "bandwidth"];
+  const allowedTabs: AdminTabId[] = ["overview", "clients", "client", "fleet", "templates", "notifications", "audit", "access", "bandwidth", "relayers"];
   const requestedTab = allowedTabs.includes(query.tab as AdminTabId)
     ? (query.tab as AdminTabId)
     : selectedClient
@@ -410,16 +414,23 @@ export default async function AdminPage({
       <p className="mt-5 rounded-lg border border-primary/30 bg-primary/5 px-5 py-4 font-mono text-xs leading-6"><strong className="text-primary">{roleLabels[normalizeRole(profile.role)]}</strong> · {roleDescriptions[normalizeRole(profile.role)]}</p>
       <div className="mt-10">
         <AdminTabs
-          access={canWrite ? <ServerAccess clients={clients} nodes={nodes} grants={(serverGrants?.data ?? []) as ServerGrant[]} events={(accessEvents?.data ?? []) as AccessEvent[]} error={serverGrants?.error || accessEvents?.error ? "Server access is unavailable. Finish the server permissions setup, then refresh." : null} /> : undefined}
-          bandwidth={<BandwidthPanel nodes={nodes} />}
+          access={canWrite ? <ServerAccess clients={clients} nodes={nodes} grants={(serverGrants?.data ?? []) as ServerGrant[]} shares={(shareResult?.data ?? []) as DashboardShare[]} events={(accessEvents?.data ?? []) as AccessEvent[]} error={serverGrants?.error || accessEvents?.error || shareResult?.error ? "Assignments are unavailable. Finish the server permissions setup, then refresh." : null} /> : undefined}
+          bandwidth={<BandwidthPanel nodes={nodes} expanded />}
           overview={overviewPanel}
-          clients={<div className="space-y-8">
+          relayers={<div className="space-y-8">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div><h2 className="text-2xl font-medium">Relayer access</h2><p className="mt-2 text-sm text-muted-foreground">{canWrite ? "Choose a client to assign or remove their Highway relayers." : "View assigned relayers. A Super admin manages assignments and approvals."}</p></div>
+              <Link href="/admin?tab=clients" className="rounded-md border border-border px-4 py-2.5 text-sm text-primary hover:border-primary">Choose a client</Link>
+            </div>
             <RelayerRequestQueue canWrite={canWrite} requests={(pendingRequests.data ?? []).map(request=>{
               const owner = clients.find(c=>c.id === request.owner);
               return {...request,ownerName:owner?.full_name || owner?.email || "Portal account",active:owner?.status === "active"};
             })} error={pendingRequests.error ? "Relayer requests are unavailable. Apply the relayer requests migration to enable this queue." : null} />
+            <RelayerDashboard ownerId="all" />
+          </div>}
+          clients={<div className="space-y-8">
             <ClientTable clients={clients} selfId={auth.user.id} canWrite={canWrite} />
-            {canWrite ? <DashboardAccess clients={clients} shares={(shareResult?.data ?? []) as DashboardShare[]} error={shareResult?.error ? "Dashboard sharing is unavailable. Apply the portal roles migration." : null} /> : null}
+            {canWrite ? <details className="rounded-xl border border-border p-5"><summary className="cursor-pointer text-sm text-muted-foreground">Advanced dashboard sharing</summary><div className="mt-5"><DashboardAccess clients={clients} shares={(shareResult?.data ?? []) as DashboardShare[]} error={shareResult?.error ? "Dashboard sharing is unavailable. Apply the portal roles migration." : null} /></div></details> : null}
           </div>}
           client={
             selectedClient ? (
@@ -429,6 +440,16 @@ export default async function AdminPage({
                 nodes={selectedNodes}
                 current={selectedNode}
                 metrics={selectedMetrics}
+                nodeRelayer={selectedNode ? <NodeRelayerSetting
+                  key={`${selectedNode.id}:${nodeRelayerLinks.find(link => link.node_id === selectedNode.id)?.assignment_id ?? "none"}`}
+                  nodeId={selectedNode.id} nodeName={selectedNode.name}
+                  assignments={(assignmentResult?.data ?? []) as RelayerAssignment[]}
+                  links={nodeRelayerLinks} nodes={selectedNodes}
+                  canWrite={canWrite && selectedClient.status === "active"}
+                  error={assignmentResult?.error || nodeRelayerResult?.error
+                    ? "Server relay links are unavailable. Apply the server relayer links migration, then refresh."
+                    : selectedClient.status !== "active" ? "Restore this account before changing its relay links." : null}
+                /> : null}
                 relayers={canWrite ? <RelayerManager key={selectedClient.id} ownerId={selectedClient.id}
                   ownerName={selectedClient.full_name || selectedClient.email || "this client"}
                   assignments={(assignmentResult?.data ?? []) as RelayerAssignment[]}
@@ -443,7 +464,7 @@ export default async function AdminPage({
           audit={auditPanel}
           initialActive={initialActive}
           badges={{
-            clients: pendingRequests.data?.length || undefined,
+            relayers: pendingRequests.data?.length || undefined,
             fleet: overview.nodes_stale || undefined,
             notifications: overview.notifications_failed_24h || undefined,
           }}

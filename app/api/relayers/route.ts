@@ -20,6 +20,22 @@ export async function GET(request: Request) {
     await supabase.rpc("hyn_is_active");
   if (activeError || active !== true)
     return fail("An active account is required.", 403);
+  const params = new URL(request.url).searchParams;
+  if (params.has("node")) {
+    const nodeId = params.get("node") ?? "";
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(nodeId)) {
+      return fail("Select a valid server.", 400);
+    }
+    // The RPC checks server access and returns at most its one linked assignment.
+    // Account and relayer query parameters cannot change this scope.
+    const { data, error } = await supabase.rpc("hyn_node_relayer", { p_node: nodeId });
+    if (error) return error.code === "42501"
+      ? fail("This server is unavailable or you no longer have access.", 404)
+      : fail("Server relay links are unavailable. Ask a Super admin to finish portal setup.", 503);
+    const assignments = (data ?? []) as RelayerAssignment[];
+    const dashboard = assignments.length ? await readAssignedRelayers(assignments) : { readings: [], error: null };
+    return NextResponse.json(dashboard, { headers });
+  }
   const requestedOwner = new URL(request.url).searchParams.get("owner");
   const owner = requestedOwner ?? auth.user.id;
   const all = owner === "all";

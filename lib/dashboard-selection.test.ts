@@ -4,6 +4,14 @@ import { selectDashboard } from "./dashboard-selection.ts";
 const accounts = [{id:"me",name:"Me",own:true},{id:"shared",name:"Team",own:false}];
 const nodes = [{id:"older",owner:"me"},{id:"new",owner:"me"},{id:"team",owner:"shared"}];
 const base = {selfId:"me",canAdmin:false,accounts,nodes};
+test("users without owned devices land on their assigned server", () => {
+  const selected = selectDashboard({...base,nodes:[nodes[2]]});
+  assert.equal(selected?.owner,"shared");
+  assert.equal(selected?.node?.id,"team");
+  assert.equal(selectDashboard(base)?.owner,"me");
+  assert.equal(selectDashboard({...base,nodes:[nodes[2]],requestedOwner:"me"})?.node,undefined);
+  assert.equal(selectDashboard({...base,nodes:[]})?.owner,"me");
+});
 test("newly linked device deep links select that device without an assignment", () => {
   const selected=selectDashboard({...base,requestedNode:"new"});
   assert.equal(selected?.node?.id,"new");

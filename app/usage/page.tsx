@@ -1,6 +1,5 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
-import { BandwidthPanel } from "@/components/admin/bandwidth-panel";
+import { permissions } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
@@ -10,12 +9,7 @@ export default async function UsagePage() {
   const supabase = await createClient();
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) redirect("/signin?next=%2Fusage");
-  // RLS determines this fleet for the current session, including per-node blocks.
-  const { data, error } = await supabase.from("nodes").select("id,name,is_demo").eq("revoked", false).eq("is_demo", false).order("name");
-  return <main className="container max-w-6xl space-y-6 pb-16 pt-36">
-    <Link href="/dashboard" className="text-primary underline">Back to dashboard</Link>
-    <h1 className="font-sentient text-4xl">Overall data usage</h1>
-    <p className="text-sm leading-7 text-muted-foreground">Combine usage across every server you can access, or inspect one server. Server-to-server transfers can appear on both servers; these totals describe observed interface traffic.</p>
-    {error ? <p role="alert">Could not load your servers. Refresh to try again.</p> : <BandwidthPanel nodes={data ?? []} expanded />}
-  </main>;
+  // Keep old bookmarks working while reports now live in the admin dashboard.
+  const { data: profile, error } = await supabase.from("profiles").select("role,status").eq("id", auth.user.id).maybeSingle();
+  redirect(!error && profile?.status === "active" && permissions(profile.role).canAdmin ? "/admin?tab=bandwidth" : "/dashboard");
 }

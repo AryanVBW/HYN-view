@@ -30,6 +30,7 @@ import { useAnimatedPct } from "@/lib/use-animated-pct";
 import { writeViewMode } from "@/components/dashboard-view-toggle";
 import { SpeedGauge } from "@/components/dashboard/speed-gauge";
 import { ThermalGauge, thermalColor } from "@/components/dashboard/thermal-gauge";
+import { RelayerDashboard } from "@/components/dashboard/relayer-dashboard";
 import type { Metric, Speedtest } from "@/lib/types";
 
 // The simple dashboard: everything the advanced view shows, minus everything a
@@ -317,6 +318,7 @@ export function SimpleDashboard({
   latest,
   speedtests,
   metrics,
+  relayerNodeId,
 }: {
   node: SimpleNode;
   latest: Metric;
@@ -324,6 +326,8 @@ export function SimpleDashboard({
   /** Last 24h of readings, oldest-first, for the temperature history strip.
    *  Optional so a caller that has not fetched history yet still renders. */
   metrics?: Metric[];
+  /** Only the explicit admin link for this server is shown. */
+  relayerNodeId?: string;
 }) {
   const hw = readHighway(latest.payload);
   const verdict = mainServiceVerdict(hw);
@@ -365,6 +369,9 @@ export function SimpleDashboard({
               <span className="font-sentient text-xl">{verdict.label}</span>
             </div>
             <p className="mt-3 max-w-lg font-mono text-sm leading-6 text-muted-foreground">{verdict.detail}</p>
+            {relayerNodeId ? (
+              <RelayerDashboard key={relayerNodeId} nodeId={relayerNodeId} compact />
+            ) : null}
             {services.tone !== "idle" ? (
               <span className="mt-3 inline-flex rounded-full border border-border px-3 py-1.5 font-mono text-xs text-muted-foreground">
                 {services.activeCount} service{services.activeCount === 1 ? "" : "s"} up

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { ResourceSwitcher } from "./resource-switcher";
 import {
@@ -26,7 +27,6 @@ import {
   type RelayerReading,
 } from "@/lib/relayer";
 import "./relayer.css";
-import { RelayerRequestForm } from "./relayer-request-form";
 
 const number = (value: string | number | null | undefined) => {
   if (value === null || value === undefined) return "—";
@@ -52,10 +52,14 @@ function time(at: string | null | undefined) {
 
 export function RelayerDashboard({
   ownerId,
+  nodeId,
   revision = 0,
+  compact = false,
 }: {
   ownerId?: string;
+  nodeId?: string;
   revision?: number;
+  compact?: boolean;
 }) {
   const [data, setData] = useState<RelayerDashboardData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -63,7 +67,7 @@ export function RelayerDashboard({
   const params = useSearchParams();
   const pathname = usePathname();
   const candidate = Number(params.get("relayer"));
-  const selected = Number.isSafeInteger(candidate) && candidate > 0 ? candidate : null;
+  const selected = !nodeId && !compact && Number.isSafeInteger(candidate) && candidate > 0 ? candidate : null;
   const [now, setNow] = useState(() => Date.now());
   const refresh = useCallback(() => setReload((n) => n + 1), []);
 
@@ -79,14 +83,17 @@ export function RelayerDashboard({
       const timeout = setTimeout(() => controller?.abort(), 55_000);
       try {
         const params = new URLSearchParams();
-        if (ownerId) params.set("owner", ownerId);
-        if (selected) params.set("relayer", String(selected));
+        if (nodeId) params.set("node", nodeId);
+        else {
+          if (ownerId) params.set("owner", ownerId);
+          if (selected) params.set("relayer", String(selected));
+        }
         const response = await fetch(`/api/relayers?${params}`, {
           cache: "no-store",
           signal: controller.signal,
         });
         const body = (await response.json()) as RelayerDashboardData;
-        if (response.status === 401 || response.status === 403) {
+        if (response.status === 401 || response.status === 403 || response.status === 404) {
           if (alive)
             setData({
               readings: [],
@@ -132,7 +139,7 @@ export function RelayerDashboard({
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [ownerId, revision, reload, selected]);
+  }, [ownerId, nodeId, revision, reload, selected]);
   useEffect(() => {
     const clock = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(clock);
@@ -141,6 +148,7 @@ export function RelayerDashboard({
   const readings = data?.readings ?? [];
   const reading =
     selected ? readings.find((r) => r.assignment.relayer_id === selected) : readings[0];
+  if (compact) return <RelayerSummary data={data} ownerId={ownerId} nodeId={nodeId} now={now} />;
   return (
     <section className="relayer-view" aria-label="Highway relayer dashboard">
       <div className="relayer-heading">
@@ -148,7 +156,7 @@ export function RelayerDashboard({
           <div className="relayer-wordmark">
             <Radio size={17} aria-hidden /> Highway network
           </div>
-          <h2>{ownerId === "all" ? "All Highway relayers" : "Highway relayers"}</h2>
+          <h2>{nodeId ? "Server's Highway relayer" : ownerId === "all" ? "All Highway relayers" : "Highway relayers"}</h2>
           <p>Service health, check-ins and on-chain earnings in one place.</p>
         </div>
         <button
@@ -180,21 +188,12 @@ export function RelayerDashboard({
       {data && !readings.length && !data.error ? (
         <div className="relayer-empty">
           <Radio size={26} aria-hidden />
-          <h3>No Highway relayers in this view</h3>
-          <p>
-            {ownerId || !data?.canRequest ? "A Super admin can add Highway relayers to an account. Linked servers appear independently in the server dashboard."
-              : "Request your relayer below. Once an administrator approves it, your service details will appear here automatically."}
-          </p>
+          <h3>{nodeId ? "No relayer linked to this server" : "No relayers linked yet"}</h3>
+          <p>{nodeId ? "A Super admin can choose this server's relayer in its server settings." : "Your administrator can link a Highway relayer to your account. Its status and earnings will appear here."}</p>
         </div>
       ) : null}
-      {data && data.canRequest && !ownerId && !data.error ? (
-        <details className="relayer-request-details" open={!readings.length || !!data.requests?.some(r=>r.status === "pending")}>
-          <summary>{readings.length ? "Connect another relayer / requests" : "Request a relayer"}</summary>
-          <RelayerRequestForm requests={data.requests ?? []} error={data.requestsError ?? null} manageHref={data.manageHref} onChanged={refresh} />
-        </details>
-      ) : null}
       {selected && data && readings.length > 0 && !reading ? <p role="status" className="relayer-notice">The selected relayer is no longer available in this view. Choose a relayer below.</p> : null}
-      {readings.length ? <div className="my-6">
+      {!nodeId && readings.length ? <div className="my-6">
         <ResourceSwitcher label="Relayers" current={reading ? String(reading.assignment.relayer_id) : undefined} items={readings.map(r => {
           const next = new URLSearchParams(params.toString());
           next.set("relayer",String(r.assignment.relayer_id));
@@ -205,6 +204,105 @@ export function RelayerDashboard({
       {reading ? (
         <RelayerPanel key={reading.assignment.id} reading={reading} now={now} />
       ) : null}
+    </section>
+  );
+}
+
+export function RelayerSummary({
+  data,
+  ownerId,
+  nodeId,
+  now,
+}: {
+  data: RelayerDashboardData | null;
+  ownerId?: string;
+  nodeId?: string;
+  now: number;
+}) {
+  const readings = (data?.readings ?? []).filter(
+    (reading) => !ownerId || reading.assignment.owner === ownerId,
+  );
+
+  return (
+    <section className="mt-4 max-w-2xl border-t border-border/60 pt-4" aria-label="Assigned Highway relayers">
+      <p className="font-mono text-xs text-muted-foreground">{nodeId ? "Admin-linked relayer" : "Admin-assigned relayers"}</p>
+      <p className="mt-1 text-xs text-muted-foreground">{nodeId ? "Linked to this server." : "Assigned to this account."}</p>
+      {!data ? <p className="mt-3 text-sm text-muted-foreground" role="status">Loading assigned relayers...</p> : null}
+      {data?.error ? <p className="mt-3 text-sm text-[#e8a400]" role="alert">{data.error}</p> : null}
+      {data && !data.error && !readings.length ? (
+        <p className="mt-3 text-sm text-muted-foreground">{nodeId ? "No relayer linked to this server yet. A Super admin can choose one in server settings." : "No relayer assigned to this account yet."}</p>
+      ) : null}
+      <div className="mt-3 space-y-5">
+        {readings.map((reading) => {
+          const { assignment, relayer } = reading;
+          const status = relayerChecks(reading, now);
+          const details = new URLSearchParams(nodeId ? {
+            section: "relayers",
+            node: nodeId,
+            relayScope: "server",
+          } : {
+            section: "relayers",
+            owner: assignment.owner,
+            relayer: String(assignment.relayer_id),
+          });
+          return (
+            <article key={assignment.id} className="space-y-3" aria-label={`Relayer ${assignment.relayer_id}`}>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <Link href={`/dashboard?${details}`} className="inline-flex max-w-full items-center gap-1.5 rounded-sm text-sm font-medium text-card-foreground hover:text-primary focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary">
+                    <span className="break-words [overflow-wrap:anywhere]">{relayer?.name ?? assignment.relayer_name}</span>
+                    <ArrowUpRight className="size-3.5 shrink-0" aria-hidden />
+                  </Link>
+                  <p className="mt-0.5 font-mono text-xs text-muted-foreground">
+                    #{assignment.relayer_id}{relayer?.tier ? ` / ${relayer.tier}` : ""}
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <span role="img" aria-label={`${status.passed} of ${status.checks.length} relay health checks passed`} className="inline-flex items-end gap-1">
+                    {status.checks.map((check, index) => (
+                      <span key={check.label} aria-hidden title={`${check.label}: ${check.value === true ? "Passed" : check.value === false ? "Needs attention" : "Not verified"}`}
+                        className={`w-1.5 rounded-sm ${check.value === true ? "bg-primary" : check.value === false ? "bg-[#e8a400]" : "bg-muted-foreground/30"}`}
+                        style={{ height: 8 + index * 4 }} />
+                    ))}
+                    <span aria-hidden className="ml-1 font-mono text-sm tabular-nums text-card-foreground">{status.passed}/{status.checks.length}</span>
+                  </span>
+                  <span className={`text-xs ${status.tone === "healthy" ? "text-primary" : status.tone === "warning" ? "text-[#e8a400]" : "text-muted-foreground"}`}>{status.label}</span>
+                </div>
+              </div>
+              <dl className="grid grid-cols-1 gap-3 min-[360px]:grid-cols-2">
+                {[
+                  { label: "Last heartbeat", at: relayer?.lastHeartbeatAt ?? null },
+                  { label: "Last check-in", at: relayer?.lastCheckinAt ?? null },
+                ].map(({ label, at }) => {
+                  const age = ageSeconds(at, now);
+                  return (
+                    <div key={label}>
+                      <dt className="text-xs text-muted-foreground">{label}</dt>
+                      <dd className="mt-1 font-mono text-sm tabular-nums text-card-foreground">
+                        <time dateTime={at ?? undefined} title={time(at)}>{age === null ? "Not reported" : `${duration(age)} ago`}</time>
+                      </dd>
+                    </div>
+                  );
+                })}
+              </dl>
+              <ul className="flex flex-wrap gap-x-3 gap-y-1.5 text-xs" aria-label="Relay health checks">
+                {status.checks.map((check) => {
+                  const Icon = check.value === true ? Check : check.value === false ? X : CircleHelp;
+                  return (
+                    <li key={check.label} className={`inline-flex items-center gap-1 ${check.value === true ? "text-primary" : check.value === false ? "text-[#e8a400]" : "text-muted-foreground"}`}>
+                      <Icon className="size-3" aria-hidden />
+                      {check.label}<span className="sr-only">: {check.value === true ? "Passed" : check.value === false ? "Needs attention" : "Not verified"}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+              {reading.error ? <p className="text-xs leading-5 text-[#e8a400]">{reading.error}</p> : !status.sourceFresh && relayer ? (
+                <p className="text-xs leading-5 text-muted-foreground">Last readings are stale. Waiting for a refresh.</p>
+              ) : null}
+            </article>
+          );
+        })}
+      </div>
     </section>
   );
 }

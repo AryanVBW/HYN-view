@@ -66,18 +66,22 @@ export function ServerNotifications({ events, userId }: { events: ServerNotifica
 
   const unread = unreadNotifications(events, read);
   return <section className="terminal-panel rounded-xl p-6 md:p-8" aria-label="Server notification inbox">
-    <div className="flex flex-wrap items-center justify-between gap-4">
-      <p className="text-sm" role="status">{unread.length} unread · {events.length} recent events</p>
-      <div className="flex flex-wrap gap-3">
-        <button onClick={markRead} disabled={!unread.length} className="rounded border border-border px-4 py-2 text-sm disabled:opacity-40">Mark all read</button>
-        <button onClick={browserEnabled ? () => setBrowserEnabled(false) : enableBrowser} className="rounded bg-primary px-4 py-2 text-sm text-primary-foreground">{browserEnabled ? "Disable browser notifications" : "Enable browser notifications"}</button>
+    <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-4">
+      <p className="text-sm font-mono text-muted-foreground" role="status">{unread.length} unread · {events.length} recent events</p>
+      <div className="flex flex-wrap gap-2">
+        <button onClick={markRead} disabled={!unread.length} className="rounded-full border border-border px-4 py-2 text-xs uppercase tracking-wide text-muted-foreground transition-colors hover:border-foreground/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40">Mark all read</button>
+        <button onClick={browserEnabled ? () => setBrowserEnabled(false) : enableBrowser} className="rounded-full bg-primary px-4 py-2 text-xs uppercase tracking-wide text-primary-foreground transition-colors hover:bg-primary/90">{browserEnabled ? "Disable browser notifications" : "Enable browser notifications"}</button>
       </div>
     </div>
     {message ? <p className="mt-4 text-sm text-muted-foreground" role="status">{message}</p> : null}
     {!events.length ? <p className="py-12 text-sm text-muted-foreground">No recent server notifications. Your administrator controls which assigned servers can notify you.</p> : <ul className="mt-6 divide-y divide-border">
-      {events.map(event => <li key={event.id} className="py-5">
-        <div className="flex flex-wrap items-center gap-3"><Link className="font-medium text-primary underline" href={notificationLink(event)}>{event.node_name}</Link><span className={event.severity === "crit" ? "text-destructive" : "text-muted-foreground"}>{event.severity}</span>{!read.includes(event.id) ? <span className="text-xs">Unread</span> : null}</div>
-        <p className="mt-2 text-sm leading-7">{event.message}</p>
+      {events.map(event => <li key={event.id} className={`py-5 px-3 ${!read.includes(event.id) ? "rounded-lg bg-primary/5 ring-1 ring-primary/20" : ""}`}>
+        <div className="flex flex-wrap items-center gap-3">
+          <Link className="font-medium text-primary" href={notificationLink(event)}>{event.node_name}</Link>
+          <span className={`rounded-full border px-2 py-0.5 text-[11px] font-mono uppercase ${event.severity === "crit" ? "border-destructive/40 text-destructive" : "border-border/70 text-muted-foreground"}`}>{event.severity}</span>
+          {!read.includes(event.id) ? <span className="rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 text-[11px] font-mono uppercase text-primary">Unread</span> : null}
+        </div>
+        <p className="mt-3 text-sm leading-7">{event.message}</p>
         <time className="mt-2 block text-xs text-muted-foreground" dateTime={event.ts}>{new Date(event.ts).toISOString().replace("T", " ").slice(0, 19)} UTC</time>
       </li>)}
     </ul>}

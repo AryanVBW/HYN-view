@@ -14,6 +14,8 @@ import {
 } from "@/components/dashboard/telemetry-detail";
 import { AdminClientActions } from "@/components/admin/client-actions";
 import { DeleteNodeButton } from "@/components/admin/delete-node-button";
+import { NodeSettings } from "@/components/account/node-settings";
+import { BandwidthPanel } from "@/components/admin/bandwidth-panel";
 import { TemperatureChart } from "@/components/dashboard/temperature-chart";
 import { neverLinked } from "@/lib/admin-data";
 import { formatRelative, toCpuSeries, toNetSeries, toTempSeries } from "@/lib/dashboard-data";
@@ -25,6 +27,7 @@ export function AdminClientDashboard({
   current,
   metrics,
   relayers,
+  nodeRelayer,
   canWrite = false,
 }: {
   client: AdminClient;
@@ -32,6 +35,7 @@ export function AdminClientDashboard({
   current: AdminNode | null;
   metrics: Metric[];
   relayers?: React.ReactNode;
+  nodeRelayer?: React.ReactNode;
   canWrite?: boolean;
 }) {
   return (
@@ -70,7 +74,10 @@ export function AdminClientDashboard({
 
         <div className="p-4">
           <ServerSwitcher nodes={nodes.map(node => ({...node, owner: node.owner_id ?? ""}))} current={current?.id} baseHref={`/admin?tab=client&client=${client.id}`} />
-          <Link href="/dashboard?owner=all" className="mt-3 inline-block font-mono text-xs text-primary underline underline-offset-4">View all servers and relayers →</Link>
+          <div className="mt-3 flex flex-wrap gap-4 text-sm">
+            <Link href={`/dashboard?owner=${client.id}${current ? `&node=${current.id}` : ""}`} className="text-primary underline underline-offset-4">Open monitoring view →</Link>
+            <Link href="/admin?tab=relayers" className="text-primary underline underline-offset-4">All relayers →</Link>
+          </div>
         </div>
       </section>
 
@@ -80,6 +87,13 @@ export function AdminClientDashboard({
 
       {current ? (
         <>
+          {!current.is_demo && !current.revoked ? <>
+            <BandwidthPanel key={`bandwidth-${current.id}`} nodes={[current]} initialNodeId={current.id} />
+            <details className="rounded-xl border border-border p-5 md:p-6">
+              <summary className="cursor-pointer text-lg font-medium">Server settings and automatic operation</summary>
+              <div className="mt-5">{nodeRelayer}<NodeSettings key={current.id} nodes={[{...current, owner: current.owner_id ?? client.id}]} canWrite={canWrite && client.status === "active"} /></div>
+            </details>
+          </> : null}
           <div className="flex flex-col gap-2 border-b border-border pb-5 md:flex-row md:items-end md:justify-between">
             <div>
               <p className="section-kicker">// embedded machine dashboard</p>

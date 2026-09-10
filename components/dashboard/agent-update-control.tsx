@@ -12,6 +12,7 @@ export function AgentUpdateControl({
   blocked = null,
   canSync = false,
   canWrite = false,
+  compact = false,
 }: {
   nodeId: string;
   nodeName: string;
@@ -22,8 +23,15 @@ export function AgentUpdateControl({
   blocked?: string | null;
   canSync?: boolean;
   canWrite?: boolean;
+  compact?: boolean;
 }) {
   if (!canSync && !canWrite) return null;
+  if (compact) return canSync ? (
+    <div className="flex flex-wrap items-center gap-3 border-t border-border pt-5">
+      <MachineCommandModal nodeId={nodeId} nodeName={nodeName} commandKind="sync" triggerLabel="Refresh reading" disabled={Boolean(blocked)} />
+      <p className="text-xs text-muted-foreground">{blocked ?? "A new reading appears after your server checks in."}</p>
+    </div>
+  ) : null;
   const updateLabel = release.available && release.latest
     ? `Update to hyn ${release.latest}`
     : "Check & update CLI";
@@ -45,7 +53,7 @@ export function AgentUpdateControl({
           <p className="mt-2 font-mono text-[0.65rem] leading-5 text-muted-foreground">
             Installed {currentVersion ? `hyn ${currentVersion}` : "version unknown"}
             {release.latest ? ` · npm latest ${release.latest}` : " · the machine checks npm"}.
-            Automatic updates are {automatic ? "enabled" : "disabled in Account"}.
+            Automatic updates are {automatic ? "enabled" : "disabled in server settings"}.
             Portal requests run unattended; you can close this page after queuing an update.
           </p>
         </div>

@@ -20,15 +20,17 @@ test("bandwidth daily controls start behind collapsed Advanced view without fake
   assert.doesNotMatch(html,/0\.00 B/);
   assert.match(html,/All accessible servers/);
 });
-test("server access lists eligible users and exposes grant and block actions",()=>{
+test("assignments show eligible users and visual server checkboxes",()=>{
   const html=renderToStaticMarkup(<AppRouterContext.Provider value={router}><ServerAccess clients={clients} nodes={nodes} grants={[]} events={[]}/></AppRouterContext.Provider>);
   assert.match(html,/Monitor account/);
   assert.doesNotMatch(html,/Suspended account|Staff account/);
-  assert.match(html,/Grant access/);
-  assert.match(html,/Block access/);
+  assert.match(html,/Save assignments/);
+  assert.match(html,/WAN server/);
   assert.match(html,/Super admins only/);
-  assert.match(html,/<select[^>]*multiple/);
-  assert.match(html,/Allow server notifications/);
+  assert.doesNotMatch(html,/<select[^>]*multiple/);
+  assert.match(html,/type="checkbox"/);
+  assert.match(html,/Assigned only/);
+  assert.match(html,/Find a user/);
 });
 
 test("shared settings show stored values without exposing save or editable controls", () => {

@@ -29,11 +29,11 @@ export function BandwidthPanel({ nodes, initialNodeId = "", expanded = false }: 
     <p className="mt-3 max-w-2xl text-sm leading-7 text-muted-foreground">Data transferred through the server’s selected WAN interface. Ingress is received data; egress is sent data. Total is both combined.</p>
     <details open={expanded} className="mt-6 border-t border-border pt-5">
       <summary className="cursor-pointer text-lg font-medium">Advanced view · daily consumption</summary>
-      <form className="mt-5 flex flex-wrap items-end gap-4" onSubmit={e=>{e.preventDefault();load();}}>
-        <label className="min-w-0 flex-1 space-y-2 text-sm">Server<select disabled={pending} className="block w-full rounded border border-input bg-background p-3" value={node} onChange={e=>{setNode(e.target.value);setReport(null);}}>
+      <form className="mt-5 grid items-end gap-4 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_auto_auto]" onSubmit={e=>{e.preventDefault();load();}}>
+        <label className="min-w-0 space-y-2 text-sm">Server<select disabled={pending} className="block w-full rounded border border-input bg-background p-3" value={node} onChange={e=>{setNode(e.target.value);setReport(null);}}>
           <option value="">All accessible servers</option>{nodes.filter(n=>!n.is_demo).map(n=><option key={n.id} value={n.id}>{n.name}{n.owner_email ? ` — ${n.owner_email}` : ""}</option>)}
         </select></label>
-        <label className="space-y-2 text-sm">Daily history<select disabled={pending} className="block rounded border border-input bg-background p-3" value={days} onChange={e=>{setDays(e.target.value);setReport(null);}}><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="366">1 year</option></select></label>
+        <label className="space-y-2 text-sm">Daily history<select disabled={pending} className="block w-full rounded border border-input bg-background p-3" value={days} onChange={e=>{setDays(e.target.value);setReport(null);}}><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="366">1 year</option></select></label>
         <button disabled={pending} className="rounded bg-primary px-5 py-3 text-sm text-primary-foreground disabled:opacity-40">{pending ? "Loading…" : "Show consumption"}</button>
       </form>
       {error ? <p role="alert" className="mt-5 text-sm text-destructive">{error}</p> : null}

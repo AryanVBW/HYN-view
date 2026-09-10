@@ -1,6 +1,6 @@
 # Server access and consumption
 
-Release 1.11.0 adds **Admin → Server access**, **Admin → Bandwidth → Advanced view**, **Overall data usage**, and **Server notifications**. The web portal remains a separate repository, `V1vekW/HYN-view-web`.
+Release 1.11.0 adds **Admin → Server access**, **Admin → Bandwidth**, and **Server notifications**. The web portal remains a separate repository, `V1vekW/HYN-view-web`.
 
 Super admins select up to 100 Viewers or Monitors and a server from the existing fleet, then grant or block access in one atomic operation. Owners automatically see devices they link and are excluded from assignment controls. An explicit block applies to additional users and overrides whole-dashboard sharing for those users. A grant exposes only that server, its readings, saved settings, consumption, and command progress; it does not expose siblings or the owner's relayers. Shared users cannot change configuration or install updates. Monitors can request fresh readings. Admin and Super admin roles retain fleet-wide read access. Existing role controls manage who becomes an administrator. Only Super admins can modify server permissions or see the access activity feed. Role checks and row-level policies enforce these rules for direct API calls too.
 
@@ -8,7 +8,7 @@ The server access activity feed records the acting Super admin, target user, ser
 
 ## Consumption
 
-All active accounts can view ingress, egress, combined observed total, and 7/30/90/366 days of UTC daily consumption for servers they can access. **Overall data usage** combines accessible servers or shows a selected server. The admin and individual dashboard Advanced views start collapsed. Fleet totals show reporting and stale server counts; servers without counters are excluded, and traffic between two monitored servers can be counted at both interfaces. Database permissions filter both direct table reads and aggregate reports on every request.
+All active accounts can view ingress, egress, combined observed total, and 7/30/90/366 days of UTC daily consumption for servers they can access. **Admin → Bandwidth** combines accessible servers or shows a selected server. Admin reporting includes date filters and daily tables. The user dashboard keeps only automatic received, sent, and total counters in its Advanced monitoring view; Simple view stays focused on server health. Server settings and relayer assignment controls live in the admin client view. Fleet totals show reporting and stale server counts; servers without counters are excluded, and traffic between two monitored servers can be counted at both interfaces. Database permissions filter both direct table reads and aggregate reports on every request.
 
 The 1.11.0 agent sends its selected WAN interface's cumulative receive/send counters and boot identity after a successful heartbeat. `wan_iface` selects the interface; automatic selection uses the default route. Only these counters and daily aggregates are stored in the portal. Detailed snapshots and logs remain local by default. This is a requested exception to local-only telemetry, not an opt-in to the full cloud archive.
 
@@ -30,6 +30,6 @@ Super admins use the existing web update controls to queue agent upgrades and in
 2. Apply `supabase/migrations/20260910120000_server_access_bandwidth.sql`. Fresh installations can use `supabase/schema.sql`; do not reapply historical migrations out of order on a live installation.
 3. Deploy the matching portal commit. Its deployment workflow checks schema availability before pushing to Heroku.
 4. Update server agents to 1.11.0 and allow two successful heartbeats to establish a baseline and first delta.
-5. Verify with real authorized accounts: share one server with two users, confirm its sibling stays hidden, inspect read-only settings and usage, toggle notifications independently, then block one user and confirm their access disappears. Confirm ordinary Admin cannot see access activity. Verify daily totals with a controlled WAN transfer and update progress on an authorized test agent.
+5. Verify with real authorized accounts: share one server with two users, confirm its sibling stays hidden, inspect usage in Advanced view and settings in the admin client view, toggle notifications independently, then block one user and confirm their access disappears. Confirm ordinary Admin cannot see access activity. Verify daily totals with a controlled WAN transfer and update progress on an authorized test agent.
 
 The release has local database, agent, portal, and build checks. Live validation requires access to the HYN Supabase project and Heroku app; successful local checks alone do not establish production readiness.
