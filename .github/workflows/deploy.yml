@@ -40,9 +40,10 @@ jobs:
     timeout-minutes: 30
     environment:
       name: production
-      url: https://hyn-view-40fdf9204819.herokuapp.com
+      url: ${{ vars.HEROKU_APP_URL || 'https://hyn-view-40fdf9204819.herokuapp.com' }}
     env:
-      HEROKU_APP_NAME: hyn-view
+      HEROKU_APP_NAME: ${{ vars.HEROKU_APP_NAME || 'hyn-view' }}
+      HEROKU_APP_URL: ${{ vars.HEROKU_APP_URL || 'https://hyn-view-40fdf9204819.herokuapp.com' }}
       HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
     steps:
       - uses: actions/checkout@v4
@@ -51,8 +52,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - name: Check deployment configuration
+        shell: bash
+        run: |
+          if [[ -z "$HEROKU_API_KEY" ]]; then
+            echo '::error::Add HEROKU_API_KEY in Settings > Environments > production > Environment secrets. See docs/heroku-deployment.md.'
+            exit 1
+          fi
       - name: Install Heroku CLI
         run: npm install --global heroku@11.10.0
+      - name: Check production database migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          heroku config --app "$HEROKU_APP_NAME" --json | node scripts/check-database-schema.mjs
       - name: Deploy exact GitHub commit
         shell: bash
         run: |
@@ -63,8 +76,7 @@ jobs:
           printf 'machine git.heroku.com\nlogin heroku\npassword %s\n' "$HEROKU_API_KEY" > "$HOME/.netrc"
           trap 'rm -f "$HOME/.netrc"' EXIT
           heroku git:remote --app "$HEROKU_APP_NAME"
-          heroku config --app "$HEROKU_APP_NAME" --json | node scripts/check-database-schema.mjs
           git push heroku HEAD:refs/heads/main
           heroku releases --app "$HEROKU_APP_NAME" --num 3
       - name: Smoke test production
-        run: bash scripts/smoke-production.sh https://hyn-view-40fdf9204819.herokuapp.com
+        run: bash scripts/smoke-production.sh "$HEROKU_APP_URL"

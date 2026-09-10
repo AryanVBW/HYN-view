@@ -2,6 +2,13 @@
 
 Next.js customer and fleet dashboard for the HYN Ubuntu monitoring agent.
 
+## Automatic Heroku deployment
+
+Every push to this repository's `main` branch runs validation and deploys to
+Heroku once the database checks pass. See the
+[Heroku setup guide](docs/heroku-deployment.md) for the GitHub secret, optional
+app settings, Heroku config vars, and manual retry instructions.
+
 ## Local development
 
 ```bash
