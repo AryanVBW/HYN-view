@@ -1,3 +1,9 @@
+import { ServerAccess, type ServerGrant, type AccessEvent } from "@/components/admin/server-access";
+import { BandwidthPanel } from "@/components/admin/bandwidth-panel";
+import { permissions, roleLabels, roleDescriptions, normalizeRole } from "@/lib/permissions";
+import { DashboardAccess, type DashboardShare } from "@/components/admin/dashboard-access";
+import { RelayerDashboard } from "@/components/dashboard/relayer-dashboard";
+import { readTransientSnapshot, snapshotMetric } from "@/lib/transient-snapshot";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -6,6 +12,7 @@ import { AdminTabs, type AdminTabId } from "@/components/admin/admin-tabs";
 import { AgentVersions } from "@/components/admin/agent-versions";
 import { AdminClientDashboard } from "@/components/admin/client-dashboard";
 import { RelayerManager } from "@/components/admin/relayer-manager";
+import { RelayerRequestQueue } from "@/components/admin/relayer-request-queue";
 import type { RelayerAssignment } from "@/lib/relayer";
 import { ClearDeliveryLogButton } from "@/components/admin/clear-delivery-log-button";
 import { EmailTemplateManager } from "@/components/admin/email-template-manager";
@@ -75,10 +82,12 @@ export default async function AdminPage({
     .maybeSingle();
   const profile = profileRow as Profile | null;
 
+  const { canWrite, canAdmin } = permissions(profile?.role);
+
   // The UI check is a courtesy so a non-admin gets an explanation instead of a
   // wall of errors. It is not the security boundary -- every admin RPC re-checks
   // the role in the database, because anyone can call them with the anon key.
-  if (profile?.role !== "admin" || profile?.status !== "active") {
+  if (!canAdmin || profile?.status !== "active") {
     return (
       <Shell email={auth.user.email}>
         <div className="terminal-panel rounded-xl p-8 duration-500 animate-in fade-in slide-in-from-bottom-2 md:p-12">
@@ -159,6 +168,12 @@ export default async function AdminPage({
   const overview = overviewRes.data as AdminOverview;
   const nodes = (nodesRes.data ?? []) as AdminNode[];
   const clients = (clientsRes.data ?? []) as AdminClient[];
+  const serverGrants = canWrite ? await supabase.from("server_access").select("viewer_id,node_id,allowed,notifications_allowed").order("updated_at", { ascending: false }) : null;
+  const accessEvents = canWrite ? await supabase.from("server_access_events").select("id,ts,actor,viewer_id,node_id,allowed").order("ts", { ascending: false }).limit(50) : null;
+  const shareResult = canWrite ? await supabase.from("dashboard_access").select("viewer_id,owner_id").order("created_at", {ascending:false}) : null;
+  const pendingRequests = await supabase.from("relayer_requests")
+    .select("id,owner,relayer_id,relayer_name,status,created_at").eq("status","pending")
+    .order("created_at").limit(200);
   const notifications = (notifRes.data ?? []) as AdminNotification[];
   const audit = (auditRes.data ?? []) as AuditEntry[];
   const templates = (templatesRes.data ?? []) as NotificationTemplate[];
@@ -209,7 +224,14 @@ export default async function AdminPage({
     selectedNodes.find((node) => node.id === query.node) ?? selectedNodes[0] ?? null;
   let selectedMetrics: Metric[] = [];
   if (selectedNode) {
-    const { data, error } = await supabase
+    const { data: storageNode, error: storageError } = await supabase.from("nodes")
+      .select("telemetry_mode,status,revoked").eq("id", selectedNode.id).maybeSingle();
+    if (storageError) throw new Error(storageError.message);
+    const localMode = storageNode?.telemetry_mode === "local";
+    selectedNode.telemetry_mode = localMode ? "local" : "cloud";
+    const transient = localMode && storageNode.status === "active" && !storageNode.revoked
+      && selectedNode.owner_status === "active" ? readTransientSnapshot(selectedNode.id) : null;
+    const { data, error } = localMode ? { data: [], error: null } : await supabase
       .from("metrics")
       .select("*")
       .eq("node_id", selectedNode.id)
@@ -225,10 +247,10 @@ export default async function AdminPage({
         </Shell>
       );
     }
-    selectedMetrics = (data ?? []) as Metric[];
+    selectedMetrics = transient ? [snapshotMetric(selectedNode.id, transient)] : (data ?? []) as Metric[];
   }
 
-  const allowedTabs: AdminTabId[] = ["overview", "clients", "client", "fleet", "templates", "notifications", "audit"];
+  const allowedTabs: AdminTabId[] = ["overview", "clients", "client", "fleet", "templates", "notifications", "audit", "access", "bandwidth"];
   const requestedTab = allowedTabs.includes(query.tab as AdminTabId)
     ? (query.tab as AdminTabId)
     : selectedClient
@@ -259,7 +281,7 @@ export default async function AdminPage({
               the banner exactly as it was. It empties the counters this banner and
               the failed-deliveries card are drawn from -- it does not fix what
               failed, and a number this size is one broken thing, not 4501. */}
-          {overview.notifications_failed_24h > 0 ? (
+          {canWrite && overview.notifications_failed_24h > 0 ? (
             <ClearDeliveryLogButton defaultScope="all" />
           ) : null}
         </div>
@@ -289,7 +311,7 @@ export default async function AdminPage({
           <p className="section-kicker">// notifications, all clients</p>
           <p className="mt-2 font-sentient text-2xl text-card-foreground">Delivery log</p>
         </div>
-        {notifications.length > 0 ? <ClearDeliveryLogButton /> : null}
+        {canWrite && notifications.length > 0 ? <ClearDeliveryLogButton /> : null}
       </div>
       {notifications.length === 0 ? (
         <div className="mt-6 flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border/60 px-6 py-14">
@@ -385,30 +407,43 @@ export default async function AdminPage({
     <Shell email={auth.user.email}>
       <AdminHeader profile={profile} clientCount={overview.clients_total} nodeCount={overview.nodes_total} />
 
+      <p className="mt-5 rounded-lg border border-primary/30 bg-primary/5 px-5 py-4 font-mono text-xs leading-6"><strong className="text-primary">{roleLabels[normalizeRole(profile.role)]}</strong> · {roleDescriptions[normalizeRole(profile.role)]}</p>
       <div className="mt-10">
         <AdminTabs
+          access={canWrite ? <ServerAccess clients={clients} nodes={nodes} grants={(serverGrants?.data ?? []) as ServerGrant[]} events={(accessEvents?.data ?? []) as AccessEvent[]} error={serverGrants?.error || accessEvents?.error ? "Server access is unavailable. Finish the server permissions setup, then refresh." : null} /> : undefined}
+          bandwidth={<BandwidthPanel nodes={nodes} />}
           overview={overviewPanel}
-          clients={<ClientTable clients={clients} selfId={auth.user.id} />}
+          clients={<div className="space-y-8">
+            <RelayerRequestQueue canWrite={canWrite} requests={(pendingRequests.data ?? []).map(request=>{
+              const owner = clients.find(c=>c.id === request.owner);
+              return {...request,ownerName:owner?.full_name || owner?.email || "Portal account",active:owner?.status === "active"};
+            })} error={pendingRequests.error ? "Relayer requests are unavailable. Apply the relayer requests migration to enable this queue." : null} />
+            <ClientTable clients={clients} selfId={auth.user.id} canWrite={canWrite} />
+            {canWrite ? <DashboardAccess clients={clients} shares={(shareResult?.data ?? []) as DashboardShare[]} error={shareResult?.error ? "Dashboard sharing is unavailable. Apply the portal roles migration." : null} /> : null}
+          </div>}
           client={
             selectedClient ? (
               <AdminClientDashboard
+                canWrite={canWrite}
                 client={selectedClient}
                 nodes={selectedNodes}
                 current={selectedNode}
                 metrics={selectedMetrics}
-                relayers={<RelayerManager key={selectedClient.id} ownerId={selectedClient.id}
+                relayers={canWrite ? <RelayerManager key={selectedClient.id} ownerId={selectedClient.id}
                   ownerName={selectedClient.full_name || selectedClient.email || "this client"}
                   assignments={(assignmentResult?.data ?? []) as RelayerAssignment[]}
-                  error={assignmentResult?.error ? "Apply the relayer database migration to enable assignments." : null} />}
+                  error={assignmentResult?.error ? "Apply the relayer database migration to enable assignments."
+                    : selectedClient.status !== "active" ? "Restore this account before assigning a relayer." : null} /> : <RelayerDashboard ownerId={selectedClient.id} />}
               />
             ) : undefined
           }
-          fleet={<NodeTable nodes={nodes} />}
-          templates={<EmailTemplateManager templates={templates} />}
+          fleet={<NodeTable nodes={nodes} canWrite={canWrite} />}
+          templates={<EmailTemplateManager templates={templates} canWrite={canWrite} />}
           notifications={notificationsPanel}
           audit={auditPanel}
           initialActive={initialActive}
           badges={{
+            clients: pendingRequests.data?.length || undefined,
             fleet: overview.nodes_stale || undefined,
             notifications: overview.notifications_failed_24h || undefined,
           }}

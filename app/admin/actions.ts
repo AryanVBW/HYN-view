@@ -29,7 +29,7 @@ async function authenticatedAdmin() {
   const supabase = await createClient();
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) throw new Error("You must sign in again.");
-  const { data: admin, error } = await supabase.rpc("hyn_is_admin");
+  const { data: admin, error } = await supabase.rpc("hyn_is_super_admin");
   if (error || admin !== true) throw new Error("An active administrator account is required.");
   return { supabase, user: auth.user };
 }

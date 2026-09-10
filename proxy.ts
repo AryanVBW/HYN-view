@@ -11,6 +11,9 @@ export async function proxy(request: NextRequest) {
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
   let response = NextResponse.next({ request });
+  // The agent authenticates with a node token in its route. Browser session
+  // refresh here otherwise adds an unnecessary auth request to every beat.
+  if (request.nextUrl.pathname.startsWith("/api/agent/v1/")) return response;
 
   // Not configured yet: pass through so the app still renders its setup notice.
   if (!url || !key) return response;

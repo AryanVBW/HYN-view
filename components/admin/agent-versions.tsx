@@ -41,7 +41,7 @@ export function AgentVersions({ nodes }: { nodes: AdminNode[] }) {
               · {behind} machine{behind === 1 ? "" : "s"} behind
             </span>
           ) : (
-            <span className="text-primary"> · all current</span>
+            <span className="text-muted-foreground">{newestRelease ? " · no reported updates" : " · release check pending"}</span>
           )}
         </p>
       </div>
@@ -59,7 +59,7 @@ export function AgentVersions({ nodes }: { nodes: AdminNode[] }) {
                 {count}
               </p>
               <p className="font-mono text-[0.6rem] text-muted-foreground">
-                {isNewest ? "current" : "upgrade: sudo npm i -g hyn-view"}
+                {isNewest && newestRelease ? "current" : "Managed updates are configured in server settings"}
               </p>
             </li>
           );

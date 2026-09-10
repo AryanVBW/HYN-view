@@ -1,3 +1,4 @@
+import { permissions, roleLabels, normalizeRole } from "@/lib/permissions";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { cookies } from "next/headers";
@@ -122,9 +123,12 @@ export default async function AccountPage() {
           ))}
         </div>
 
-        <EmailPreferences nodes={nodes} preferences={emailPreferences} accountEmail={auth.user.email ?? ""} />
-
-        <NodeSettings nodes={nodes} />
+        {profile?.status === "active" && permissions(profile?.role).canWrite ? <>
+          <EmailPreferences nodes={nodes.filter(node => node.owner === auth.user.id)} preferences={emailPreferences} accountEmail={auth.user.email ?? ""} />
+          <NodeSettings nodes={nodes} canWrite />
+        </> : <p className="terminal-panel p-6 font-mono text-sm leading-7">Your role is {roleLabels[normalizeRole(profile?.role)]}. A Super admin manages machine settings and email delivery preferences.</p>}
+        {profile?.status === "active" && !permissions(profile?.role).canWrite ? <NodeSettings nodes={nodes} /> : null}
+        <Link href="/notifications" className="inline-block text-primary underline">Server notifications</Link>
 
         <DeliveryHistory log={visibleLog} byKind={byKind} cleared={logCleared} />
       </div>
@@ -179,13 +183,13 @@ function AccountHeader({
                 <Mail className="size-4 text-primary" aria-hidden />
                 {authUser.email}
               </span>
-              {profile?.role === "admin" ? (
+              {permissions(profile?.role).canAdmin ? (
                 <Link
                   href="/admin"
                   className="flex items-center gap-2 rounded-full border border-primary/40 bg-primary/10 px-3 py-1 text-primary transition-colors hover:bg-primary/20"
                 >
                   <ShieldCheck className="size-3.5" aria-hidden />
-                  administrator
+                  {roleLabels[normalizeRole(profile?.role)]}
                 </Link>
               ) : null}
               <span>member since {new Date(profile?.created_at ?? authUser.created_at).toLocaleDateString()}</span>

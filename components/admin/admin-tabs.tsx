@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   Activity,
   Bell,
@@ -18,7 +19,9 @@ export type AdminTabId =
   | "fleet"
   | "templates"
   | "notifications"
-  | "audit";
+  | "audit"
+  | "access"
+  | "bandwidth";
 
 const BASE_TABS: { id: AdminTabId; label: string; icon: typeof Activity }[] = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -42,8 +45,12 @@ export function AdminTabs({
   notifications,
   audit,
   badges,
+  access,
+  bandwidth,
   initialActive = "overview",
 }: {
+  access?: ReactNode;
+  bandwidth?: ReactNode;
   overview: ReactNode;
   clients: ReactNode;
   client?: ReactNode;
@@ -54,16 +61,31 @@ export function AdminTabs({
   badges: Partial<Record<AdminTabId, number>>;
   initialActive?: AdminTabId;
 }) {
+  const baseTabs = [...BASE_TABS, ...(access ? [{ id: "access" as const, label: "Server access", icon: Users }] : []), ...(bandwidth ? [{ id: "bandwidth" as const, label: "Bandwidth", icon: Activity }] : [])];
   const tabs = client
     ? [
-        ...BASE_TABS.slice(0, 2),
+        ...baseTabs.slice(0, 2),
         { id: "client" as const, label: "Client view", icon: LayoutDashboard },
-        ...BASE_TABS.slice(2),
+        ...baseTabs.slice(2),
       ]
-    : BASE_TABS;
-  const safeInitial = tabs.some((tab) => tab.id === initialActive) ? initialActive : "overview";
-  const [active, setActive] = useState<AdminTabId>(safeInitial);
+    : baseTabs;
+  // Client links and browser history must select the panel as well as load it.
+  // Reading only the initial prop left newly loaded client controls hidden.
+  const searchParams = useSearchParams();
+  const requested = searchParams.get("tab") ?? initialActive;
+  const active = tabs.some((tab) => tab.id === requested)
+    ? requested
+    : requested === "client" ? "clients" : "overview";
+  function selectTab(id: AdminTabId) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", id);
+    // Next synchronizes useSearchParams with native history without refetching
+    // the already loaded fleet, clients and delivery history on every tab click.
+    window.history.pushState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }
   const panels: Record<AdminTabId, ReactNode> = {
+    access,
+    bandwidth,
     overview,
     clients,
     client: client ?? null,
@@ -90,7 +112,9 @@ export function AdminTabs({
               role="tab"
               type="button"
               aria-selected={isActive}
-              onClick={() => setActive(tab.id)}
+              id={`admin-tab-${tab.id}`}
+              aria-controls={`admin-panel-${tab.id}`}
+              onClick={() => selectTab(tab.id)}
               className={`flex shrink-0 items-center gap-2 rounded-full border px-3 py-2 font-mono text-xs uppercase tracking-wide transition-colors ${
                 isActive
                   ? "border-primary/60 bg-primary/10 text-primary"
@@ -115,7 +139,7 @@ export function AdminTabs({
 
       <div className="mt-8 space-y-10">
         {tabs.map((tab) => (
-          <div key={tab.id} role="tabpanel" hidden={active !== tab.id}>
+          <div key={tab.id} id={`admin-panel-${tab.id}`} role="tabpanel" aria-labelledby={`admin-tab-${tab.id}`} hidden={active !== tab.id}>
             {panels[tab.id]}
           </div>
         ))}

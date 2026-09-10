@@ -93,6 +93,9 @@ export async function dispatchScheduledEmails(nodeId?: string): Promise<Schedule
     .select("*,nodes!inner(id,owner,name,hostname,os,agent_version,last_seen_at,status,revoked,is_demo)")
     .eq("nodes.revoked", false)
     .eq("nodes.is_demo", false)
+    // Local-mode nodes have no fresh cloud history; never email stale readings
+    // from before the operator switched storage policy.
+    .eq("nodes.telemetry_mode", "cloud")
     .limit(nodeId ? 1 : 500);
   if (nodeId) preferenceQuery = preferenceQuery.eq("node_id", nodeId);
 

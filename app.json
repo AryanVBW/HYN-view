@@ -1,0 +1,13 @@
+{
+  "name": "HYN-view portal",
+  "description": "Heroku portal with local server history and transient readings",
+  "buildpacks": [{ "url": "heroku/nodejs" }],
+  "env": {
+    "NEXT_PUBLIC_SUPABASE_URL": { "required": true },
+    "NEXT_PUBLIC_SUPABASE_ANON_KEY": { "required": true },
+    "SUPABASE_SERVICE_ROLE_KEY": { "required": true },
+    "NEXT_PUBLIC_SITE_URL": { "value": "https://www.hyn-view.in" },
+    "HYN_ENABLE_WORKFLOW_WATCHDOG": { "value": "false" },
+    "CRON_SECRET": { "generator": "secret" }
+  }
+}

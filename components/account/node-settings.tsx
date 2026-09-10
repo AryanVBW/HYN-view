@@ -18,7 +18,7 @@ import { mergePortalConfig } from "@/lib/node-config";
 // update & display) are the natural clusters already implied by the field
 // order below; grouping them visually is the smallest fix for "twelve
 // identical boxes in a row" that doesn't touch what any field does.
-const GROUPS = ["Alert thresholds", "Alerting schedule", "Update & display"] as const;
+const GROUPS = ["Alert thresholds", "Alerting schedule", "Unattended operation", "Update & display"] as const;
 type Group = (typeof GROUPS)[number];
 
 const FIELDS: {
@@ -28,6 +28,8 @@ const FIELDS: {
   type: "number" | "text" | "time" | "select";
   group: Group;
   choices?: { value: string; label: string }[];
+  min?: number;
+  max?: number;
 }[] = [
   { key: "alert_mem_pct", label: "Memory alert %", hint: "0 disables this rule", type: "number", group: "Alert thresholds" },
   { key: "alert_disk_pct", label: "Disk alert %", hint: "per mount point", type: "number", group: "Alert thresholds" },
@@ -45,7 +47,16 @@ const FIELDS: {
   { key: "alert_repeat_hours", label: "Repeat interval, hours", hint: "how often a still-firing alert repeats", type: "number", group: "Alerting schedule" },
   { key: "report_at", label: "Daily report time", hint: "server local time, HH:MM", type: "time", group: "Alerting schedule" },
   { key: "notify_max_per_day", label: "Daily notification cap", hint: "backstop against a flapping rule", type: "number", group: "Alerting schedule" },
-  { key: "cloud_push_min", label: "Telemetry interval, minutes", hint: "10 recommended; settings still sync every minute", type: "number", group: "Alerting schedule" },
+  { key: "cloud_push_min", label: "Cloud archive interval, minutes", hint: "Only used with cloud history; local mode uploads on request", type: "number", group: "Alerting schedule" },
+  { key: "alert_interval_min", label: "Check alerts every, minutes", hint: "1–1440; runs locally", type: "number", group: "Unattended operation", min: 1, max: 1440 },
+  { key: "record_interval_min", label: "Record locally every, minutes", hint: "1–1440; default 5", type: "number", group: "Unattended operation", min: 1, max: 1440 },
+  { key: "speedtest_per_day", label: "Speed tests per day", hint: "1–24; tests consume network bandwidth", type: "number", group: "Unattended operation", min: 1, max: 24 },
+  { key: "alert_enabled", label: "Local alert checks", hint: "Start or stop scheduled alert evaluation", type: "select", group: "Unattended operation",
+    choices: [{ value: "on", label: "Enabled" }, { value: "off", label: "Disabled" }] },
+  { key: "report_enabled", label: "Daily reports", hint: "Generate a local report at the configured time", type: "select", group: "Unattended operation",
+    choices: [{ value: "on", label: "Enabled" }, { value: "off", label: "Disabled" }] },
+  { key: "keep_awake", label: "Keep the computer awake", hint: "Prevents idle sleep and lid-triggered sleep while powered on; requires CLI 1.10+", type: "select", group: "Unattended operation",
+    choices: [{ value: "on", label: "Keep awake (24/7)" }, { value: "off", label: "Use computer sleep settings" }] },
   {
     key: "auto_update",
     label: "CLI updates",
@@ -71,7 +82,7 @@ const FIELDS: {
   },
 ];
 
-export function NodeSettings({ nodes }: { nodes: Node[] }) {
+export function NodeSettings({ nodes, canWrite = false }: { nodes: Node[]; canWrite?: boolean }) {
   const router = useRouter();
   const real = nodes.filter((n) => !n.is_demo);
   const [selected, setSelected] = useState(real[0]?.id ?? "");
@@ -102,13 +113,13 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
   };
 
   async function save() {
-    if (!node) return;
+    if (!node || !canWrite) return;
     setBusy(true);
     setError(null);
     setSaved(false);
     const merged = mergePortalConfig(node.config ?? {}, draft);
     const supabase = createClient();
-    const { error } = await supabase.rpc("hyn_update_node_config", {
+    const { error } = await supabase.rpc("hyn_admin_set_node_config", {
       p_node_id: node.id,
       p_config: merged,
     });
@@ -128,17 +139,25 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
         <div>
           <p className="section-kicker">// server settings</p>
           <p className="mt-2 font-sentient text-2xl text-card-foreground">
-            Thresholds and schedule
+            Monitoring and automatic operation
           </p>
+          {!canWrite ? <p className="mt-2 text-sm text-muted-foreground">Read-only settings. A Super admin manages thresholds, schedules, and updates.</p> : null}
           <p className="mt-2 max-w-xl font-mono text-xs leading-6 text-muted-foreground">
-            Saved here and pulled by the server on its next check-in. A value left
-            blank uses the built-in default. These managed thresholds and schedules
+            Saved here and applied automatically on the next check-in, normally within five minutes.
+            CLI 1.10+ applies the unattended settings without a terminal session. A value left
+            blank uses the machine&apos;s local/default value. These managed thresholds and schedules
             take precedence on linked servers; local-only settings and credentials
             remain on the machine.
+          </p>
+          <p className="mt-2 max-w-xl font-mono text-xs leading-6 text-muted-foreground">
+            The agent starts when Linux boots and restarts after a crash. To power
+            on after an outage, enable Restore on AC Power Loss in BIOS/UEFI once.
+            A powered-off computer cannot receive portal commands until it boots.
           </p>
         </div>
         {real.length > 1 ? (
           <select
+            aria-label="Server settings"
             value={selected}
             onChange={(event) => {
               setSelected(event.target.value);
@@ -167,6 +186,7 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
                 </span>
                 {f.type === "select" ? (
                   <select
+                    disabled={!canWrite || busy}
                     value={current(f.key)}
                     onChange={(event) => {
                       setDraft({ ...draft, [f.key]: event.target.value });
@@ -174,7 +194,7 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
                     }}
                     className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none transition-colors focus:border-ring focus:ring-[3px] focus:ring-ring/50"
                   >
-                    <option value="">Built-in default</option>
+                    <option value="">Machine default</option>
                     {f.choices?.map((choice) => (
                       <option key={choice.value} value={choice.value}>{choice.label}</option>
                     ))}
@@ -182,10 +202,11 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
                 ) : (
                   <input
                     type={f.type === "number" ? "number" : f.type === "time" ? "time" : "text"}
+                    disabled={!canWrite || busy}
                     value={current(f.key)}
                     placeholder="default"
-                    min={f.key === "cloud_push_min" ? 1 : f.type === "number" ? 0 : undefined}
-                    max={f.key === "cloud_push_min" ? 1440 : undefined}
+                    min={f.min ?? (f.key === "cloud_push_min" ? 1 : f.type === "number" ? 0 : undefined)}
+                    max={f.max ?? (f.key === "cloud_push_min" ? 1440 : undefined)}
                     onChange={(event) => {
                       setDraft({ ...draft, [f.key]: event.target.value });
                       setSaved(false);
@@ -217,7 +238,7 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
         </p>
       ) : null}
 
-      <Button
+      {canWrite ? <Button
         type="button"
         size="sm"
         onClick={save}
@@ -226,7 +247,7 @@ export function NodeSettings({ nodes }: { nodes: Node[] }) {
       >
         {busy ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" aria-hidden />}
         Save settings
-      </Button>
+      </Button> : null}
     </div>
   );
 }

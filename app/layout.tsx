@@ -10,6 +10,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "https://www.hyn-view.in"),
   title: "HYN-view — monitor your servers from anywhere",
   description:
     "A network-first terminal monitor for Ubuntu servers, with a web dashboard you can open from anywhere in the world.",

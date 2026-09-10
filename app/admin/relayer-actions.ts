@@ -10,7 +10,7 @@ async function adminClient() {
   const supabase = await createClient();
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) throw new Error("Sign in again.");
-  const { data, error } = await supabase.rpc("hyn_is_admin");
+  const { data, error } = await supabase.rpc("hyn_is_super_admin");
   if (error || data !== true)
     throw new Error("An active administrator account is required.");
   return supabase;
@@ -74,5 +74,31 @@ export async function removeRelayer(assignmentId: string): Promise<Result> {
           ? error.message
           : "Assignment could not be removed.",
     };
+  }
+}
+
+export async function reviewRelayerRequest(requestId: string, approve: boolean): Promise<Result> {
+  if (!UUID.test(requestId) || typeof approve !== "boolean") return {ok:false,error:"Select a valid request."};
+  try {
+    const supabase = await adminClient();
+    let name: string | null = null;
+    if (approve) {
+      const {data:request,error} = await supabase.from("relayer_requests").select("relayer_id")
+        .eq("id",requestId).eq("status","pending").maybeSingle();
+      if (error || !request) return {ok:false,error:"This request is no longer available. Refresh the page."};
+      const fleet = await fetchFleet();
+      const relayer = fleet.relayers.find(r=>r.id === request.relayer_id);
+      if (!relayer) return {ok:false,error:"This relayer is no longer in Highway's feed. Check the ID before approving."};
+      name = relayer.name.slice(0,160);
+    }
+    const {error} = await supabase.rpc("hyn_admin_review_relayer_request",{
+      p_request_id:requestId,p_approve:approve,p_relayer_name:name,
+    });
+    if (error) return {ok:false,error:error.message};
+    revalidatePath("/admin");
+    revalidatePath("/dashboard");
+    return {ok:true};
+  } catch(error) {
+    return {ok:false,error:error instanceof Error ? error.message : "Could not review request."};
   }
 }

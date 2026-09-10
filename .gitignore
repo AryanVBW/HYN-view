@@ -15,3 +15,8 @@ node_modules
 .DS_Store
 .vercel
 /.swc
+
+# Local deployment credentials and compiler caches
+.env.vercel
+**/.env.vercel
+*.tsbuildinfo

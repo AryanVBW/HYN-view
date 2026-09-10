@@ -28,7 +28,10 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
+      - run: pnpm exec next typegen
+      - run: pnpm exec tsc --noEmit
       - run: pnpm lint
+      - run: pnpm build
 
   deploy:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
@@ -60,6 +63,7 @@ jobs:
           printf 'machine git.heroku.com\nlogin heroku\npassword %s\n' "$HEROKU_API_KEY" > "$HOME/.netrc"
           trap 'rm -f "$HOME/.netrc"' EXIT
           heroku git:remote --app "$HEROKU_APP_NAME"
+          heroku config --app "$HEROKU_APP_NAME" --json | node scripts/check-database-schema.mjs
           git push heroku HEAD:refs/heads/main
           heroku releases --app "$HEROKU_APP_NAME" --num 3
       - name: Smoke test production

@@ -62,6 +62,17 @@ export type RelayerReading = {
 export type RelayerDashboardData = {
   readings: RelayerReading[];
   error: string | null;
+  canRequest?: boolean;
+  requests?: RelayerRequest[];
+  requestsError?: string | null;
+  manageHref?: string | null;
+};
+export type RelayerRequest = {
+  id: string;
+  relayer_id: number;
+  relayer_name: string;
+  status: "pending" | "approved" | "rejected" | "cancelled";
+  created_at: string;
 };
 
 export function record(value: unknown): Record<string, unknown> {
