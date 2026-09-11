@@ -203,5 +203,22 @@ psql -f "$HERE/shared-observability-test.sql" >"$WORK/shared-test.log" 2>&1 || {
 sed -n '/PASS /p' "$WORK/shared-test.log"
 psql -f "$HERE/delivery-controls-test.sql" >"$WORK/delivery-test.log" 2>&1 || { cat "$WORK/delivery-test.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/delivery-test.log"
+psql -f "$HERE/relayer-shared-access-test.sql" >"$WORK/shared-relayer-test.log" 2>&1 || { cat "$WORK/shared-relayer-test.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/shared-relayer-test.log"
+
+# Concurrent admin assignments of one relay must all succeed, retaining exactly
+# one priority relationship. These identities exist only in this throwaway DB.
+psql -c "insert into auth.users(id,email) values('f3000000-0000-4000-8000-000000000001','super@relay-race.test'); update public.profiles set role='super_admin' where id='f3000000-0000-4000-8000-000000000001'; insert into auth.users(id,email) select ('f4000000-0000-4000-8000-'||lpad(i::text,12,'0'))::uuid,'viewer-'||i||'@relay-race.test' from generate_series(1,8) i;" >/dev/null || exit 1
+race_pids=()
+for i in {1..8}; do
+  viewer=$(printf 'f4000000-0000-4000-8000-%012d' "$i")
+  psql -c "set role authenticated; set \"test.uid\"='f3000000-0000-4000-8000-000000000001'; select public.hyn_admin_assign_relayer('$viewer',2147000000,'Concurrent relay');" >"$WORK/relay-race-$i.log" 2>&1 &
+  race_pids+=("$!")
+done
+race_failed=0
+for pid in "${race_pids[@]}"; do wait "$pid" || race_failed=1; done
+if ((race_failed)); then cat "$WORK"/relay-race-*.log; exit 1; fi
+psql -c "do \$\$ begin if (select count(*) from public.relayer_assignments where relayer_id=2147000000)<>8 or (select count(*) from public.relayer_assignments where relayer_id=2147000000 and assignment_role='primary')<>1 or (select count(*) from public.relayer_assignments where relayer_id=2147000000 and assignment_role='view')<>7 then raise exception 'concurrent assignments lost a grant or priority'; end if; raise notice 'PASS shared relay: eight concurrent assignments retain one priority and seven view grants'; end \$\$;" || exit 1
+psql -c "delete from auth.users where email like '%@relay-race.test';" >/dev/null || exit 1
 printf 'run-tests: final role and server authorization checks passed\n'
 exit 0
