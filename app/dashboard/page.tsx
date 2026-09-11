@@ -133,7 +133,8 @@ export default async function DashboardPage({
   const relayerOwner = owner === auth.user.id ? undefined : owner;
   // Preserve old links that selected a relayer before there were separate sections.
   const section = requestedSection === "relayers" || (!requestedSection && requestedRelayer) ? "relayers" : "servers";
-  const context = {role: profileResult.data.role, accounts, owner, section, nodeId: node?.id, canViewRelayers} as const;
+  const context = {role: profileResult.data.role, accounts, owner, section, nodeId: node?.id, canViewRelayers,
+    computers: ((nodeRows ?? []) as Node[]).map(({id, name, hostname, owner: computerOwner}) => ({id, name, hostname, owner: computerOwner}))} as const;
 
   if (section === "relayers") {
     return <Shell email={auth.user.email} context={context}>
@@ -423,7 +424,7 @@ function Shell({
   email?: string | null;
   nodes?: Node[];
   current?: Node;
-  context?: { role: unknown; accounts: DashboardAccount[]; owner: string; section: "servers" | "relayers"; nodeId?: string; canViewRelayers: boolean };
+  context?: { role: unknown; accounts: DashboardAccount[]; owner: string; section: "servers" | "relayers"; nodeId?: string; canViewRelayers: boolean; computers?: Pick<Node, "id" | "name" | "hostname" | "owner">[] };
 }) {
   return (
     <div className="min-h-screen bg-background">
@@ -432,7 +433,7 @@ function Shell({
       <DashboardMagicRings />
       <main className="container pt-32 pb-10 md:pt-44">
         {context ? <DashboardContext {...context} /> : null}
-        {nodes && context ? <div className="mb-8"><ServerSwitcher nodes={nodes} current={current?.id} baseHref={`/dashboard?owner=${context.owner}&section=servers`} accounts={context.owner === "all" ? context.accounts : []} /></div> : null}
+        {nodes && context && !context.computers ? <div className="mb-8"><ServerSwitcher nodes={nodes} current={current?.id} baseHref={`/dashboard?owner=${context.owner}&section=servers`} accounts={context.owner === "all" ? context.accounts : []} /></div> : null}
 
         {children}
       </main>
