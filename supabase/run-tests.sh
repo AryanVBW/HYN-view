@@ -201,5 +201,7 @@ psql -f "$HERE/server-access-bandwidth-test.sql" >"$WORK/access-test.log" 2>&1 |
 sed -n '/PASS /p' "$WORK/access-test.log"
 psql -f "$HERE/shared-observability-test.sql" >"$WORK/shared-test.log" 2>&1 || { cat "$WORK/shared-test.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/shared-test.log"
+psql -f "$HERE/delivery-controls-test.sql" >"$WORK/delivery-test.log" 2>&1 || { cat "$WORK/delivery-test.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/delivery-test.log"
 printf 'run-tests: final role and server authorization checks passed\n'
 exit 0

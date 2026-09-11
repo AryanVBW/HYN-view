@@ -30,7 +30,7 @@ begin
   foreach uid in array array['10000000-0000-4000-8000-000000000004','10000000-0000-4000-8000-000000000002'] loop
     perform set_config('test.uid',uid,true);
     for r in select p.* from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public'
-      and p.proname like 'hyn_admin_%' and p.proname not in ('hyn_admin_overview','hyn_admin_nodes','hyn_admin_clients','hyn_admin_notifications','hyn_admin_audit','hyn_admin_templates','hyn_admin_set_role','hyn_admin_promote_by_email') loop
+      and p.proname like 'hyn_admin_%' and p.proname not in ('hyn_admin_overview','hyn_admin_nodes','hyn_admin_clients','hyn_admin_notifications','hyn_admin_audit','hyn_admin_templates','hyn_admin_delivery_dashboard','hyn_admin_set_role','hyn_admin_promote_by_email') loop
       select string_agg('null::'||format_type(t,null),',') into args from unnest(r.proargtypes::oid[]) t;
       denied:=false;
       begin execute format('select public.%I(%s)',r.proname,coalesce(args,''));
@@ -73,7 +73,7 @@ end $$;
 set local "test.uid"='10000000-0000-4000-8000-000000000002';
 do $$ begin
   perform public.hyn_admin_overview(); perform public.hyn_admin_nodes(); perform public.hyn_admin_clients();
-  perform public.hyn_admin_notifications(); perform public.hyn_admin_audit(); perform public.hyn_admin_templates();
+  perform public.hyn_admin_notifications(); perform public.hyn_admin_audit(); perform public.hyn_admin_templates(); perform public.hyn_admin_delivery_dashboard();
   perform public.hyn_admin_promote_by_email('owner@roles.test');
   if not exists(select 1 from public.profiles where email='owner@roles.test' and role='admin') then raise exception 'admin could not promote'; end if;
   begin perform public.hyn_admin_set_role('10000000-0000-4000-8000-000000000002','super_admin'); raise exception 'self escalation'; exception when raise_exception then if sqlerrm<>'refusing to change your own role' then raise; end if; end;
