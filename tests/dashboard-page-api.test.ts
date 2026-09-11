@@ -44,7 +44,10 @@ mock.module("../lib/supabase/server.ts", {namedExports: {
   createClient: async () => ({
     auth: {getUser: async () => ({data: {user: {id: "account", email: "test@example.test"}}})},
     rpc: async (name: string, args: unknown) => {
-      if (name === "hyn_dashboard_accounts") return {data: [{id: "account", name: "My account", own: true, relayers: allowRelayers}]};
+      if (name === "hyn_dashboard_accounts") return {data: [
+        {id: "account", name: "My account", own: true, relayers: allowRelayers},
+        ...(server.owner === "account" ? [] : [{id: server.owner, name: "Shared dashboard", own: false, relayers: false}]),
+      ]};
       assert.equal(name, "hyn_bandwidth_report");
       bandwidthReads.push(args);
       return {data: {sampled_at: "2026-09-11T08:00:00Z", since: "2026-09-01", iface: "eth0", ingress_bytes: "1024", egress_bytes: "2048", days: []}, error: null};
@@ -104,8 +107,8 @@ test("relayers have their own section, including old relayer links and accounts 
   for (const params of relayerLinks) {
     const html = await render(params);
     assert.match(html, /Highway relayer dashboard/);
-    assert.match(html, /gateway/);
-    assert.match(html, /aria-label="Computers"/);
+    assert.match(html, /All relayers assigned to you/);
+    assert.doesNotMatch(html, /aria-label="Computers"/);
     assert.doesNotMatch(html, /Total transferred|Connect a Highway relayer|Request a relayer|Shared dashboard|My devices/);
   }
   haveNodes = false;
@@ -113,9 +116,9 @@ test("relayers have their own section, including old relayer links and accounts 
   assert.match(await render(), /No server is linked yet/);
   haveNodes = true;
   allowRelayers = false;
-  const blocked = await render({relayer: "457"});
-  assert.doesNotMatch(blocked, /Highway relayer dashboard/);
-  assert.match(blocked, /No relayers are shared/);
+  const ownRelayers = await render({relayer: "457"});
+  assert.match(ownRelayers, /Highway relayer dashboard/);
+  assert.doesNotMatch(ownRelayers, /No relayers are shared/);
   const defaultServerRelay = await render({section: "relayers"});
   assert.match(defaultServerRelay, /Highway relayer dashboard/);
   assert.doesNotMatch(defaultServerRelay, /No relayers are shared/);
@@ -128,10 +131,10 @@ test("relayers have their own section, including old relayer links and accounts 
   assert.equal(bandwidthReads.length, 0);
 });
 
-test("relay pages default to the selected computer while preserving legacy relayer links", async () => {
+test("relay pages show all user assignments and scope only explicit Highway Node detail links", async () => {
   const { RelayerDashboard } = await import("../components/dashboard/relayer-dashboard");
   const cases: {params: Record<string, string>; nodeId: string | undefined}[] = [
-    {params: {section: "relayers"}, nodeId: "server"},
+    {params: {section: "relayers"}, nodeId: undefined},
     {params: {section: "relayers", node: "server", relayScope: "server"}, nodeId: "server"},
     {params: {relayer: "457"}, nodeId: undefined},
   ];
@@ -142,7 +145,24 @@ test("relay pages default to the selected computer while preserving legacy relay
     const panel = children.find(child => isValidElement(child) && child.type === RelayerDashboard);
     assert.ok(isValidElement<{nodeId?: string; ownerId?: string}>(panel));
     assert.equal(panel.props.nodeId, nodeId);
-    if (nodeId) assert.equal(panel.props.ownerId, undefined, "computer relays must not request an account-wide list");
+    assert.equal(panel.props.ownerId, undefined, "a user relay list must not adopt another server owner's account");
+  }
+  const originalOwner = server.owner;
+  try {
+    server.owner = "shared-owner";
+    for (role of ["viewer", "monitor"]) {
+      const params = {section: "relayers", owner: "shared-owner", node: "server"};
+      query = new URLSearchParams(params);
+      const page = await (await dashboard).default({searchParams: Promise.resolve(params)});
+      const panel = Children.toArray((page as ReactElement<{children?: ReactNode}>).props.children)
+        .find(child => isValidElement(child) && child.type === RelayerDashboard);
+      assert.ok(isValidElement<{nodeId?: string; ownerId?: string}>(panel));
+      assert.equal(panel.props.nodeId, undefined);
+      assert.equal(panel.props.ownerId, undefined);
+    }
+  } finally {
+    server.owner = originalOwner;
+    role = "monitor";
   }
 });
 

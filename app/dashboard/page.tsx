@@ -129,20 +129,22 @@ export default async function DashboardPage({
     nodes: (nodeRows ?? []) as Node[], requestedOwner, requestedNode});
   if (!selection) return <Shell email={auth.user.email}><div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">This server or dashboard is unavailable</h1><p className="mt-3 text-sm text-muted-foreground">It may have been unlinked or access may have changed.</p><Link href="/dashboard" className="mt-4 inline-block text-primary underline">Return to your dashboards</Link></div></Shell>;
   const {owner, nodes, node} = selection;
-  const canViewRelayers = owner === "all" || accounts.find(account => account.id === owner)?.relayers !== false;
-  const relayerOwner = owner === auth.user.id ? undefined : owner;
+  // User relayers belong to the signed-in account, independently of the owner
+  // of the server currently being viewed. Staff retain their fleet relay view.
+  const canViewRelayers = true;
+  const relayerOwner = access.canAdmin ? "all" : undefined;
   // Preserve old links that selected a relayer before there were separate sections.
   const section = requestedSection === "relayers" || (!requestedSection && requestedRelayer) ? "relayers" : "servers";
-  const context = {role: profileResult.data.role, accounts, owner, section, nodeId: section === "relayers" && requestedRelayer && relayScope !== "server" ? undefined : node?.id, canViewRelayers,
+  const context = {role: profileResult.data.role, accounts, owner, section, nodeId: node?.id, canViewRelayers,
     computers: ((nodeRows ?? []) as Node[]).map(({id, name, hostname, owner: computerOwner}) => ({id, name, hostname, owner: computerOwner}))} as const;
 
   if (section === "relayers") {
     return <Shell email={auth.user.email} context={context}>
-      {relayScope === "server" || (!requestedRelayer && node && !node.is_demo)
+      {relayScope === "server"
         ? node && !node.is_demo
           ? <RelayerDashboard key={node.id} nodeId={node.id} />
           : <p className="py-8 text-sm text-muted-foreground">Select a server to see its linked relayer.</p>
-        : canViewRelayers ? <RelayerDashboard key={owner} ownerId={relayerOwner} /> : <p className="py-8 text-sm text-muted-foreground">No relayers are shared with this dashboard. Select another dashboard or return to Servers.</p>}
+        : <RelayerDashboard key={relayerOwner ?? auth.user.id} ownerId={relayerOwner} />}
     </Shell>;
   }
 

@@ -18,11 +18,13 @@ export function RelayerManager({
   ownerName,
   assignments,
   error,
+  showReadings = true,
 }: {
   ownerId: string;
   ownerName: string;
   assignments: RelayerAssignment[];
   error: string | null;
+  showReadings?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [matches, setMatches] = useState<Match[]>([]);
@@ -83,6 +85,7 @@ export function RelayerManager({
           assign it to <strong>{ownerName}</strong>. This account will see only
           its assigned relayers.
         </p>
+        <p>Every assigned relay appears in this user&apos;s Relayers tab, whether or not it is linked to a server. A Highway Node shows only its one linked relay.</p>
         {error ? (
           <p role="alert" className="relayer-notice">
             {error}
@@ -209,7 +212,7 @@ export function RelayerManager({
           {message}
         </p>
       </div>
-      <RelayerDashboard key={ownerId} ownerId={ownerId} revision={revision} />
+      {showReadings ? <RelayerDashboard key={ownerId} ownerId={ownerId} revision={revision} /> : null}
     </div>
   );
 }

@@ -157,7 +157,7 @@ export function RelayerDashboard({
             <Radio size={17} aria-hidden /> Highway network
           </div>
           <h2>{nodeId ? "Server's Highway relayer" : ownerId === "all" ? "All Highway relayers" : "Highway relayers"}</h2>
-          <p>Service health, check-ins and on-chain earnings in one place.</p>
+          <p>{nodeId ? "The one relay linked to this Highway Node." : ownerId === "all" ? "Assigned relayers across the fleet, including relays without server links." : "All relayers assigned to you, including relays not linked to a server."} Service health, check-ins and on-chain earnings in one place.</p>
         </div>
         <button
           className="relayer-button"
@@ -196,6 +196,13 @@ export function RelayerDashboard({
       {!nodeId && readings.length ? <div className="my-6">
         <ResourceSwitcher label="Relayers" current={reading ? String(reading.assignment.relayer_id) : undefined} items={readings.map(r => {
           const next = new URLSearchParams(params.toString());
+          if (pathname === "/dashboard") {
+            next.set("section", "relayers");
+            next.delete("node");
+            next.delete("relayScope");
+            if (ownerId) next.set("owner", ownerId);
+            else next.delete("owner");
+          }
           next.set("relayer",String(r.assignment.relayer_id));
           return {id: String(r.assignment.relayer_id), name: r.relayer?.name ?? r.assignment.relayer_name,
             detail: `#${r.assignment.relayer_id}`, href: `${pathname}?${next}`};

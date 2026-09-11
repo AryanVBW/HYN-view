@@ -172,6 +172,27 @@ export default async function AdminPage({
   const serverGrants = canWrite ? await supabase.from("server_access").select("viewer_id,node_id,allowed,notifications_allowed").order("updated_at", { ascending: false }) : null;
   const accessEvents = canWrite ? await supabase.from("server_access_events").select("id,ts,actor,viewer_id,node_id,allowed").order("ts", { ascending: false }).limit(50) : null;
   const shareResult = canWrite ? await supabase.from("dashboard_access").select("viewer_id,owner_id").order("created_at", {ascending:false}) : null;
+  const [userRelayersResult, serverRelaysResult] = canWrite ? await Promise.all([
+    supabase.from("relayer_assignments").select("id,owner,relayer_id,relayer_name,created_at").order("created_at"),
+    supabase.from("node_relayer_links").select("node_id,assignment_id"),
+  ]) : [null, null];
+  const userRelayers = (userRelayersResult?.data ?? []) as RelayerAssignment[];
+  const serverRelays = (serverRelaysResult?.data ?? []) as NodeRelayerLink[];
+  const relayerPanels = Object.fromEntries(clients.filter(client => client.status === "active" && (client.role === "viewer" || client.role === "monitor")).map(client => [client.id,
+    <RelayerManager key={client.id} ownerId={client.id} ownerName={client.full_name || client.email || "this user"}
+      assignments={userRelayers.filter(assignment => assignment.owner === client.id)} showReadings={false}
+      error={userRelayersResult?.error ? "Relayer assignments are unavailable. Finish the relayer setup, then refresh." : null} />,
+  ]));
+  const nodeRelayPanels = Object.fromEntries(nodes.filter(node => !node.revoked && !node.is_demo && node.owner_status === "active").map(node => {
+    const owner = clients.find(client => client.id === node.owner_id);
+    return [node.id, <div key={`${node.id}:${serverRelays.find(link => link.node_id === node.id)?.assignment_id ?? "none"}`}>
+      <p className="mb-3 text-xs text-muted-foreground">Choose from {owner?.full_name || owner?.email || "the server owner"}&apos;s assigned relays.</p>
+      <NodeRelayerSetting nodeId={node.id} nodeName={node.name}
+        assignments={userRelayers.filter(assignment => assignment.owner === node.owner_id)}
+        links={serverRelays} nodes={nodes} canWrite={canWrite}
+        error={userRelayersResult?.error || serverRelaysResult?.error ? "Relay links are unavailable. Finish the server relayer setup, then refresh." : null} />
+    </div>];
+  }));
   const pendingRequests = await supabase.from("relayer_requests")
     .select("id,owner,relayer_id,relayer_name,status,created_at").eq("status","pending")
     .order("created_at").limit(200);
@@ -414,13 +435,16 @@ export default async function AdminPage({
       <p className="mt-5 rounded-lg border border-primary/30 bg-primary/5 px-5 py-4 font-mono text-xs leading-6"><strong className="text-primary">{roleLabels[normalizeRole(profile.role)]}</strong> · {roleDescriptions[normalizeRole(profile.role)]}</p>
       <div className="mt-10">
         <AdminTabs
-          access={canWrite ? <ServerAccess clients={clients} nodes={nodes} grants={(serverGrants?.data ?? []) as ServerGrant[]} shares={(shareResult?.data ?? []) as DashboardShare[]} events={(accessEvents?.data ?? []) as AccessEvent[]} error={serverGrants?.error || accessEvents?.error || shareResult?.error ? "Assignments are unavailable. Finish the server permissions setup, then refresh." : null} /> : undefined}
+          access={canWrite ? <ServerAccess clients={clients} nodes={nodes} grants={(serverGrants?.data ?? []) as ServerGrant[]} shares={(shareResult?.data ?? []) as DashboardShare[]} events={(accessEvents?.data ?? []) as AccessEvent[]}
+            relayerPanels={relayerPanels} nodeRelayPanels={nodeRelayPanels}
+            relayerCounts={Object.fromEntries(clients.map(client => [client.id, userRelayers.filter(assignment => assignment.owner === client.id).length]))}
+            error={serverGrants?.error || accessEvents?.error || shareResult?.error ? "Assignments are unavailable. Finish the server permissions setup, then refresh." : null} /> : undefined}
           bandwidth={<BandwidthPanel nodes={nodes} expanded />}
           overview={overviewPanel}
           relayers={<div className="space-y-8">
             <div className="flex flex-wrap items-center justify-between gap-4">
-              <div><h2 className="text-2xl font-medium">Relayer access</h2><p className="mt-2 text-sm text-muted-foreground">{canWrite ? "Choose a client to assign or remove their Highway relayers." : "View assigned relayers. A Super admin manages assignments and approvals."}</p></div>
-              <Link href="/admin?tab=clients" className="rounded-md border border-border px-4 py-2.5 text-sm text-primary hover:border-primary">Choose a client</Link>
+              <div><h2 className="text-2xl font-medium">Relayer access</h2><p className="mt-2 text-sm text-muted-foreground">{canWrite ? "Manage user relayers and Highway Node links together in Assignments." : "View assigned relayers. A Super admin manages assignments and approvals."}</p></div>
+              <Link href={canWrite ? "/admin?tab=access" : "/admin?tab=clients"} className="rounded-md border border-border px-4 py-2.5 text-sm text-primary hover:border-primary">{canWrite ? "Manage assignments" : "Choose a client"}</Link>
             </div>
             <RelayerRequestQueue canWrite={canWrite} requests={(pendingRequests.data ?? []).map(request=>{
               const owner = clients.find(c=>c.id === request.owner);

@@ -36,12 +36,27 @@ test("visual assignments save multiple servers for one user while retaining othe
     await act(async () => root.render(createElement(ServerAccess, {
       clients, nodes, events: [],
       grants: [{ viewer_id: "alice", node_id: "primary", allowed: true, notifications_allowed: false }, { viewer_id: "bob", node_id: "primary", allowed: true }],
+      relayerPanels: {
+        alice: createElement("button", {"data-testid": "alice-relayers"}, "Alice assigned relayers"),
+        bob: createElement("button", {"data-testid": "bob-relayers"}, "Bob assigned relayers"),
+      },
+      nodeRelayPanels: {
+        primary: createElement("select", {"aria-label": "Primary relay link"}, createElement("option", {}, "Primary relay")),
+        backup: createElement("select", {"aria-label": "Backup relay link"}, createElement("option", {}, "Backup relay")),
+      },
+      relayerCounts: {alice: 2, bob: 1},
     })));
+    assert.ok(document.querySelector('[data-testid="alice-relayers"]'));
+    assert.equal(document.querySelector('[data-testid="bob-relayers"]'), null);
+    assert.ok(document.querySelector('[aria-label="Primary relay link"]'));
+    assert.equal(document.querySelector('[aria-label="Backup relay link"]'), null);
     assert.equal(checkbox("Primary").checked, true);
     assert.equal(checkbox("Backup").checked, false);
     assert.equal(checkbox("Own device").checked, true);
     assert.equal(checkbox("Own device").disabled, true);
     await click(checkbox("Backup"));
+    assert.equal(document.querySelector('[data-testid="alice-relayers"]')?.closest("fieldset")?.disabled, true);
+    assert.equal(document.querySelector('[aria-label="Backup relay link"]'), null, "save server access before linking its relay");
     assert.match(document.body.textContent!, /3 servers selected/);
     assert.equal(button("Bob").disabled, true);
     await click(button("Alice"));
@@ -50,7 +65,10 @@ test("visual assignments save multiple servers for one user while retaining othe
     assert.deepEqual(calls.at(-1), { name: "hyn_admin_set_user_servers", params: { p_viewer: "alice", p_nodes: ["primary", "backup"] } });
     assert.match(document.body.textContent!, /Alice can view 3 servers/);
     assert.equal(button("Bob").disabled, false);
+    assert.ok(document.querySelector('[aria-label="Backup relay link"]'));
     await click(button("Bob"));
+    assert.ok(document.querySelector('[data-testid="bob-relayers"]'));
+    assert.equal(document.querySelector('[data-testid="alice-relayers"]'), null);
     assert.equal(checkbox("Primary").checked, true);
     assert.equal(checkbox("Backup").checked, false);
     assert.equal(checkbox("Own device").checked, false);

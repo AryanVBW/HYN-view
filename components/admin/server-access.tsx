@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState, useTransition } from "react";
+import { useState, useTransition, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowUpRight, Check, Search, Server, Users } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
@@ -14,9 +14,10 @@ const personName = (person: AdminClient) => person.full_name || person.email || 
 const sameSelection = (left: string[], right: string[]) => left.length === right.length && left.every(id => right.includes(id));
 const inputClass = "w-full rounded-lg border border-border bg-background py-2.5 pl-9 pr-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-primary";
 
-export function ServerAccess({ clients, nodes, grants, shares = [], events, error }: {
+export function ServerAccess({ clients, nodes, grants, shares = [], events, error, relayerPanels = {}, nodeRelayPanels = {}, relayerCounts = {} }: {
   clients: AdminClient[]; nodes: AdminNode[]; grants: ServerGrant[]; shares?: DashboardShare[];
   events: AccessEvent[]; error?: string | null;
+  relayerPanels?: Record<string, ReactNode>; nodeRelayPanels?: Record<string, ReactNode>; relayerCounts?: Record<string, number>;
 }) {
   const people = clients.filter(client => client.status === "active" && (client.role === "viewer" || client.role === "monitor"));
   const servers = nodes.filter(node => !node.revoked && !node.is_demo && node.owner_status !== "suspended");
@@ -35,7 +36,7 @@ export function ServerAccess({ clients, nodes, grants, shares = [], events, erro
     <header className="flex flex-wrap items-center justify-between gap-4 border-b border-border p-5 md:p-7">
       <div>
         <h2 id="server-access-title" className="font-sentient text-3xl">Assignments</h2>
-        <p className="mt-2 text-sm text-muted-foreground">Choose a person, select their servers, and save. A server can be shared with several people.</p>
+        <p className="mt-2 text-sm text-muted-foreground">Choose a person to manage their servers and relayers. Link one relay to a Highway Node; other assigned relays stay available in their Relayers tab.</p>
       </div>
       <span className="inline-flex items-center gap-2 text-xs text-muted-foreground"><Users className="size-4" aria-hidden />Super admins only</span>
     </header>
@@ -55,7 +56,7 @@ export function ServerAccess({ clients, nodes, grants, shares = [], events, erro
               className={`flex w-full items-center gap-3 rounded-lg border p-3 text-left focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-40 ${current?.id === client.id ? "border-primary/40 bg-primary/10" : "border-transparent hover:bg-secondary/60"}`}>
               <span className="flex size-9 shrink-0 items-center justify-center rounded-full border border-border bg-background text-sm font-medium" aria-hidden>{personName(client).slice(0, 1).toUpperCase()}</span>
               <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{personName(client)}</span><span className="mt-0.5 block truncate text-xs text-muted-foreground">{client.email || (client.role === "viewer" ? "Viewer" : "Monitor")}</span></span>
-              <span className="rounded-md bg-background px-2 py-1 text-xs tabular-nums">{count}<span className="sr-only"> servers assigned</span></span>
+              <span className="shrink-0 rounded-md bg-background px-2 py-1 text-right text-xs tabular-nums"><span className="block">{count} servers</span><span className="mt-1 block text-muted-foreground">{relayerCounts[client.id] ?? 0} relays</span></span>
             </button>;
           })}
           {!matches.length ? <p className="p-3 text-sm text-muted-foreground">{people.length ? "No users match your search." : "Add an active Viewer or Monitor to assign servers."}</p> : null}
@@ -67,6 +68,7 @@ export function ServerAccess({ clients, nodes, grants, shares = [], events, erro
         client={current} nodes={servers} initial={assigned} grants={grants}
         sharedCounts={Object.fromEntries(servers.map(node => [node.id, people.filter(client => canSee(client.id, node)).length]))}
         inherited={shares.some(share => share.viewer_id === current.id)} error={error} onLockChange={setLocked}
+        relayerPanel={relayerPanels[current.id]} nodeRelayPanels={nodeRelayPanels}
       /> : <div className="flex min-h-64 items-center justify-center p-8 text-sm text-muted-foreground">Users and their assigned servers will appear here.</div>}
     </div>
     <details className="border-t border-border px-5 py-4 md:px-7">
@@ -80,9 +82,10 @@ export function ServerAccess({ clients, nodes, grants, shares = [], events, erro
   </section>;
 }
 
-function UserServerAssignments({ client, nodes, initial, grants, sharedCounts, inherited, error, onLockChange }: {
+function UserServerAssignments({ client, nodes, initial, grants, sharedCounts, inherited, error, onLockChange, relayerPanel, nodeRelayPanels }: {
   client: AdminClient; nodes: AdminNode[]; initial: string[]; grants: ServerGrant[];
   sharedCounts: Record<string, number>; inherited: boolean; error?: string | null; onLockChange: (locked: boolean) => void;
+  relayerPanel?: ReactNode; nodeRelayPanels: Record<string, ReactNode>;
 }) {
   const router = useRouter();
   const [selected, setSelected] = useState(initial);
@@ -165,6 +168,11 @@ function UserServerAssignments({ client, nodes, initial, grants, sharedCounts, i
             <span className="text-muted-foreground">{isOwner ? "Owner access" : `${sharedCounts[node.id] ?? 0} users with access`}</span>
             <Link href={`/dashboard?node=${node.id}`} className="inline-flex items-center gap-1 rounded-sm text-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">Open dashboard<ArrowUpRight className="size-3" aria-hidden /><span className="sr-only"> for {node.name}</span></Link>
           </div>
+          {checked && saved.includes(node.id) && nodeRelayPanels[node.id] ? <details className="mt-3 border-t border-border/60 pt-3">
+            <summary className="cursor-pointer text-xs font-medium text-primary">Highway Node relay</summary>
+            <p className="mt-3 text-xs leading-5 text-muted-foreground">One relay per server. Everyone with access to this computer sees the same linked relay below Running.</p>
+            <fieldset disabled={pending || dirty || !!error} className="mt-3 min-w-0 disabled:opacity-60">{nodeRelayPanels[node.id]}</fieldset>
+          </details> : null}
         </div>;
       })}
     </div>
@@ -184,5 +192,11 @@ function UserServerAssignments({ client, nodes, initial, grants, sharedCounts, i
         Allow notifications for {node.name}
       </label>)}</div>
     </details> : null}
+    {relayerPanel ? <section className="mt-7 border-t border-border pt-6" aria-label={`Relayers assigned to ${personName(client)}`}>
+      <h4 className="font-sentient text-xl">User relayers</h4>
+      <p className="mb-4 mt-2 text-sm text-muted-foreground">These assignments are separate from server access. The user can view all of them in Relayers, including relays without a server link.</p>
+      {dirty ? <p className="mb-3 text-xs text-muted-foreground">Save or discard server changes before editing relayers.</p> : null}
+      <fieldset disabled={pending || dirty} className="min-w-0 disabled:opacity-60">{relayerPanel}</fieldset>
+    </section> : null}
   </div>;
 }

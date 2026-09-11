@@ -103,14 +103,14 @@ test("dashboard navigation keeps the selected server and hides relayers for serv
   const html = render(<DashboardContext role="monitor" owner="shared" accounts={accounts} nodeId="server" section="relayers" />);
   assert.match(html, /href="\/dashboard\?owner=shared&amp;node=server"/);
   const document = new JSDOM(html).window.document;
-  assert.equal(document.querySelector('nav [aria-current="page"]')?.getAttribute("href"), "/dashboard?owner=shared&node=server&section=relayers&relayScope=server");
+  assert.equal(document.querySelector('nav [aria-current="page"]')?.getAttribute("href"), "/dashboard?section=relayers");
   assert.doesNotMatch(html, /your workspace|Overall data usage|Request a relayer|Connect a Highway relayer|>Monitor</);
   const shared = render(<DashboardContext role="viewer" owner="shared" accounts={accounts} canViewRelayers={false} />);
   assert.doesNotMatch(shared, />Relayers<|Link server/);
   assert.match(shared, />Servers<|Shared account/);
 });
 
-test("both dashboard sections select computers by name without account labels", () => {
+test("computer navigation stays in Servers and never filters the assigned Relayers tab", () => {
   const accounts = [
     {id: "me", name: "My devices", own: true},
     {id: "shared", name: "Shared dashboard 0daec582", own: false},
@@ -127,6 +127,14 @@ test("both dashboard sections select computers by name without account labels", 
       try {
         const document = dom.window.document;
         const links = Array.from(document.querySelectorAll('nav[aria-label="Computers"] a'));
+        assert.equal(document.querySelector('nav[aria-label="Dashboards"]'), null);
+        assert.doesNotMatch(document.body.textContent ?? "", /All servers|My devices|Demo Account|Shared dashboard/);
+        if (section === "relayers") {
+          assert.equal(links.length, 0);
+          assert.equal(document.querySelector('input[aria-label="Search computers"]'), null);
+          assert.equal(document.querySelector('nav[aria-label="Dashboard sections"] [aria-current="page"]')?.getAttribute("href"), "/dashboard?section=relayers");
+          continue;
+        }
         assert.equal(links.length, 2);
         assert.equal(links[0].querySelector("span")?.textContent, "office-pc");
         assert.equal(links[1].querySelector("span")?.textContent, "Relay tower");
@@ -139,7 +147,7 @@ test("both dashboard sections select computers by name without account labels", 
           assert.equal(url.searchParams.get("node"), computers[index].id);
           assert.equal(url.searchParams.get("owner"), computers[index].owner);
           assert.equal(url.searchParams.get("section"), section);
-          assert.equal(url.searchParams.get("relayScope"), section === "relayers" ? "server" : null);
+          assert.equal(url.searchParams.get("relayScope"), null);
         }
       } finally {
         dom.window.close();

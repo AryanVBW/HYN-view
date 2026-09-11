@@ -78,7 +78,7 @@ export function NodeRelayerSetting({
           {pending ? "Saving..." : "Save relay link"}
         </button> : <span className="text-xs text-muted-foreground">Super admins manage relay links.</span>}
       </div>
-      {!error && !assignments.length ? <p className="text-sm text-muted-foreground">Assign a relayer to this client above, then link it to this server.</p> : null}
+      {!error && !assignments.length ? <p className="text-sm text-muted-foreground">Assign a relayer to this server&apos;s owner in Assignments, then link it here.</p> : null}
       {error || failure ? <p role="alert" className="text-sm text-destructive">{error ?? failure}</p> : null}
       <p role="status" className="text-sm text-primary">{message}</p>
     </form>
