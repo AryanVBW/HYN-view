@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { mock, test } from "node:test";
-import { createElement, cloneElement, isValidElement, type ReactNode, type ReactElement } from "react";
+import { Children, createElement, cloneElement, isValidElement, type ReactNode, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Metric, Node } from "../lib/types";
 import { normalizeRelayer, SOURCE_STALE_S, type RelayerReading } from "../lib/relayer";
@@ -104,16 +104,21 @@ test("relayers have their own section, including old relayer links and accounts 
   for (const params of relayerLinks) {
     const html = await render(params);
     assert.match(html, /Highway relayer dashboard/);
-    assert.doesNotMatch(html, /My linked server|Total transferred|Connect a Highway relayer|Request a relayer/);
+    assert.match(html, /gateway/);
+    assert.match(html, /aria-label="Computers"/);
+    assert.doesNotMatch(html, /Total transferred|Connect a Highway relayer|Request a relayer|Shared dashboard|My devices/);
   }
   haveNodes = false;
   assert.match(await render({section: "relayers"}), /Highway relayer dashboard/);
   assert.match(await render(), /No server is linked yet/);
   haveNodes = true;
   allowRelayers = false;
-  const blocked = await render({section: "relayers"});
+  const blocked = await render({relayer: "457"});
   assert.doesNotMatch(blocked, /Highway relayer dashboard/);
   assert.match(blocked, /No relayers are shared/);
+  const defaultServerRelay = await render({section: "relayers"});
+  assert.match(defaultServerRelay, /Highway relayer dashboard/);
+  assert.doesNotMatch(defaultServerRelay, /No relayers are shared/);
   mode = "simple";
   assert.match(await render(), /Assigned Highway relayers/);
   const serverRelay = await render({ section: "relayers", node: "server", relayScope: "server" });
@@ -121,6 +126,24 @@ test("relayers have their own section, including old relayer links and accounts 
   assert.doesNotMatch(serverRelay, /No relayers are shared/);
   allowRelayers = true;
   assert.equal(bandwidthReads.length, 0);
+});
+
+test("relay pages default to the selected computer while preserving legacy relayer links", async () => {
+  const { RelayerDashboard } = await import("../components/dashboard/relayer-dashboard");
+  const cases: {params: Record<string, string>; nodeId: string | undefined}[] = [
+    {params: {section: "relayers"}, nodeId: "server"},
+    {params: {section: "relayers", node: "server", relayScope: "server"}, nodeId: "server"},
+    {params: {relayer: "457"}, nodeId: undefined},
+  ];
+  for (const {params, nodeId} of cases) {
+    query = new URLSearchParams(params);
+    const page = await (await dashboard).default({searchParams: Promise.resolve(params)});
+    const children = Children.toArray((page as ReactElement<{children?: ReactNode}>).props.children);
+    const panel = children.find(child => isValidElement(child) && child.type === RelayerDashboard);
+    assert.ok(isValidElement<{nodeId?: string; ownerId?: string}>(panel));
+    assert.equal(panel.props.nodeId, nodeId);
+    if (nodeId) assert.equal(panel.props.ownerId, undefined, "computer relays must not request an account-wide list");
+  }
 });
 
 test("Advanced usage remains available while waiting for the first telemetry reading", async () => {
