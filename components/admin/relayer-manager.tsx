@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useState, useTransition } from "react";
-import { Check, Link2, Search, Unlink } from "lucide-react";
+import Link from "next/link";
+import { ArrowUpRight, Check, Link2, Radio, Search, Server, Unlink, Users, X } from "lucide-react";
 import { assignRelayer, removeRelayer } from "@/app/admin/relayer-actions";
 import { RelayerDashboard } from "@/components/dashboard/relayer-dashboard";
-import type { RelayerAssignment } from "@/lib/relayer";
+import type { NodeRelayerLink, RelayerAssignment } from "@/lib/relayer";
 import "./relayer-manager.css";
 
 type Match = {
@@ -19,26 +20,89 @@ export function RelayerManager({
   assignments,
   error,
   showReadings = true,
+  links,
+  nodes = [],
 }: {
   ownerId: string;
   ownerName: string;
   assignments: RelayerAssignment[];
   error: string | null;
   showReadings?: boolean;
+  links?: NodeRelayerLink[];
+  nodes?: { id: string; name: string }[];
 }) {
   const [query, setQuery] = useState("");
   const [matches, setMatches] = useState<Match[]>([]);
-  const [chosen, setChosen] = useState<Match | null>(null);
+  const [chosen, setChosen] = useState<Match[]>([]);
+  const [failures, setFailures] = useState<string[]>([]);
+  const [confirmRemoval, setConfirmRemoval] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
   const [searched, setSearched] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [pending, startTransition] = useTransition();
   const [revision, setRevision] = useState(0);
+  const assignedIds = new Set(assignments.map(assignment => assignment.relayer_id));
+  const selectedRelays = chosen.filter(match => !assignedIds.has(match.id));
+  const linkedCount = links === undefined ? null : assignments.filter(assignment =>
+    links.some(link => link.assignment_id === assignment.id)).length;
+
+  function toggle(match: Match) {
+    setChosen(current => current.some(item => item.id === match.id)
+      ? current.filter(item => item.id !== match.id) : [...current, match]);
+  }
+
+  function assignSelected() {
+    const targets = [...selectedRelays];
+    if (!targets.length || pending || error) return;
+    setMessage("");
+    setFailures([]);
+    startTransition(async () => {
+      const failed: Match[] = [];
+      const errors: string[] = [];
+      for (const target of targets) {
+        try {
+          const result = await assignRelayer(ownerId, target.id);
+          if (!result.ok) {
+            failed.push(target);
+            errors.push(`${target.name}: ${result.error ?? "Could not assign relay."}`);
+          }
+        } catch {
+          failed.push(target);
+          errors.push(`${target.name}: Could not confirm the assignment. Retry to confirm it without creating a duplicate.`);
+        }
+      }
+      const saved = targets.length - failed.length;
+      setChosen(failed);
+      setFailures(errors);
+      setMessage(`${saved} relay${saved === 1 ? "" : "s"} assigned to ${ownerName}.${failed.length ? ` ${failed.length} not confirmed; those relays remain selected for retry.` : " They are available in this user's Relayers tab."}`);
+      if (saved) setRevision(value => value + 1);
+      if (!failed.length) changeQuery("");
+    });
+  }
+
+  function remove(assignment: RelayerAssignment) {
+    setMessage("");
+    setFailures([]);
+    startTransition(async () => {
+      try {
+        const result = await removeRelayer(assignment.id);
+        if (!result.ok) {
+          setFailures([result.error ?? "Could not remove assignment."]);
+          return;
+        }
+        setMessage(`Removed ${assignment.relayer_name} from ${ownerName}. Other users' assignments have not changed.`);
+        setConfirmRemoval(null);
+        setRevision(value => value + 1);
+      } catch {
+        setFailures(["Could not confirm removal. Refresh before trying again."]);
+      }
+    });
+  }
+
   function changeQuery(value: string) {
     setQuery(value);
     setMatches([]);
-    setChosen(null);
     setSearched(false);
     setSearchError(null);
     setSearching(!!value.trim());
@@ -78,14 +142,23 @@ export function RelayerManager({
       <div className="relayer-assignment-panel">
         <div className="relayer-section-title">
           <Link2 size={18} aria-hidden />
-          <h3>Assign Highway relayers</h3>
+          <h3>Assign relays to {ownerName}</h3>
         </div>
         <p>
-          Search the Highway server name, username or numeric relayer ID, then
-          assign it to <strong>{ownerName}</strong>. This account will see only
-          its assigned relayers.
+          Select one or more relays, then assign them together. Search again to
+          add more to your selection without losing the relays already selected.
         </p>
-        <p>Every assigned relay appears in this user&apos;s Relayers tab, whether or not it is linked to a server. A Highway Node shows only its one linked relay.</p>
+        <div className="relay-relationship" aria-label={`Relay access for ${ownerName}`}>
+          <span className="relay-relationship-person"><Users size={18} aria-hidden /><strong>{ownerName}</strong></span>
+          <span className="relay-relationship-verb">can view</span>
+          <span className="relay-relationship-destination"><Radio size={18} aria-hidden /><strong>{error ? "Unavailable" : `${assignments.length} assigned relay${assignments.length === 1 ? "" : "s"}`}</strong><small>All appear in the Relayers tab</small></span>
+        </div>
+        <dl className="relay-assignment-totals">
+          <div><dt>Assigned to user</dt><dd>{error ? "Unavailable" : assignments.length}</dd></div>
+          <div><dt>Also linked to a server</dt><dd>{error || linkedCount === null ? "Unknown" : linkedCount}</dd></div>
+          <div><dt>Relayers tab only</dt><dd>{error || linkedCount === null ? "Unknown" : assignments.length - linkedCount}</dd></div>
+        </dl>
+        <p>One user can have many relays. Linking a relay to a server is separate: each Highway Node shows only its one linked relay below Running.</p>
         {error ? (
           <p role="alert" className="relayer-notice">
             {error}
@@ -105,26 +178,12 @@ export function RelayerManager({
           </label>
           <button
             className="relayer-button"
-            disabled={!chosen || pending || !!error}
-            onClick={() => {
-              if (!chosen) return;
-              const target = chosen;
-              startTransition(async () => {
-                const result = await assignRelayer(ownerId, target.id);
-                setMessage(
-                  result.ok
-                    ? `Assigned ${target.name} (#${target.id}) to ${ownerName}.`
-                    : (result.error ?? "Could not assign relayer."),
-                );
-                if (result.ok) {
-                  changeQuery("");
-                  setRevision((n) => n + 1);
-                }
-              });
-            }}
+            type="button"
+            disabled={!selectedRelays.length || pending || !!error}
+            onClick={assignSelected}
           >
             <Link2 size={15} aria-hidden />
-            {pending ? "Saving" : "Assign relayer"}
+            {pending ? "Saving..." : selectedRelays.length ? `Assign ${selectedRelays.length} relay${selectedRelays.length === 1 ? "" : "s"}` : "Assign selected"}
           </button>
         </div>
         {searching ? (
@@ -150,19 +209,20 @@ export function RelayerManager({
             {matches.map((match) => (
               <button
                 key={match.id}
-                aria-pressed={chosen?.id === match.id}
-                disabled={pending}
-                onClick={() => setChosen(match)}
+                type="button"
+                aria-pressed={assignedIds.has(match.id) || selectedRelays.some(item => item.id === match.id)}
+                aria-label={`${assignedIds.has(match.id) ? "Already assigned" : "Select relay"}: ${match.name}`}
+                disabled={pending || !!error || assignedIds.has(match.id)}
+                onClick={() => toggle(match)}
               >
                 <div>
                   <strong>{match.name}</strong>
                   <span>
-                    #{match.id} ·{" "}
-                    {[match.tier, match.city].filter(Boolean).join(" · ")}
+                    {[match.city, match.tier].filter(Boolean).join(" / ") || "Highway relay"}
                   </span>
                 </div>
-                {chosen?.id === match.id ? (
-                  <Check size={18} aria-hidden />
+                {assignedIds.has(match.id) ? <span>Already assigned</span> : selectedRelays.some(item => item.id === match.id) ? (
+                  <span className="relay-match-selected"><Check size={18} aria-hidden />Selected</span>
                 ) : (
                   <span>Select</span>
                 )}
@@ -170,44 +230,35 @@ export function RelayerManager({
             ))}
           </div>
         ) : null}
-        {chosen ? (
-          <p className="relayer-selection">
-            Selected{" "}
-            <strong>
-              {chosen.name} · #{chosen.id}
-            </strong>{" "}
-            for {ownerName}.
-          </p>
+        {selectedRelays.length ? (
+          <div className="relay-selection-tray" aria-label="Relays selected to assign">
+            <div className="relay-selection-heading"><strong>{selectedRelays.length} selected, not yet assigned</strong><button type="button" disabled={pending} onClick={() => setChosen([])}>Clear selection</button></div>
+            <ul>{selectedRelays.map(match => <li key={match.id}><span>{match.name}</span><button type="button" disabled={pending} onClick={() => toggle(match)} aria-label={`Deselect ${match.name}`}><X size={14} aria-hidden /></button></li>)}</ul>
+          </div>
         ) : null}
-        <div className="relayer-assigned-list">
-          {assignments.map((a) => (
-            <div key={a.id}>
-              <span>
-                <strong>{a.relayer_name}</strong>
-                <small>Relayer #{a.relayer_id}</small>
-              </span>
-              <button
-                className="relayer-button"
-                disabled={pending}
-                aria-label={`Remove assignment for ${a.relayer_name}`}
-                onClick={() =>
-                  startTransition(async () => {
-                    const result = await removeRelayer(a.id);
-                    setMessage(
-                      result.ok
-                        ? `Removed ${a.relayer_name} from this account.`
-                        : (result.error ?? "Could not remove assignment."),
-                    );
-                    if (result.ok) setRevision((n) => n + 1);
-                  })
-                }
-              >
-                <Unlink size={14} aria-hidden />
-                Remove assignment
-              </button>
-            </div>
-          ))}
+        <div className="relay-access-list" aria-label={`Saved relay assignments for ${ownerName}`}>
+          <h4>Assigned relays <span>{error ? "Unavailable" : assignments.length}</span></h4>
+          {!assignments.length && !error ? <p className="relay-access-empty">No relays assigned yet. Search above, select relays, then choose Assign selected. A server link is not required.</p> : null}
+          {assignments.map(assignment => {
+            const link = links?.find(item => item.assignment_id === assignment.id);
+            const serverName = link ? nodes.find(node => node.id === link.node_id)?.name ?? "Linked server" : null;
+            return <article key={assignment.id} className="relay-access-row">
+              <div className="relay-access-description"><strong>{assignment.relayer_name}</strong>
+                <span className="relay-access-location"><Radio size={14} aria-hidden />Relayers tab</span>
+                {link ? <span className="relay-access-location"><Server size={14} aria-hidden />Also below Running on <strong>{serverName}</strong></span> : <span className="relay-access-note">{links === undefined ? "Server link information is unavailable." : "Not linked to a server. Visible in the Relayers tab only."}</span>}
+              </div>
+              <div className="relay-access-actions">
+                <Link className="relayer-button" href={`/admin?tab=relayers&relayer=${assignment.relayer_id}`}>View relay<ArrowUpRight size={14} aria-hidden /><span className="sr-only"> {assignment.relayer_name}</span></Link>
+                <button className="relay-remove-button" type="button" disabled={pending || !!error} aria-label={`Remove assignment for ${assignment.relayer_name}`} onClick={() => setConfirmRemoval(assignment.id)}><Unlink size={14} aria-hidden />Remove</button>
+              </div>
+              {confirmRemoval === assignment.id ? <div className="relay-removal-confirmation" role="group" aria-label={`Confirm removal of ${assignment.relayer_name}`}>
+                <p>Remove <strong>{assignment.relayer_name}</strong> from {ownerName}? {link ? `This also removes its link below Running on ${serverName}.` : links === undefined ? "Any server link using this assignment will also be removed." : "It will no longer appear in this user's Relayers tab."} Other users&apos; assignments stay unchanged.</p>
+                <div><button className="relayer-button" type="button" disabled={pending} onClick={() => remove(assignment)}>Confirm removal</button><button className="relayer-button" type="button" disabled={pending} onClick={() => setConfirmRemoval(null)}>Cancel</button></div>
+              </div> : null}
+            </article>;
+          })}
         </div>
+        {failures.length ? <ul role="alert" className="relayer-notice">{failures.map((failure, index) => <li key={index}>{failure}</li>)}</ul> : null}
         <p className="relayer-assignment-message" role="status">
           {message}
         </p>

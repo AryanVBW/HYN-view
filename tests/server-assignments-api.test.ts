@@ -47,6 +47,11 @@ test("visual assignments save multiple servers for one user while retaining othe
       relayerCounts: {alice: 2, bob: 1},
     })));
     assert.ok(document.querySelector('[data-testid="alice-relayers"]'));
+    const relationship = () => document.querySelector('nav[aria-label^="Assignment relationships"]')!;
+    assert.match(relationship().textContent!, /2 servers with access/);
+    assert.match(relationship().textContent!, /2 relays assigned/);
+    assert.equal(relationship().querySelector<HTMLAnchorElement>('a[href="#relay-assignments-alice"]')?.hash, "#relay-assignments-alice");
+    assert.ok(document.getElementById("relay-assignments-alice"));
     assert.equal(document.querySelector('[data-testid="bob-relayers"]'), null);
     assert.ok(document.querySelector('[aria-label="Primary relay link"]'));
     assert.equal(document.querySelector('[aria-label="Backup relay link"]'), null);
@@ -55,6 +60,7 @@ test("visual assignments save multiple servers for one user while retaining othe
     assert.equal(checkbox("Own device").checked, true);
     assert.equal(checkbox("Own device").disabled, true);
     await click(checkbox("Backup"));
+    assert.match(relationship().textContent!, /2 servers with access/, "saved counts must not include unsaved server selections");
     assert.equal(document.querySelector('[data-testid="alice-relayers"]')?.closest("fieldset")?.disabled, true);
     assert.equal(document.querySelector('[aria-label="Backup relay link"]'), null, "save server access before linking its relay");
     assert.match(document.body.textContent!, /3 servers selected/);
@@ -64,10 +70,14 @@ test("visual assignments save multiple servers for one user while retaining othe
     await click(button("Save assignments"));
     assert.deepEqual(calls.at(-1), { name: "hyn_admin_set_user_servers", params: { p_viewer: "alice", p_nodes: ["primary", "backup"] } });
     assert.match(document.body.textContent!, /Alice can view 3 servers/);
+    assert.match(relationship().textContent!, /3 servers with access/);
+    assert.match(relationship().textContent!, /2 relays assigned/, "saving server access must not change relay assignments");
     assert.equal(button("Bob").disabled, false);
     assert.ok(document.querySelector('[aria-label="Backup relay link"]'));
     await click(button("Bob"));
     assert.ok(document.querySelector('[data-testid="bob-relayers"]'));
+    assert.match(relationship().textContent!, /1 server with access/);
+    assert.match(relationship().textContent!, /1 relay assigned/);
     assert.equal(document.querySelector('[data-testid="alice-relayers"]'), null);
     assert.equal(checkbox("Primary").checked, true);
     assert.equal(checkbox("Backup").checked, false);

@@ -4,7 +4,8 @@ import { createClient as createServiceClient } from "@supabase/supabase-js";
 import { revalidatePath } from "next/cache";
 import { start } from "workflow/api";
 import { buildAdminClientReport, type AdminReportMachine } from "@/lib/admin-report";
-import { renderManagedHynEmail, sendResendEmail } from "@/lib/cloud-email";
+import { renderManagedHynEmail } from "@/lib/cloud-email";
+import { sendManagedEmail as sendResendEmail } from "@/lib/delivery-send";
 import { normalizeNodeCommand } from "@/lib/node-command";
 import { createClient } from "@/lib/supabase/server";
 import { SUPABASE_URL } from "@/lib/supabase/config";
@@ -160,6 +161,7 @@ export async function sendAdminClientReport(clientId: string): Promise<AdminActi
       preview: report.preview,
     });
     const delivery = await sendResendEmail({
+      delivery: { kind: "admin_report", ownerId: clientId },
       apiKey: resendKey,
       from,
       to: profile.email,

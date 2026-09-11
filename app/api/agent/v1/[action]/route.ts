@@ -7,7 +7,8 @@ import {
   MAX_AGENT_BODY_BYTES,
   observedPublicIp,
 } from "@/lib/agent-api";
-import { buildSystemSummaryContent, renderHynEmailShell, sendResendEmail } from "@/lib/cloud-email";
+import { buildSystemSummaryContent, renderHynEmailShell } from "@/lib/cloud-email";
+import { sendManagedEmail as sendResendEmail } from "@/lib/delivery-send";
 import { dispatchScheduledEmails } from "@/lib/scheduled-email";
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from "@/lib/supabase/config";
 import {
@@ -173,6 +174,7 @@ export async function POST(
         if (email?.status === "send" && email.recipient) {
           const subject = `Your first HYN system report · ${email.node_name ?? "linked machine"}`;
           const delivery = await sendResendEmail({
+            delivery: { kind: "first_report", nodeId: email.node_id },
             apiKey: process.env.RESEND_API_KEY ?? "",
             from: process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>",
             to: email.recipient,
@@ -192,7 +194,7 @@ export async function POST(
             }),
             idempotencyKey: `first-system:${email.node_id ?? nodeToken.slice(0, 12)}`,
           });
-          await supabase.rpc("hyn_report_notification", {
+          if (delivery.ok || !delivery.deferred) await supabase.rpc("hyn_report_notification", {
             p_node_token: nodeToken,
             p_events: [{
               kind: "resend-cloud",

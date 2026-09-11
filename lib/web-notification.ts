@@ -5,9 +5,10 @@ import {
   escapeHtml,
   renderHynEmailShell,
   renderManagedHynEmail,
-  sendResendEmail,
 } from "./cloud-email.ts";
 import { SUPABASE_URL } from "./supabase/config.ts";
+import { sendManagedEmail as sendResendEmail } from "./delivery-send.ts";
+import type { ManagedDeliveryResult } from "./managed-delivery.ts";
 
 export type WebNotificationJob = {
   id: string;
@@ -24,9 +25,10 @@ export type WebNotificationJob = {
   template?: string | null;
 };
 
-type Delivery = { ok: true; providerId: string | null } | { ok: false; error: string };
+type Delivery = ManagedDeliveryResult;
 
 export type WebNotificationDependencies = {
+  defer?: (jobId: string, reason: string) => Promise<void>;
   claim: (jobId?: string | null) => Promise<WebNotificationJob | null>;
   send: (args: {
     job: WebNotificationJob;
@@ -71,6 +73,10 @@ export async function dispatchWebNotificationJob(
     html,
     idempotencyKey: `web-notification:${job.id}`,
   });
+  if (!delivery.ok && delivery.deferred && dependencies.defer) {
+    await dependencies.defer(job.id, delivery.error);
+    return { status: "deferred" as const, error: delivery.error };
+  }
   await dependencies.complete(
     job.id,
     delivery.ok ? "sent" : "failed",
@@ -132,6 +138,7 @@ export async function dispatchQueuedWebNotification(jobId: string | null = null)
       };
     },
     send: async ({ job, html, idempotencyKey }) => sendResendEmail({
+      delivery: { kind: job.category === "alert" ? "incident" : job.category === "report" ? "daily" : "other", nodeId: job.nodeId },
       apiKey: resendKey,
       from,
       to: job.recipient,
@@ -139,6 +146,10 @@ export async function dispatchQueuedWebNotification(jobId: string | null = null)
       html,
       idempotencyKey,
     }),
+    defer: async (id, reason) => {
+      const { error } = await supabase.rpc("hyn_defer_web_delivery", { p_job: id, p_reason: reason });
+      if (error) throw error;
+    },
     complete: async (id, status, recipient, providerId, errorMessage) => {
       const { error } = await supabase.rpc("hyn_complete_web_notification", {
         p_job_id: id,
@@ -211,6 +222,7 @@ export async function dispatchCommandNotification(commandId: string) {
     preview: command.message,
   });
   const delivery = await sendResendEmail({
+    delivery: { kind: "command", nodeId: node.id, ownerId: node.owner },
     apiKey: resendKey,
     from,
     to: preference.recipient,
@@ -218,7 +230,7 @@ export async function dispatchCommandNotification(commandId: string) {
     html,
     idempotencyKey,
   });
-  await supabase.from("notification_log").insert({
+  if (delivery.ok || !delivery.deferred) await supabase.from("notification_log").insert({
     node_id: node.id,
     owner: node.owner,
     kind: "resend-cloud",

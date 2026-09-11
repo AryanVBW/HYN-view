@@ -4,7 +4,8 @@ import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { normalizeInternalPath } from "@/lib/legal-consent";
 import { observedPublicIp } from "@/lib/agent-api";
 import { portalOrigin } from "@/lib/portal-origin";
-import { buildSignInContent, renderHynEmailShell, sendResendEmail } from "@/lib/cloud-email";
+import { buildSignInContent, renderHynEmailShell } from "@/lib/cloud-email";
+import { sendManagedEmail as sendResendEmail } from "@/lib/delivery-send";
 
 // Where Google (and the email confirmation link) come back to. Exchanges the
 // one-time code for a session cookie, then forwards the user on.
@@ -60,6 +61,7 @@ export async function GET(request: NextRequest) {
       // message is logged verbatim -- "API key is invalid", "Domain is not
       // verified", a quota refusal -- because that string is the whole diagnosis.
       const delivery = await sendResendEmail({
+        delivery: { kind: "signin", ownerId: auth.user.id },
         apiKey: process.env.RESEND_API_KEY ?? "",
         from: process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>",
         to: email,
@@ -73,7 +75,7 @@ export async function GET(request: NextRequest) {
         }),
         idempotencyKey: `sign-in:${auth.user.id}:${signedInAt}`,
       });
-      if (!delivery.ok) {
+      if (!delivery.ok && !delivery.deferred) {
         console.error("[sign-in email] delivery failed:", delivery.error, {
           configured: {
             RESEND_API_KEY: Boolean(process.env.RESEND_API_KEY),

@@ -7,9 +7,11 @@ import {
   novelIncidentEvents,
   renderManagedHynEmail,
   scheduleIsDue,
-  sendResendEmail,
 } from "@/lib/cloud-email";
 import { SUPABASE_URL } from "@/lib/supabase/config";
+import { deliveryControlsEnabled, sendManagedEmail as sendResendEmail } from "./delivery-send.ts";
+import { effectiveDigest, type DigestSetting } from "./delivery-controls.ts";
+import { dispatchUserDigests } from "./user-digest.ts";
 
 type PreferenceRow = {
   node_id: string;
@@ -110,6 +112,11 @@ export async function dispatchScheduledEmails(nodeId?: string): Promise<Schedule
   const templates = new Map(
     (templatesResult.data ?? []).map((row) => [row.template_key, row.html_template]),
   );
+  const digestSettingsResult = deliveryControlsEnabled()
+    ? await supabase.from("delivery_digest_settings").select("scope,owner,configured,enabled,send_at,timezone")
+    : { data: [], error: null };
+  if (digestSettingsResult.error) throw digestSettingsResult.error;
+  const digestSettings = (digestSettingsResult.data ?? []) as DigestSetting[];
   const now = new Date();
   const since = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
   const result: ScheduledEmailResult = {
@@ -157,9 +164,10 @@ export async function dispatchScheduledEmails(nodeId?: string): Promise<Schedule
       subject: args.subject,
       html,
       idempotencyKey: args.idempotencyKey,
+      delivery: { kind: args.kind === "alert" ? "incident" : args.kind === "report" ? "daily" : "system", ownerId: node.owner, nodeId: node.id },
     });
     const ok = delivery.ok;
-    await supabase.from("notification_log").insert({
+    if (delivery.ok || !delivery.deferred) await supabase.from("notification_log").insert({
       node_id: node.id,
       owner: node.owner,
       kind: "resend-cloud",
@@ -175,7 +183,8 @@ export async function dispatchScheduledEmails(nodeId?: string): Promise<Schedule
         .from("cloud_email_dispatches")
         .delete()
         .eq("idempotency_key", args.idempotencyKey);
-      result.failed += 1;
+      if (delivery.deferred) result.skipped += 1;
+      else result.failed += 1;
       return false;
     }
     await supabase
@@ -243,7 +252,7 @@ export async function dispatchScheduledEmails(nodeId?: string): Promise<Schedule
       }
     }
 
-    const dailyDue = preference.daily_enabled && scheduleIsDue(
+    const dailyDue = !effectiveDigest(digestSettings, node.owner).configured && preference.daily_enabled && scheduleIsDue(
       now,
       preference.timezone,
       preference.daily_at.slice(0, 5),
@@ -323,5 +332,10 @@ export async function dispatchScheduledEmails(nodeId?: string): Promise<Schedule
     }
   }
 
+  const digests = await dispatchUserDigests(nodeId);
+  result.sent += digests.sent;
+  result.failed += digests.failed;
+  result.skipped += digests.skipped;
+  result.checked += digests.checked;
   return result;
 }

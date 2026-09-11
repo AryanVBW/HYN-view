@@ -63,7 +63,7 @@ test("link actions require a Super admin, validate identifiers and propagate dat
 test("server setting labels occupied relayers, saves an explicit link, unlinks and displays save errors", async () => {
   const { NodeRelayerSetting } = await import("../components/admin/node-relayer-setting");
   const dom = new JSDOM('<div id="root"></div>', { url: "https://portal.example/admin" });
-  Object.assign(globalThis, { window: dom.window, document: dom.window.document, FormData: dom.window.FormData, IS_REACT_ACT_ENVIRONMENT: true });
+  Object.assign(globalThis, { window: dom.window, self: dom.window, document: dom.window.document, FormData: dom.window.FormData, IS_REACT_ACT_ENVIRONMENT: true });
   const root = createRoot(document.getElementById("root")!);
   const props = {
     nodeId, nodeName: "Gateway", assignments, canWrite: true,
@@ -81,18 +81,26 @@ test("server setting labels occupied relayers, saves an explicit link, unlinks a
   try {
     await act(async () => root.render(createElement(NodeRelayerSetting, props)));
     assert.equal(document.querySelector("select")!.value, assignments[0].id);
+    assert.match(document.body.textContent!, /1 of 1 relay linked/);
+    assert.match(document.body.textContent!, /Below Running: Relay 1/);
+    assert.equal(document.querySelector('a')?.getAttribute("href"), `/dashboard?section=relayers&relayScope=server&node=${nodeId}`);
     const occupied = document.querySelector(`option[value="${assignments[1].id}"]`) as HTMLOptionElement;
     assert.equal(occupied.disabled, true);
     assert.match(occupied.textContent!, /linked to Backup server/);
     await choose(assignments[2].id);
+    assert.match(document.body.textContent!, /Below Running: Relay 1/, "an unsaved selection must not change the saved relationship summary");
     await submit();
     assert.deepEqual(writes.at(-1), { p_node_id: nodeId, p_assignment_id: assignments[2].id });
     assert.match(document.body.textContent!, /Relayer linked to Gateway/);
+    assert.match(document.body.textContent!, /Below Running: Relay 3/);
     assert.equal(refreshes, 1);
     await choose("");
     await submit();
     assert.deepEqual(writes.at(-1), { p_node_id: nodeId, p_assignment_id: null });
     assert.match(document.body.textContent!, /Relayer unlinked from Gateway/);
+    assert.match(document.body.textContent!, /0 of 1 relay linked/);
+    assert.match(document.body.textContent!, /Below Running: No relay linked/);
+    assert.equal(document.querySelector('a'), null);
     databaseError = "Relayer assignment no longer exists";
     await choose(assignments[0].id);
     await submit();

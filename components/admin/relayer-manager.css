@@ -103,6 +103,67 @@
 .relayer-assignment-message {
   margin-top: 8px;
 }
+.relay-relationship {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 22px 0 0;
+  padding: 18px;
+  border-left: 3px solid var(--primary);
+  background: color-mix(in srgb, var(--primary) 5%, var(--card));
+}
+.relay-relationship-person,
+.relay-relationship-destination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--foreground);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.relay-relationship-person svg,
+.relay-relationship-destination svg { flex-shrink: 0; color: var(--primary); }
+.relay-relationship-destination small { flex-basis: 100%; color: var(--muted-foreground); font-size: 11px; }
+.relay-relationship-verb { flex-shrink: 0; color: var(--muted-foreground); font-size: 11px; }
+.relay-assignment-totals { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0 0 16px; border-bottom: 1px solid var(--border); }
+.relay-assignment-totals > div { padding: 16px 12px; }
+.relay-assignment-totals dt { color: var(--muted-foreground); font-size: 11px; line-height: 1.6; }
+.relay-assignment-totals dd { margin-top: 5px; color: var(--foreground); font-size: 19px; font-variant-numeric: tabular-nums; }
+.relay-match-selected { display: inline-flex; align-items: center; gap: 5px; }
+.relay-selection-tray { margin-top: 16px; padding: 14px; border: 1px dashed var(--primary); border-radius: 10px; }
+.relay-selection-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; }
+.relay-selection-heading > button { color: var(--primary); }
+.relay-selection-tray ul { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.relay-selection-tray li { display: flex; align-items: center; gap: 8px; max-width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; font-size: 12px; overflow-wrap: anywhere; }
+.relay-selection-tray li > button { flex-shrink: 0; padding: 4px; }
+.relay-access-list { margin-top: 26px; }
+.relay-access-list h4 { display: flex; align-items: center; gap: 8px; padding-bottom: 12px; font-size: 14px; font-weight: 500; }
+.relay-access-list h4 > span { border: 1px solid var(--border); border-radius: 99px; padding: 2px 8px; color: var(--muted-foreground); font-size: 11px; font-variant-numeric: tabular-nums; }
+.relay-access-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 0; border-top: 1px solid var(--border); }
+.relay-access-description { display: flex; flex: 1 1 200px; min-width: 0; flex-direction: column; gap: 7px; }
+.relay-access-description > strong { color: var(--foreground); font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
+.relay-access-location { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; color: var(--foreground); font-size: 11px; overflow-wrap: anywhere; }
+.relay-access-location svg { flex-shrink: 0; color: var(--primary); }
+.relay-access-location strong { font-weight: 500; }
+.relay-access-note,
+.relay-access-empty { color: var(--muted-foreground); font-size: 11px; line-height: 1.8; }
+.relay-access-empty { padding: 16px; border: 1px dashed var(--border); border-radius: 10px; }
+.relay-access-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.relay-remove-button { display: inline-flex; align-items: center; gap: 5px; padding: 8px 2px; color: var(--muted-foreground); font-size: 11px; }
+.relay-removal-confirmation { flex-basis: 100%; border: 1px solid var(--destructive); border-radius: 8px; padding: 14px; font-size: 12px; line-height: 1.8; }
+.relay-removal-confirmation > div { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.relayer-management button:focus-visible,
+.relayer-management a:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+.relayer-management button:disabled { cursor: not-allowed; opacity: 0.5; }
+@media (max-width: 640px) {
+  .relay-relationship { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .relay-assignment-totals { grid-template-columns: 1fr; }
+  .relay-assignment-totals > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; }
+  .relay-assignment-totals dd { margin-top: 0; font-size: 16px; }
+  .relay-access-description { flex-basis: 100%; }
+}
 @media (max-width: 640px) {
   .relayer-assignment-panel {
     padding: 20px;

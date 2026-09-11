@@ -78,5 +78,7 @@ jobs:
           heroku git:remote --app "$HEROKU_APP_NAME"
           git push heroku HEAD:refs/heads/main
           heroku releases --app "$HEROKU_APP_NAME" --num 3
+      - name: Enable tested delivery controls
+        run: heroku config:set HYN_DELIVERY_CONTROLS_ENABLED=true --app "$HEROKU_APP_NAME"
       - name: Smoke test production
         run: bash scripts/smoke-production.sh "$HEROKU_APP_URL"

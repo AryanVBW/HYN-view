@@ -1,6 +1,7 @@
 "use client";
 
 import { useId, useState, useTransition } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { setNodeRelayer } from "@/app/admin/relayer-actions";
 import type { NodeRelayerLink, RelayerAssignment } from "@/lib/relayer";
@@ -30,6 +31,7 @@ export function NodeRelayerSetting({
   const [message, setMessage] = useState("");
   const [failure, setFailure] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
+  const savedAssignment = assignments.find(assignment => assignment.id === saved);
 
   return (
     <form className="mb-6 space-y-3 border-b border-border pb-6" aria-label={`Relayer link for ${nodeName}`}
@@ -54,6 +56,11 @@ export function NodeRelayerSetting({
           }
         });
       }}>
+      <div className="rounded-lg border border-border bg-secondary/20 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2"><strong className="break-words text-sm">{nodeName}</strong><span className="rounded-full border border-border px-2 py-1 text-xs tabular-nums">{error ? "Link unavailable" : `${saved ? 1 : 0} of 1 relay linked`}</span></div>
+        <p className="mt-2 text-xs text-muted-foreground">Below Running: <strong className="text-foreground">{error ? "Unavailable" : savedAssignment?.relayer_name ?? (saved ? "Linked relay" : "No relay linked")}</strong></p>
+        {savedAssignment && !error ? <Link href={`/dashboard?section=relayers&relayScope=server&node=${nodeId}`} className="mt-2 inline-block rounded-sm text-xs text-primary underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-primary">View linked relay</Link> : null}
+      </div>
       <label htmlFor={id} className="block font-medium">Linked Highway relayer</label>
       <p id={`${id}-help`} className="text-sm text-muted-foreground">
         Choose the relayer running on {nodeName}. Its heartbeat and health appear below Running on this server&apos;s dashboard.

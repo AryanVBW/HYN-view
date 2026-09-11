@@ -126,6 +126,8 @@ test("relayers have their own section, including old relayer links and accounts 
   assert.match(await render(), /Assigned Highway relayers/);
   const serverRelay = await render({ section: "relayers", node: "server", relayScope: "server" });
   assert.match(serverRelay, /Highway relayer dashboard/);
+  assert.match(serverRelay, /View all my relays/);
+  assert.match(serverRelay, /href="\/dashboard\?section=relayers"/);
   assert.doesNotMatch(serverRelay, /No relayers are shared/);
   allowRelayers = true;
   assert.equal(bandwidthReads.length, 0);

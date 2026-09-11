@@ -3,8 +3,8 @@ import { FatalError, sleep } from "workflow";
 import {
   escapeHtml,
   renderManagedHynEmail,
-  sendResendEmail,
 } from "@/lib/cloud-email";
+import { sendManagedEmail as sendResendEmail } from "@/lib/delivery-send";
 
 type HeartbeatCheck = {
   stop: boolean;
@@ -109,6 +109,7 @@ async function sendHeartbeatTransition(check: HeartbeatCheck) {
     preview: detail,
   });
   const delivery = await sendResendEmail({
+    delivery: { kind: "incident", ownerId: check.owner, nodeId: check.nodeId },
     apiKey: process.env.RESEND_API_KEY ?? "",
     from: process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>",
     to: preference.recipient,
@@ -116,6 +117,7 @@ async function sendHeartbeatTransition(check: HeartbeatCheck) {
     html,
     idempotencyKey: `heartbeat:${check.nodeId}:${check.state}:${check.heartbeatAt ?? "missing"}`,
   });
+  if (!delivery.ok && delivery.deferred) return { status: "deferred", reason: delivery.error };
   const { error: logError } = await supabase.from("notification_log").insert({
     node_id: check.nodeId,
     owner: check.owner,

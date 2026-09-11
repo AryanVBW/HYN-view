@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
-import { ResourceSwitcher } from "./resource-switcher";
+import { RelayerDirectory } from "./relayer-directory";
 import {
   Activity,
   ArrowUpRight,
@@ -188,13 +188,16 @@ export function RelayerDashboard({
       {data && !readings.length && !data.error ? (
         <div className="relayer-empty">
           <Radio size={26} aria-hidden />
-          <h3>{nodeId ? "No relayer linked to this server" : "No relayers linked yet"}</h3>
-          <p>{nodeId ? "A Super admin can choose this server's relayer in its server settings." : "Your administrator can link a Highway relayer to your account. Its status and earnings will appear here."}</p>
+          <h3>{nodeId ? "No relayer linked to this server" : "No relays assigned yet"}</h3>
+          <p>{nodeId ? "A Super admin can choose this server's relayer in its server settings." : "Your administrator can assign one or more relays to your account. Each will appear here with a View relay option; a server link is not required."}</p>
         </div>
       ) : null}
       {selected && data && readings.length > 0 && !reading ? <p role="status" className="relayer-notice">The selected relayer is no longer available in this view. Choose a relayer below.</p> : null}
-      {!nodeId && readings.length ? <div className="my-6">
-        <ResourceSwitcher label="Relayers" current={reading ? String(reading.assignment.relayer_id) : undefined} items={readings.map(r => {
+      {nodeId && pathname === "/dashboard" ? <div className="my-6 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card p-4">
+        <p className="text-sm text-muted-foreground">This is the server-linked relay. Your other assigned relays are available in your full list.</p>
+        <Link href="/dashboard?section=relayers" className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-2 text-sm text-primary focus-visible:outline-2 focus-visible:outline-primary">View all my relays<ArrowUpRight size={14} aria-hidden /></Link>
+      </div> : null}
+      {!nodeId && readings.length ? <RelayerDirectory readings={readings} current={reading?.assignment.relayer_id ?? null} fleet={ownerId === "all"} hrefFor={relayerId => {
           const next = new URLSearchParams(params.toString());
           if (pathname === "/dashboard") {
             next.set("section", "relayers");
@@ -203,11 +206,9 @@ export function RelayerDashboard({
             if (ownerId) next.set("owner", ownerId);
             else next.delete("owner");
           }
-          next.set("relayer",String(r.assignment.relayer_id));
-          return {id: String(r.assignment.relayer_id), name: r.relayer?.name ?? r.assignment.relayer_name,
-            detail: `#${r.assignment.relayer_id}`, href: `${pathname}?${next}`};
-        })} />
-      </div> : null}
+          next.set("relayer", String(relayerId));
+          return `${pathname}?${next}`;
+        }} /> : null}
       {reading ? (
         <RelayerPanel key={reading.assignment.id} reading={reading} now={now} />
       ) : null}

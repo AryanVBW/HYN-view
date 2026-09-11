@@ -5,7 +5,17 @@ const config = JSON.parse(raw);
 const base = config.NEXT_PUBLIC_SUPABASE_URL;
 const key = config.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 if (!base || !key) throw new Error("Supabase public configuration is missing");
+if (!config.SUPABASE_SERVICE_ROLE_KEY) throw new Error("Managed delivery controls require SUPABASE_SERVICE_ROLE_KEY on the deployment");
 const probes = [
+  ["hyn_admin_delivery_dashboard", {p_owner:null,p_kind:"all",p_status:"all",p_offset:0}, "not authenticated"],
+  ["hyn_admin_set_delivery_rules", {p_owner:null,p_rules:[]}, "not authenticated"],
+  ["hyn_admin_set_digest", {p_owner:null,p_enabled:false,p_at:"08:00",p_timezone:"UTC",p_inherit:false,p_confirm_all:false}, "not authenticated"],
+  ["hyn_admin_stop_delivery", {p_event:null}, "not authenticated"],
+  ["hyn_reserve_delivery", {p_key:"release-probe",p_kind:"daily",p_owner:null,p_node:null,p_recipient:"probe@example.invalid",p_subject:"No send",p_nodes:[]}, "permission denied"],
+  ["hyn_complete_delivery", {p_attempt:null,p_status:"failed",p_provider_id:null,p_error:null}, "permission denied"],
+  ["hyn_due_user_digests", {p_trigger_node:null}, "permission denied"],
+  ["hyn_user_digest_content", {p_owner:null}, "permission denied"],
+  ["hyn_defer_web_delivery", {p_job:null,p_reason:"No send"}, "permission denied"],
   // The dashboard needs the roles migration even before it loads a server.
   ["hyn_dashboard_accounts", {}, "not authenticated"],
   ["hyn_is_super_admin", {}, "not authenticated"],

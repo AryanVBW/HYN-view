@@ -69,6 +69,7 @@ export function ServerAccess({ clients, nodes, grants, shares = [], events, erro
         sharedCounts={Object.fromEntries(servers.map(node => [node.id, people.filter(client => canSee(client.id, node)).length]))}
         inherited={shares.some(share => share.viewer_id === current.id)} error={error} onLockChange={setLocked}
         relayerPanel={relayerPanels[current.id]} nodeRelayPanels={nodeRelayPanels}
+        relayerCount={relayerCounts[current.id] ?? 0}
       /> : <div className="flex min-h-64 items-center justify-center p-8 text-sm text-muted-foreground">Users and their assigned servers will appear here.</div>}
     </div>
     <details className="border-t border-border px-5 py-4 md:px-7">
@@ -82,10 +83,11 @@ export function ServerAccess({ clients, nodes, grants, shares = [], events, erro
   </section>;
 }
 
-function UserServerAssignments({ client, nodes, initial, grants, sharedCounts, inherited, error, onLockChange, relayerPanel, nodeRelayPanels }: {
+function UserServerAssignments({ client, nodes, initial, grants, sharedCounts, inherited, error, onLockChange, relayerPanel, nodeRelayPanels, relayerCount }: {
   client: AdminClient; nodes: AdminNode[]; initial: string[]; grants: ServerGrant[];
   sharedCounts: Record<string, number>; inherited: boolean; error?: string | null; onLockChange: (locked: boolean) => void;
   relayerPanel?: ReactNode; nodeRelayPanels: Record<string, ReactNode>;
+  relayerCount: number;
 }) {
   const router = useRouter();
   const [selected, setSelected] = useState(initial);
@@ -144,7 +146,15 @@ function UserServerAssignments({ client, nodes, initial, grants, sharedCounts, i
       <div><h3 className="font-sentient text-2xl">{personName(client)}</h3><p className="mt-1 text-sm text-muted-foreground">{selected.length} server{selected.length === 1 ? "" : "s"} selected</p></div>
       <span className={`rounded-full border px-3 py-1 text-xs ${dirty ? "border-primary/40 text-primary" : "border-border text-muted-foreground"}`}>{dirty ? "Unsaved changes" : "Saved assignments"}</span>
     </div>
-    <div className="mt-5 flex flex-wrap items-center gap-2">
+    <nav className="mt-5 grid gap-3 sm:grid-cols-2" aria-label={`Assignment relationships for ${personName(client)}`}>
+      <a href={`#server-assignments-${client.id}`} className="flex items-start gap-3 rounded-lg border border-border bg-secondary/20 p-4 focus-visible:outline-2 focus-visible:outline-primary">
+        <Server className="mt-0.5 size-5 shrink-0 text-primary" aria-hidden /><span><strong className="block text-sm">{saved.length} server{saved.length === 1 ? "" : "s"} with access</strong><span className="mt-1 block text-xs leading-5 text-muted-foreground">User can open these computers in Servers.</span></span>
+      </a>
+      {relayerPanel ? <a href={`#relay-assignments-${client.id}`} className="flex items-start gap-3 rounded-lg border border-primary/30 bg-primary/5 p-4 focus-visible:outline-2 focus-visible:outline-primary">
+        <ArrowUpRight className="mt-0.5 size-5 shrink-0 text-primary" aria-hidden /><span><strong className="block text-sm">{relayerCount} relay{relayerCount === 1 ? "" : "s"} assigned</strong><span className="mt-1 block text-xs leading-5 text-muted-foreground">User can select any of these in Relayers. Manage relays here.</span></span>
+      </a> : null}
+    </nav>
+    <div id={`server-assignments-${client.id}`} className="mt-5 flex scroll-mt-24 flex-wrap items-center gap-2">
       <label className="relative min-w-0 flex-1"><span className="sr-only">Find a server</span><Search className="absolute left-3 top-3 size-4 text-muted-foreground" aria-hidden /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Find a server" className={inputClass} /></label>
       <button type="button" aria-pressed={assignedOnly} onClick={() => setAssignedOnly(value => !value)} className={`rounded-lg border px-3 py-2.5 text-xs focus-visible:outline-2 focus-visible:outline-primary ${assignedOnly ? "border-primary text-primary" : "border-border text-muted-foreground"}`}>Assigned only</button>
     </div>
@@ -192,7 +202,7 @@ function UserServerAssignments({ client, nodes, initial, grants, sharedCounts, i
         Allow notifications for {node.name}
       </label>)}</div>
     </details> : null}
-    {relayerPanel ? <section className="mt-7 border-t border-border pt-6" aria-label={`Relayers assigned to ${personName(client)}`}>
+    {relayerPanel ? <section id={`relay-assignments-${client.id}`} className="mt-7 scroll-mt-24 border-t border-border pt-6" aria-label={`Relayers assigned to ${personName(client)}`}>
       <h4 className="font-sentient text-xl">User relayers</h4>
       <p className="mb-4 mt-2 text-sm text-muted-foreground">These assignments are separate from server access. The user can view all of them in Relayers, including relays without a server link.</p>
       {dirty ? <p className="mb-3 text-xs text-muted-foreground">Save or discard server changes before editing relayers.</p> : null}

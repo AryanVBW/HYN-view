@@ -181,6 +181,7 @@ export default async function AdminPage({
   const relayerPanels = Object.fromEntries(clients.filter(client => client.status === "active" && (client.role === "viewer" || client.role === "monitor")).map(client => [client.id,
     <RelayerManager key={client.id} ownerId={client.id} ownerName={client.full_name || client.email || "this user"}
       assignments={userRelayers.filter(assignment => assignment.owner === client.id)} showReadings={false}
+      links={serverRelaysResult?.error ? undefined : serverRelays} nodes={nodes}
       error={userRelayersResult?.error ? "Relayer assignments are unavailable. Finish the relayer setup, then refresh." : null} />,
   ]));
   const nodeRelayPanels = Object.fromEntries(nodes.filter(node => !node.revoked && !node.is_demo && node.owner_status === "active").map(node => {
@@ -335,6 +336,7 @@ export default async function AdminPage({
         <div>
           <p className="section-kicker">// notifications, all clients</p>
           <p className="mt-2 font-sentient text-2xl text-card-foreground">Delivery log</p>
+          <Link href="/admin/deliveries" className="mt-3 inline-flex min-h-10 items-center rounded-md border border-border px-4 py-2 text-sm hover:bg-muted">Open delivery dashboard</Link>
         </div>
         {canWrite && notifications.length > 0 ? <ClearDeliveryLogButton /> : null}
       </div>
@@ -477,6 +479,7 @@ export default async function AdminPage({
                 relayers={canWrite ? <RelayerManager key={selectedClient.id} ownerId={selectedClient.id}
                   ownerName={selectedClient.full_name || selectedClient.email || "this client"}
                   assignments={(assignmentResult?.data ?? []) as RelayerAssignment[]}
+                  links={nodeRelayerResult?.error ? undefined : nodeRelayerLinks} nodes={selectedNodes}
                   error={assignmentResult?.error ? "Apply the relayer database migration to enable assignments."
                     : selectedClient.status !== "active" ? "Restore this account before assigning a relayer." : null} /> : <RelayerDashboard key={selectedClient.id} ownerId={selectedClient.id} />}
               />

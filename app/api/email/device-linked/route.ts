@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { buildDeviceLinkedContent, renderHynEmailShell, sendResendEmail } from "@/lib/cloud-email";
+import { buildDeviceLinkedContent, renderHynEmailShell } from "@/lib/cloud-email";
+import { sendManagedEmail as sendResendEmail } from "@/lib/delivery-send";
 import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -40,6 +41,7 @@ export async function POST(request: Request) {
 
   const subject = `HYN device linked · ${claim.node_name ?? "new machine"}`;
   const delivery = await sendResendEmail({
+    delivery: { kind: "device", ownerId: auth.user.id, nodeId: body.nodeId },
     apiKey: resendKey,
     from,
     to: claim.recipient,
