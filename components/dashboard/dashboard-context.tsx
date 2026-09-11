@@ -15,6 +15,7 @@ export function DashboardContext({ role, accounts, owner, section = "servers", n
   if (nodeId) query.set("node", nodeId);
   const serverHref = `/dashboard?${query}`;
   query.set("section", "relayers");
+  if (nodeId) query.set("relayScope", "server");
   const relayerHref = `/dashboard?${query}`;
   const sectionQuery = section === "relayers" ? "&section=relayers" : "";
   const options = accounts.map(account => ({id: account.id, name: account.own ? "My devices" : account.name, href: `/dashboard?owner=${encodeURIComponent(account.id)}${sectionQuery}`}));
@@ -22,7 +23,8 @@ export function DashboardContext({ role, accounts, owner, section = "servers", n
   const computerOptions = computers?.map(computer => {
     const hostname = computer.hostname?.trim();
     const savedName = computer.name.trim();
-    const next = new URLSearchParams({owner: computer.owner, node: computer.id, section: "servers"});
+    const next = new URLSearchParams({owner: computer.owner, node: computer.id, section});
+    if (section === "relayers") next.set("relayScope", "server");
     return {
       id: computer.id,
       name: hostname || savedName || "Unnamed computer",
@@ -43,7 +45,7 @@ export function DashboardContext({ role, accounts, owner, section = "servers", n
         {access.canLink ? <Link href="/link" className="rounded-full border border-primary/50 px-4 py-2.5 text-primary hover:bg-primary/10">+ Link server</Link> : null}
       </div>
     </div>
-    {section === "servers" && computerOptions
+    {computerOptions
       ? computerOptions.length ? <ResourceSwitcher label="Computers" items={computerOptions} current={nodeId} /> : null
       : options.length > 1 ? <ResourceSwitcher label="Dashboards" items={options} current={owner} searchThreshold={6} /> : options[0] && !accounts[0]?.own ? <p className="text-sm text-muted-foreground">{options[0].name}</p> : null}
   </section>;

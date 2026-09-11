@@ -133,13 +133,13 @@ export default async function DashboardPage({
   const relayerOwner = owner === auth.user.id ? undefined : owner;
   // Preserve old links that selected a relayer before there were separate sections.
   const section = requestedSection === "relayers" || (!requestedSection && requestedRelayer) ? "relayers" : "servers";
-  const context = {role: profileResult.data.role, accounts, owner, section, nodeId: node?.id, canViewRelayers,
+  const context = {role: profileResult.data.role, accounts, owner, section, nodeId: section === "relayers" && requestedRelayer && relayScope !== "server" ? undefined : node?.id, canViewRelayers,
     computers: ((nodeRows ?? []) as Node[]).map(({id, name, hostname, owner: computerOwner}) => ({id, name, hostname, owner: computerOwner}))} as const;
 
   if (section === "relayers") {
     return <Shell email={auth.user.email} context={context}>
-      {relayScope === "server"
-        ? requestedNode && node && !node.is_demo
+      {relayScope === "server" || (!requestedRelayer && node && !node.is_demo)
+        ? node && !node.is_demo
           ? <RelayerDashboard key={node.id} nodeId={node.id} />
           : <p className="py-8 text-sm text-muted-foreground">Select a server to see its linked relayer.</p>
         : canViewRelayers ? <RelayerDashboard key={owner} ownerId={relayerOwner} /> : <p className="py-8 text-sm text-muted-foreground">No relayers are shared with this dashboard. Select another dashboard or return to Servers.</p>}
