@@ -133,13 +133,9 @@ function peakEver(speedtests: Speedtest[]): number {
   return best;
 }
 
-// The known top speed of this connection, per the ISP plan -- not derived
-// from anything the agent measures. A speedometer's scale is fixed to the
-// vehicle's actual top speed, not to "the fastest I've personally driven it";
-// using the recorded peak as the dial's ceiling meant a link that had never
-// been pushed to its real limit showed a needle sitting near full sweep on an
-// ordinary reading, which is backwards. Change this if your plan changes.
-const CONNECTION_PLAN_MBPS = 300;
+// Both internet dials share a fixed 1 Gbps (1,000 Mbps) display scale. This is
+// not an ISP-plan limit: measured values remain visible even above the scale.
+const SPEED_GAUGE_MAX_MBPS = 1000;
 
 function SectionCard({
   kicker,
@@ -406,10 +402,9 @@ export function SimpleDashboard({
       </SectionCard>
 
       {/* 2. How fast this link tested today, and how fast it can go at its
-          best -- drawn as a pair of speedometers scaled to this connection's
-          actual plan speed, so the dial's own top end means something fixed
-          (what this link is rated for) rather than drifting with whatever
-          the best test happened to record. The live receive/send rate used
+          best -- drawn as a pair of speedometers on the same fixed 1 Gbps
+          scale, rather than drifting with the best recorded test or pinning
+          readings above 300 Mbps to the endpoint. The live receive/send rate used
           to sit here too; dropped in favour of just these two recorded
           results, which is what "how fast is this connection" actually means
           to someone who runs a speed test to find out. */}
@@ -421,7 +416,7 @@ export function SimpleDashboard({
               icon={ArrowUpRight}
               valueMbps={high ? bytesPerSecToMbit(high.bps) : 0}
               valueLabel="MBPS TODAY"
-              peakMbps={CONNECTION_PLAN_MBPS}
+              peakMbps={SPEED_GAUGE_MAX_MBPS}
               markerMbps={peakMbit > 0 ? peakMbit : null}
               markerLabel="EVER"
               color="var(--chart-1)"
@@ -434,7 +429,7 @@ export function SimpleDashboard({
               icon={Trophy}
               valueMbps={peakMbit}
               valueLabel="MBPS EVER"
-              peakMbps={CONNECTION_PLAN_MBPS}
+              peakMbps={SPEED_GAUGE_MAX_MBPS}
               color="var(--chart-3)"
             />
           </div>
