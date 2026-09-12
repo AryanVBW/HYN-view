@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { dispatchScheduledEmails } from "@/lib/scheduled-email";
+import { pruneTelemetry } from "@/lib/telemetry-retention";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,6 +12,8 @@ export async function GET(request: Request) {
     return NextResponse.json({ message: "unauthorized" }, { status: 401 });
   }
   try {
+    try { await pruneTelemetry(); }
+    catch { console.error("[telemetry] scheduled retention failed; database cron will retry"); }
     const result = await dispatchScheduledEmails();
     return NextResponse.json({ status: "ok", ...result });
   } catch (error) {

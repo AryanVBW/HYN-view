@@ -37,7 +37,6 @@ import { createClient } from "@/lib/supabase/server";
 import type { AlertEvent, Metric, Node, Speedtest } from "@/lib/types";
 import { NODE_COLUMNS } from "@/lib/types";
 import {
-  formatRelative,
   compareVersions,
   toCpuSeries,
   toMemSeries,
@@ -48,6 +47,10 @@ import {
 import { heartbeatState } from "@/lib/heartbeat";
 import { commandBlockedReason, readAgentRelease } from "@/lib/node-command";
 import { readTransientSnapshot, snapshotMetric } from "@/lib/transient-snapshot";
+import { monitoringRevision, TELEMETRY_HOURS } from "@/lib/monitoring-state";
+import { mergeMonitoringHistory } from "@/lib/monitoring-data";
+import { MonitoringLog } from "@/components/dashboard/monitoring-log";
+import { ReadingAge } from "@/components/dashboard/reading-age";
 
 export const metadata: Metadata = {
   title: "Dashboard / HYN-view",
@@ -170,33 +173,37 @@ export default async function DashboardPage({
   const dashboardView =
     viewOverride === "simple" || viewOverride === "dash" ? viewOverride : dbDefaultView;
 
-  const localMode = node.telemetry_mode === "local";
+  const localMode = node.config?.cloud_storage === "local"
+    || (node.telemetry_mode === "local" && node.config?.cloud_storage !== "cloud");
   const transient = localMode && node.status === "active" ? readTransientSnapshot(node.id) : null;
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const since = new Date(Date.now() - TELEMETRY_HOURS * 60 * 60 * 1000).toISOString();
 
-  const [metricsRes, speedRes, alertRes] = await Promise.all([
+  const [metricsRes, historyRes, speedRes, alertRes] = await Promise.all([
     localMode ? Promise.resolve({ data: [] }) : supabase
       .from("metrics")
       .select("*")
       .eq("node_id", node.id)
       .gte("ts", since)
-      .order("ts", { ascending: true })
-      .limit(600),
+      .order("ts", { ascending: false })
+      .limit(1),
+    localMode ? Promise.resolve({data: [], error: null}) : supabase.rpc("hyn_metric_history", {p_node: node.id}),
     localMode ? Promise.resolve({ data: [] }) : supabase
       .from("speedtests")
       .select("*")
       .eq("node_id", node.id)
+      .gte("ts", since)
       .order("ts", { ascending: false })
       .limit(14),
     localMode ? Promise.resolve({ data: [] }) : supabase
       .from("alert_events")
       .select("*")
       .eq("node_id", node.id)
+      .gte("ts", since)
       .order("ts", { ascending: false })
       .limit(8),
   ]);
 
-  const metrics = (metricsRes.data ?? []) as Metric[];
+  const metrics = mergeMonitoringHistory((historyRes.data ?? []) as Metric[], (metricsRes.data?.[0] ?? null) as Metric | null);
   if (transient) metrics.push(snapshotMetric(node.id, transient));
   const speedtests = (speedRes.data ?? []) as Speedtest[];
   const alerts = (alertRes.data ?? []) as AlertEvent[];
@@ -206,13 +213,19 @@ export default async function DashboardPage({
       <Shell email={auth.user.email} nodes={nodes} current={node} context={context}>
         {localMode ? (
           <div className="space-y-6">
-            <LiveRefresh />
-            <p className="font-mono text-sm text-muted-foreground">History stays on {node.name}. Request a reading to view it for five minutes. A sleeping or restarting portal may need another request.</p>
+            <p className="font-mono text-sm text-muted-foreground">Local-only monitoring is enabled for {node.name}. A Super admin can enable cloud history for automatic dashboard readings. You can also refresh a reading below.</p>
             <AgentUpdateControl compact canSync={access.canSync} nodeId={node.id} nodeName={node.name} currentVersion={node.agent_version}
               release={{ latest: null, available: false, checkedAt: null }}
               automatic={node.config?.auto_update === "install"} blocked={commandBlockedReason(node)} />
           </div>
-        ) : <AwaitingFirstPushState nodeName={node.name} />}
+        ) : <div className="space-y-6">
+          <HeartbeatIndicator nodeId={node.id} heartbeatAt={node.last_heartbeat_at ?? node.last_config_pull_at ?? node.last_seen_at} />
+          {("error" in metricsRes && metricsRes.error) || historyRes.error
+            ? <p className="font-mono text-sm text-muted-foreground">Readings are temporarily unavailable. This page checks again automatically.</p>
+            : <><AwaitingFirstPushState nodeName={node.name} /><p className="font-mono text-xs text-muted-foreground">Cloud history updates automatically after the agent checks in. CLI 1.10 or later applies the current monitoring settings.</p></>}
+          <AgentUpdateControl compact canSync={access.canSync} nodeId={node.id} nodeName={node.name} currentVersion={node.agent_version}
+            release={{latest: null, available: false, checkedAt: null}} automatic={node.config?.auto_update === "install"} blocked={commandBlockedReason(node)} />
+        </div>}
         {dashboardView === "dash" && !node.is_demo ? <div className="mt-6"><ServerBandwidth nodeId={node.id} /></div> : null}
       </Shell>
     );
@@ -248,8 +261,7 @@ export default async function DashboardPage({
               <span className="text-card-foreground">
                 hyn {node.agent_version ?? "version unknown"}
               </span>{" "}
-              · {localMode ? "temporary reading" : "last push"} {formatRelative(localMode ? latest.ts : node.last_seen_at)} · {metrics.length} samples in
-              the last 24h
+              · {localMode ? "requested reading" : "latest reading"} <ReadingAge sampleAt={latest.ts} intervalMinutes={node.config?.cloud_push_min} /> · {localMode ? "local history" : "48-hour history · charts sampled every 5 minutes"}
             </p>
           </div>
           <div className="flex flex-col items-start gap-3 md:items-end">
@@ -266,7 +278,7 @@ export default async function DashboardPage({
                 suspended
               </span>
             ) : (
-              <HeartbeatIndicator heartbeatAt={durableHeartbeat} quietAfterSeconds={quietAfterSeconds} />
+              <HeartbeatIndicator nodeId={node.id} heartbeatAt={durableHeartbeat} quietAfterSeconds={quietAfterSeconds} />
             )}
             {node.is_demo && access.canWrite && owner === auth.user.id ? <DemoDataButton mode="clear" /> : null}
           </div>
@@ -296,9 +308,9 @@ export default async function DashboardPage({
         {node.status === "active" && heartbeat.key === "quiet" && !node.is_demo ? (
           <p className="border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs leading-6 text-destructive">
             {heartbeatCapable
-              ? "This machine missed three one-minute heartbeat intervals. "
+              ? "No heartbeat has arrived for three minutes. "
               : `This machine missed three configured telemetry intervals (${configuredInterval} minutes each). `}
-            HYN-view retries every minute; the charts show the last received values. A queued
+            HYN-view retries automatically; the charts show the last received values. A queued
             synchronization or update will run as soon as the machine checks in. On the server,
             run <code>sudo hyn doctor --fix</code>, which reinstalls the timers and sends a
             reading immediately.
@@ -348,6 +360,7 @@ export default async function DashboardPage({
               <PressurePanel latest={latest} />
               <HealthPanel latest={latest} />
               <EventLog events={alerts} />
+              <MonitoringLog payload={latest.payload} />
             </section>
 
             <section className="space-y-6">
@@ -430,7 +443,7 @@ function Shell({
 }) {
   return (
     <div className="min-h-screen bg-background">
-      {email ? <LiveRefresh /> : null}
+      {email ? <LiveRefresh nodeId={current?.id} revision={current ? monitoringRevision(current) : undefined} /> : null}
       <ParticleField blur="subtle" />
       <DashboardMagicRings />
       <main className="container pt-32 pb-10 md:pt-44">

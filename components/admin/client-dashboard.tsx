@@ -138,8 +138,8 @@ export function AdminClientDashboard({
           ) : (
             <div className="terminal-panel rounded-xl p-8 font-mono text-xs leading-6 text-muted-foreground">
               {current.telemetry_mode === "local"
-                ? "History stays on this machine. Use Sync selected to view a current reading for five minutes."
-                : "No telemetry has arrived for this machine in the last 24 hours."}
+                ? "Local-only monitoring is enabled. Enable cloud history in server settings for automatic readings."
+                : "Waiting for a reading. Cloud monitoring keeps the latest 48 hours and updates after each server check-in."}
             </div>
           )}
         </>

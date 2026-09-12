@@ -31,6 +31,7 @@ import { writeViewMode } from "@/components/dashboard-view-toggle";
 import { SpeedGauge } from "@/components/dashboard/speed-gauge";
 import { ThermalGauge, thermalColor } from "@/components/dashboard/thermal-gauge";
 import { RelayerDashboard } from "@/components/dashboard/relayer-dashboard";
+import { ReadingAge } from "@/components/dashboard/reading-age";
 import type { Metric, Speedtest } from "@/lib/types";
 
 // The simple dashboard: everything the advanced view shows, minus everything a
@@ -311,7 +312,7 @@ function ServiceDetailButton({ services }: { services: ReturnType<typeof service
 // Only the fields this view actually reads, so it accepts both the
 // client-facing Node and the admin's AdminNode without either owing the other
 // a shape neither fully has.
-type SimpleNode = { name: string; last_seen_at: string | null };
+type SimpleNode = { name: string; last_seen_at: string | null; config?: Record<string, unknown> | null };
 
 export function SimpleDashboard({
   node,
@@ -549,7 +550,7 @@ export function SimpleDashboard({
           </div>
         </div>
         <p className="mt-4 font-mono text-xs text-muted-foreground">
-          {node.name} · last update {formatRelative(node.last_seen_at)}
+          {node.name} · latest reading <ReadingAge sampleAt={latest.ts} intervalMinutes={node.config?.cloud_push_min} />
         </p>
       </SectionCard>
     </div>

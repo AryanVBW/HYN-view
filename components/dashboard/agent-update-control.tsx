@@ -47,7 +47,7 @@ export function AgentUpdateControl({
           <p className="mt-3 font-mono text-xs leading-6 text-muted-foreground">
             Sync now requests a complete temperature, network, speed, process, service,
             hardware and health reading on the next check-in (normally within five minutes).
-            With local history enabled, this reading is available for five minutes.
+            Cloud monitoring retains readings for 48 hours, with a longer backup on the server.
             {canWrite ? "Update CLI reinstalls the latest package, reapplies setup, restarts HYN timers, verifies them, and sends a new reading." : "A Super admin manages CLI updates and server settings."}
           </p>
           <p className="mt-2 font-mono text-[0.65rem] leading-5 text-muted-foreground">

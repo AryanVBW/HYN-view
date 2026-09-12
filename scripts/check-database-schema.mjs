@@ -7,6 +7,9 @@ const key = config.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 if (!base || !key) throw new Error("Supabase public configuration is missing");
 if (!config.SUPABASE_SERVICE_ROLE_KEY) throw new Error("Managed delivery controls require SUPABASE_SERVICE_ROLE_KEY on the deployment");
 const probes = [
+  ["hyn_metric_history", {p_node:null}, "not authenticated"],
+  ["hyn_fleet_metric_history", {}, "not authenticated"],
+  ["hyn_prune_telemetry", {p_batch:1}, "permission denied"],
   ["hyn_admin_delivery_dashboard", {p_owner:null,p_kind:"all",p_status:"all",p_offset:0}, "not authenticated"],
   ["hyn_admin_set_delivery_rules", {p_owner:null,p_rules:[]}, "not authenticated"],
   ["hyn_admin_set_digest", {p_owner:null,p_enabled:false,p_at:"08:00",p_timezone:"UTC",p_inherit:false,p_confirm_all:false}, "not authenticated"],

@@ -50,6 +50,6 @@ test("unattended schedules survive edits while unsafe old values are dropped", (
     speedtest_per_day: "99", alert_interval_min: "0", report_enabled: "yes",
     cloud_storage: "cloud",
   }, { report_at: "09:30" }), {
-    keep_awake: "on", record_interval_min: "5", alert_enabled: "off", report_at: "09:30",
+    keep_awake: "on", record_interval_min: "5", alert_enabled: "off", cloud_storage: "cloud", report_at: "09:30",
   });
 });

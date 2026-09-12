@@ -44,6 +44,7 @@ mock.module("../lib/supabase/server.ts", {namedExports: {
   createClient: async () => ({
     auth: {getUser: async () => ({data: {user: {id: "account", email: "test@example.test"}}})},
     rpc: async (name: string, args: unknown) => {
+      if (name === "hyn_metric_history") return {data: haveMetrics ? [{...metric, payload: null}] : [], error: null};
       if (name === "hyn_dashboard_accounts") return {data: [
         {id: "account", name: "My account", own: true, relayers: allowRelayers},
         ...(server.owner === "account" ? [] : [{id: server.owner, name: "Shared dashboard", own: false, relayers: false}]),
@@ -175,6 +176,22 @@ test("Advanced usage remains available while waiting for the first telemetry rea
   assert.match(html, /has not reported yet/);
   assert.match(html, /3\.00 KiB/);
   haveMetrics = true;
+});
+
+test("managed cloud policy uses durable history while an old agent still reports local mode", async () => {
+  const originalConfig = server.config;
+  const originalMode = server.telemetry_mode;
+  try {
+    mode = "dash";
+    server.telemetry_mode = "local";
+    server.config = {cloud_storage: "cloud"};
+    const html = await render();
+    assert.match(html, /48-hour history/);
+    assert.doesNotMatch(html, /History stays on|Request a reading to view it for five minutes|local-only mode/i);
+  } finally {
+    server.config = originalConfig;
+    server.telemetry_mode = originalMode;
+  }
 });
 
 test("the Highway summary shows the owner's assigned relay, four of five checks and heartbeat age", async () => {

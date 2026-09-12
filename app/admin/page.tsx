@@ -4,6 +4,7 @@ import { permissions, roleLabels, roleDescriptions, normalizeRole } from "@/lib/
 import { DashboardAccess, type DashboardShare } from "@/components/admin/dashboard-access";
 import { RelayerDashboard } from "@/components/dashboard/relayer-dashboard";
 import { readTransientSnapshot, snapshotMetric } from "@/lib/transient-snapshot";
+import { mergeMonitoringHistory } from "@/lib/monitoring-data";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -124,7 +125,6 @@ export default async function AdminPage({
   // freshness calculation and query uses the same instant.
   // eslint-disable-next-line react-hooks/purity
   const renderedAt = Date.now();
-  const since = new Date(renderedAt - 24 * 60 * 60 * 1000).toISOString();
   const [overviewRes, nodesRes, clientsRes, notifRes, auditRes, templatesRes, fleetMetricsRes] = await Promise.all([
     supabase.rpc("hyn_admin_overview"),
     supabase.rpc("hyn_admin_nodes"),
@@ -132,13 +132,9 @@ export default async function AdminPage({
     supabase.rpc("hyn_admin_notifications", { p_limit: 100 }),
     supabase.rpc("hyn_admin_audit", { p_limit: 50 }),
     supabase.rpc("hyn_admin_templates"),
-    supabase
-      .from("metrics")
-      .select("node_id,ts,cpu_pct,net_rx_bps,net_tx_bps,nodes!inner(is_demo)")
-      .eq("nodes.is_demo", false)
-      .gte("ts", since)
-      .order("ts", { ascending: true })
-      .limit(5000),
+    // Aggregate in the database: a row cap over raw samples drops the newest
+    // readings as soon as a modest fleet starts reporting every minute.
+    supabase.rpc("hyn_fleet_metric_history"),
   ]);
 
   const rpcError =
@@ -251,9 +247,10 @@ export default async function AdminPage({
   let selectedMetrics: Metric[] = [];
   if (selectedNode) {
     const { data: storageNode, error: storageError } = await supabase.from("nodes")
-      .select("telemetry_mode,status,revoked").eq("id", selectedNode.id).maybeSingle();
+      .select("telemetry_mode,status,revoked,config").eq("id", selectedNode.id).maybeSingle();
     if (storageError) throw new Error(storageError.message);
-    const localMode = storageNode?.telemetry_mode === "local";
+    const localMode = storageNode?.config?.cloud_storage === "local"
+      || (storageNode?.telemetry_mode === "local" && storageNode?.config?.cloud_storage !== "cloud");
     selectedNode.telemetry_mode = localMode ? "local" : "cloud";
     const transient = localMode && storageNode.status === "active" && !storageNode.revoked
       && selectedNode.owner_status === "active" ? readTransientSnapshot(selectedNode.id) : null;
@@ -261,19 +258,22 @@ export default async function AdminPage({
       .from("metrics")
       .select("*")
       .eq("node_id", selectedNode.id)
-      .gte("ts", since)
-      .order("ts", { ascending: true })
-      .limit(600);
-    if (error) {
+      .gte("ts", new Date(renderedAt - 48 * 60 * 60_000).toISOString())
+      .order("ts", { ascending: false })
+      .limit(1);
+    const history = localMode ? {data: [], error: null} : await supabase.rpc("hyn_metric_history", {p_node: selectedNode.id});
+    const metricError = error ?? history.error;
+    if (metricError) {
       return (
         <Shell email={auth.user.email}>
           <div className="terminal-panel p-8 font-mono text-sm text-destructive">
-            Could not load the selected client dashboard: {error.message}
+            Could not load the selected client dashboard: {metricError.message}
           </div>
         </Shell>
       );
     }
-    selectedMetrics = transient ? [snapshotMetric(selectedNode.id, transient)] : (data ?? []) as Metric[];
+    selectedMetrics = transient ? [snapshotMetric(selectedNode.id, transient)]
+      : mergeMonitoringHistory((history.data ?? []) as Metric[], (data?.[0] ?? null) as Metric | null);
   }
 
   const allowedTabs: AdminTabId[] = ["overview", "clients", "client", "fleet", "templates", "notifications", "audit", "access", "bandwidth", "relayers"];

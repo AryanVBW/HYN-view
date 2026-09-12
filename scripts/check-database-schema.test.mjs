@@ -33,7 +33,7 @@ async function runGate(reply) {
 
 const denied = () => ({ status: 401, body: { code: "42501", message: "permission denied" } });
 
-for (const missing of ["hyn_dashboard_accounts", "hyn_is_super_admin", "hyn_can_link", "hyn_admin_delivery_dashboard", "hyn_reserve_delivery", "hyn_due_user_digests"]) {
+for (const missing of ["hyn_dashboard_accounts", "hyn_is_super_admin", "hyn_can_link", "hyn_admin_delivery_dashboard", "hyn_reserve_delivery", "hyn_due_user_digests", "hyn_metric_history", "hyn_fleet_metric_history", "hyn_prune_telemetry"]) {
   test(`release fails when ${missing} is missing even if server access functions exist`, async () => {
     const result = await runGate(name => name === missing
       ? { status: 404, body: { code: "PGRST202", message: "function missing" } }
