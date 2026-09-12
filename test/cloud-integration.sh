@@ -368,7 +368,26 @@ assert any(log[\"code\"] == \"service_failed\" and log[\"count\"] == 1 for log i
 assert \"peer handshake timeout\" not in json.dumps(logs), logs
 assert body[\"p_payload\"][\"platform\"][\"metrics_scope\"] == \"procfs\"
 from datetime import datetime
-assert datetime.fromisoformat(body[\"p_payload\"][\"ts\"]).tzinfo is not None
+# Python 3.10 (Ubuntu 22.04) cannot use fromisoformat for Bash %z offsets
+# such as +0000. Parse the actual wire format, retaining strict date, offset,
+# and six-digit microsecond validation on every supported Python version.
+wire_ts = body[\"p_payload\"][\"ts\"]
+wire_format = \"%Y-%m-%dT%H:%M:%S.%f%z\"
+parsed_ts = datetime.strptime(wire_ts, wire_format)
+assert parsed_ts.tzinfo is not None, wire_ts
+assert parsed_ts.strftime(wire_format) == wire_ts, wire_ts
+"'
+
+truthy 'wire timestamps retain UTC offsets and microseconds across Python versions' 'python3 -c "
+from datetime import datetime, timezone
+wire_format = \"%Y-%m-%dT%H:%M:%S.%f%z\"
+expected = datetime(2026, 9, 12, 18, 13, 29, 123456, tzinfo=timezone.utc)
+for value in (\"2026-09-12T18:13:29.123456+0000\",
+              \"2026-09-12T23:43:29.123456+0530\",
+              \"2026-09-12T11:13:29.123456-0700\"):
+    parsed = datetime.strptime(value, wire_format)
+    assert parsed == expected, (value, parsed)
+    assert parsed.strftime(wire_format) == value, (value, parsed)
 "'
 
 # The Highway section of the portal is only as good as what the agent sends, so

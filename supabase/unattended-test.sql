@@ -13,10 +13,12 @@ begin
     raise exception 'unsafe unattended value accepted';
   end if;
   raise notice 'PASS  invalid unattended settings are refused';
-  if public._hyn_portal_config_valid('{"keep_awake":"on","cloud_storage":"cloud"}')
+  -- Storage is now a managed local/cloud choice. An unknown storage mode and
+  -- an arbitrary destination must still fail in both legacy and current schemas.
+  if public._hyn_portal_config_valid('{"keep_awake":"on","cloud_storage":"offsite"}')
      or public._hyn_portal_config_valid('{"keep_awake":"on","cloud_api_url":"https://example.com"}') then
-    raise exception 'unattended configuration crossed the local permission boundary';
+    raise exception 'unattended configuration accepted an unknown storage mode or endpoint';
   end if;
-  raise notice 'PASS  unattended settings cannot change local data permissions or endpoints';
+  raise notice 'PASS  unattended settings reject unknown storage modes and custom endpoints';
 end $$;
 rollback;
