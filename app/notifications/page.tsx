@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { ArrowLeft, RadioTower } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 import { LiveRefresh } from "@/components/live-refresh";
+import { DashboardNavigation } from "@/components/dashboard/dashboard-navigation";
 import { ServerNotifications } from "@/components/dashboard/server-notifications";
 import { createClient } from "@/lib/supabase/server";
 import type { ServerNotification } from "@/lib/server-notifications";
@@ -16,17 +17,12 @@ export default async function NotificationsPage() {
   const { data, error } = await supabase.rpc("hyn_server_notifications", { p_limit: 50 });
   return <main className="container w-full max-w-6xl space-y-6 px-4 pb-16 pt-36 sm:px-6">
     <LiveRefresh />
-    <div className="flex flex-wrap items-center justify-between gap-3">
-      <Link href="/dashboard" className="inline-flex items-center gap-2 rounded-full border border-border bg-background px-3 py-1.5 font-mono text-xs uppercase text-muted-foreground transition-colors hover:border-foreground/40 hover:text-foreground">
+    <div className="flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+      <DashboardNavigation section="notifications" />
+      <Link href="/dashboard" className="inline-flex self-start items-center gap-2 rounded-full border border-border bg-background px-3 py-1.5 font-mono text-xs uppercase text-muted-foreground transition-colors hover:border-foreground/40 hover:text-foreground sm:self-auto">
         <ArrowLeft className="size-3.5" aria-hidden />
         Back to dashboard
       </Link>
-      <div className="inline-flex items-center rounded-full border border-border p-0.5 text-xs font-mono uppercase">
-        <Link href="/dashboard?section=relayers" className="rounded-full px-3 py-1.5 transition-colors text-foreground/70 hover:bg-accent/20 hover:text-foreground">
-          <span className="inline-flex items-center gap-2"><RadioTower className="size-3.5" aria-hidden />Server relay</span>
-        </Link>
-        <span className="rounded-full bg-primary px-3 py-1.5 text-primary-foreground shadow-sm">Notifications</span>
-      </div>
     </div>
     <div className="space-y-3">
       <h1 className="font-sentient text-4xl">Server notifications</h1>

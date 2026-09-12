@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { permissions, type DashboardAccount } from "@/lib/permissions";
 import type { Node } from "@/lib/types";
+import { DashboardNavigation } from "./dashboard-navigation";
 import { ResourceSwitcher } from "./resource-switcher";
 
 export function DashboardContext({ role, accounts, owner, section = "servers", nodeId, canViewRelayers = true, computers }: {
@@ -14,7 +15,6 @@ export function DashboardContext({ role, accounts, owner, section = "servers", n
   const query = new URLSearchParams({ owner });
   if (nodeId) query.set("node", nodeId);
   const serverHref = `/dashboard?${query}`;
-  const relayerHref = "/dashboard?section=relayers";
   const sectionQuery = section === "relayers" ? "&section=relayers" : "";
   const options = accounts.map(account => ({id: account.id, name: account.own ? "My devices" : account.name, href: `/dashboard?owner=${encodeURIComponent(account.id)}${sectionQuery}`}));
   if (access.canAdmin) options.unshift({id: "all",name: "All servers",href: `/dashboard?owner=all${sectionQuery}`});
@@ -31,12 +31,8 @@ export function DashboardContext({ role, accounts, owner, section = "servers", n
     };
   });
   return <section className="mb-6 min-w-0 space-y-6 border-b border-border pb-6" aria-label="Dashboard access">
-    <div className="flex flex-wrap items-center justify-between gap-4 text-sm">
-      <nav aria-label="Dashboard sections" className="flex items-center gap-5">
-        <Link href={serverHref} aria-current={section === "servers" ? "page" : undefined} className={section === "servers" ? "font-medium text-foreground" : "text-muted-foreground hover:text-foreground"}>Servers</Link>
-        {canViewRelayers ? <Link href={relayerHref} aria-current={section === "relayers" ? "page" : undefined} className={section === "relayers" ? "font-medium text-foreground" : "text-muted-foreground hover:text-foreground"}>Relayers</Link> : null}
-        <Link href="/notifications" className="text-muted-foreground hover:text-foreground">Notifications</Link>
-      </nav>
+    <div className="flex flex-col gap-4 text-sm sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+      <DashboardNavigation section={section} serverHref={serverHref} canViewRelayers={canViewRelayers} />
       <div className="flex flex-wrap items-center gap-4">
         {access.canAdmin ? <Link href="/admin" className="text-muted-foreground hover:text-foreground">Admin dashboard</Link> : null}
         {access.canLink ? <Link href="/link" className="rounded-full border border-primary/50 px-4 py-2.5 text-primary hover:bg-primary/10">+ Link server</Link> : null}
