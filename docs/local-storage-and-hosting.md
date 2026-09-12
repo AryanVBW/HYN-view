@@ -1,5 +1,9 @@
 # Local history on Supabase Free + Heroku student credits
 
+For the current **1.12.0 candidate**, exact local bandwidth accounting and its
+remaining Ubuntu release gates, see [CLI release verification](cli-release-readiness.md).
+The dated deployment observations below are historical, not current release evidence.
+
 The website runs on **Heroku**, funded by the GitHub Student Developer Pack.
 Supabase remains the authentication and control database. This is the default
 storage design from CLI 1.10.0 onward; older README descriptions of cloud charts,
