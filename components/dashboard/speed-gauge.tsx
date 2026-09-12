@@ -200,7 +200,7 @@ export function SpeedGauge({
                   fill="var(--card-foreground)"
                   filter={`url(#${glowId})`}
                 >
-                  {labelValue >= 1000 ? `${(labelValue / 1000).toFixed(1)}k` : labelValue}
+                  {labelValue >= 1000 ? `${labelValue / 1000} Gbps` : labelValue}
                 </text>
               ) : null}
             </g>

@@ -43,7 +43,7 @@ for (const mbps of [0, 500, 1000, 1250]) {
       for (const gauge of gauges) {
         assert.ok(gauge.getAttribute("aria-label")?.includes(`${mbps.toFixed(1)} of 1000 Mbps`));
         const labels = Array.from(gauge.querySelectorAll("g > text"), text => text.textContent);
-        assert.deepEqual(labels, ["0", "100", "200", "300", "400", "500", "600", "700", "800", "900", "1.0k"]);
+        assert.deepEqual(labels, ["0", "100", "200", "300", "400", "500", "600", "700", "800", "900", "1 Gbps"]);
         assert.equal(gauge.querySelector('text[y="150"]')?.textContent, mbps < 10 ? mbps.toFixed(1) : String(mbps));
       }
       if (mbps === 500) {
