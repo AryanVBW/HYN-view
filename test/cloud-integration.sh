@@ -74,7 +74,11 @@ for m in core ui net collect highway speedtest notify alerts report update panel
   # shellcheck source=/dev/null
   source "$HYN_LIB/$m.sh" || { printf 'cannot source %s\n' "$m" >&2; exit 1; }
 done
+source "$ROOT/test/flock-fixture.sh"
 cfg_load
+# The dynamic source loop above supplies these associative collector maps.
+# Repeat their types so static analysis does not mistake IP keys for arithmetic.
+declare -A LAT_MS LAT_LOSS LAT_JIT
 
 # Collection is covered by test/selfcheck.sh against a synthetic /proc. Here the
 # subject is the transport, so stub sampling out and set the few globals the
@@ -107,6 +111,9 @@ update_apply() {
   UPD_AVAILABLE=0
   return 0
 }
+# Keep the fixture collectors in this boundary suite. The separate release
+# reliability suite verifies dispatch through the newly installed executable.
+cloud_verify_installed_update() { cloud_finish_update "$CLOUD_COMMAND_TARGET" "$CLOUD_COMMAND_ID"; }
 
 HOSTNAME_S=web-01 DISTRO='Ubuntu 24.04 LTS' KERNEL='6.8.0-31-generic'
 UPTIME_S=123456 LOAD1=0.42 LOAD5=0.31 LOAD15=0.28
@@ -155,7 +162,7 @@ NET_RX[nebula1]=88000000 NET_TX[nebula1]=44000000
 NET_RDROP_R[nebula1]=1 NET_TDROP_R[nebula1]=0
 TUNE[cc]=bbr
 
-# This suite preserves the explicitly selected legacy archive contract.
+# This suite exercises the durable cloud-primary archive contract.
 config_set cloud_storage cloud
 printf 'cloud integration\n'
 
@@ -352,6 +359,16 @@ top = body[\"p_payload\"][\"processes\"][\"top\"][0]
 assert top[\"name\"] == \"queue-worker\", top
 assert \"user\" not in top, top
 assert \"private-operator\" not in json.dumps(body[\"p_payload\"]), body[\"p_payload\"][\"processes\"]
+logs = body[\"p_payload\"][\"monitoring_logs\"]
+assert 1 <= len(logs) <= 12, logs
+assert all(set(log) == {\"ts\", \"level\", \"code\", \"count\"} for log in logs), logs
+assert all(log[\"level\"] in {\"info\", \"warn\", \"crit\"} for log in logs), logs
+assert any(log[\"code\"] == \"agent_restarts\" and log[\"count\"] == 4 for log in logs), logs
+assert any(log[\"code\"] == \"service_failed\" and log[\"count\"] == 1 for log in logs), logs
+assert \"peer handshake timeout\" not in json.dumps(logs), logs
+assert body[\"p_payload\"][\"platform\"][\"metrics_scope\"] == \"procfs\"
+from datetime import datetime
+assert datetime.fromisoformat(body[\"p_payload\"][\"ts\"]).tzinfo is not None
 "'
 
 # The Highway section of the portal is only as good as what the agent sends, so

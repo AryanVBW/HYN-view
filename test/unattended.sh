@@ -129,5 +129,67 @@ HYN_IN_AGENT=1
 setup_self_heal
 check 'running timers are re-enabled for the next boot' '[[ $(<"$WORK/boot-repair") == *"enable hyn-record.timer"* ]]'
 check 'no unrelated services are stopped, masked or rebooted' '! grep -Eq "(^| )(mask|reboot|poweroff)|hway|nebula" "$WORK/systemctl" "$WORK/boot-repair"'
+
+# Missing stamps need a startup grace period, then the same recovery as a
+# stalled loop. These calls only log to this test directory.
+source "$HYN_LIB/agent.sh"
+HYN_IN_AGENT=0
+CFG[heartbeat_sec]=60
+stamp=$(agent_stamp)
+systemctl() {
+  printf '%s\n' "$*" >>"$WORK/agent-repair"
+  case $1 in
+    is-active) printf 'active\n' ;;
+    restart) return "${AGENT_RESTART_FAIL:-0}" ;;
+  esac
+  return 0
+}
+check 'a new agent without a stamp gets time for its first tick' 'setup_heal_agent && [[ -r $stamp.missing-since ]] && ! grep -q "^restart " "$WORK/agent-repair"'
+printf '%s\n' "$((EPOCHSECONDS - 181))" >"$stamp.missing-since"
+AGENT_RESTART_FAIL=1
+check 'failed recovery preserves the expired grace period for retry' 'setup_heal_agent && [[ -r $stamp.missing-since ]]'
+AGENT_RESTART_FAIL=0
+check 'an active agent that never produces a stamp is restarted' 'setup_heal_agent 2>/dev/null && [[ ! -e $stamp.missing-since ]] && grep -q "^restart hyn-agent.service$" "$WORK/agent-repair"'
+printf '%s\n' "$EPOCHSECONDS" >"$stamp.missing-since"
+printf '%s\n' "$EPOCHSECONDS" >"$stamp"
+: >"$WORK/agent-repair"
+check 'a fresh tick clears missing-stamp tracking without a restart' 'setup_heal_agent && [[ ! -e $stamp.missing-since ]] && ! grep -q "^restart " "$WORK/agent-repair"'
+printf '%s\n' "$((EPOCHSECONDS + 3600))" >"$stamp"
+check 'a future stamp cannot hide a wedge after a clock correction' 'agent_stamp_stale'
+CFG[heartbeat_sec]=99999
+printf '%s\n' "$((EPOCHSECONDS - 12000))" >"$stamp"
+check 'the watchdog uses the same maximum interval as the loop' 'agent_stamp_stale'
+CFG[heartbeat_sec]=60
+printf '%012d\n' "$EPOCHSECONDS" >"$stamp"
+check 'a padded timestamp is decimal instead of invalid shell octal' '! agent_stamp_stale'
+printf '9999999999999999999999999999999999999\n' >"$stamp"
+check 'an oversized corrupted stamp cannot overflow watchdog arithmetic' 'agent_stamp_stale'
+
+# An update may already have replaced core.sh by the time the loaded old
+# process enters its loop. It must compare disk against its in-memory version.
+mkdir -p "$WORK/new-package/lib"
+printf 'HYN_VERSION="99.0.0"\n' >"$WORK/new-package/lib/core.sh"
+(
+  HYN_ROOT="$WORK/new-package"
+  agent_beat() { :; }
+  agent_maintain() { :; }
+  _agent_sleep() { touch "$WORK/stale-agent-slept"; AGENT_STOP=1; }
+  agent_run >"$WORK/version-change"
+)
+check 'an update during startup replaces the old in-memory agent' '[[ ! -e $WORK/stale-agent-slept ]] && grep -q "99.0.0 installed" "$WORK/version-change"'
+
+# Simulate NTP correcting the clock backwards without touching the host clock
+# or waiting real intervals. Both retries and maintenance must become due.
+(
+  unset EPOCHSECONDS
+  EPOCHSECONDS=5000
+  sleeps=0
+  agent_beat() { printf '%s:%s\n' "$EPOCHSECONDS" "$AGENT_RETRY_AT" >>"$WORK/clock-beats"; }
+  agent_maintain() { printf '%s\n' "$EPOCHSECONDS" >>"$WORK/clock-maintenance"; AGENT_RETRY_AT=$((EPOCHSECONDS + 600)); }
+  _agent_sleep() { sleeps=$((sleeps + 1)); EPOCHSECONDS=1000; ((sleeps >= 2)) && AGENT_STOP=1; return 0; }
+  agent_run >/dev/null
+)
+check 'clock rollback clears a future heartbeat retry deadline' 'grep -q "^1000:0$" "$WORK/clock-beats"'
+check 'clock rollback does not defer maintenance until the old time' '[[ $(wc -l <"$WORK/clock-maintenance") -eq 2 ]]'
 printf '%s checks passed; %s failed\n' "$PASS" "$FAIL"
 ((FAIL == 0))

@@ -41,7 +41,7 @@ AGENT_SLEEP_PID=0
 AGENT_BEATS=0
 AGENT_BEAT_OK=0
 AGENT_BEAT_FAIL=0
-AGENT_INTERVAL=60
+AGENT_INTERVAL=24
 AGENT_RETRY_AT=0
 # Set only by `hyn agent --interval=N`, and re-applied after every config reload
 # so a debugging override is not thrown away by the first maintenance pass.
@@ -60,25 +60,29 @@ agent_stamp() {
 # Three intervals of slack, and never less than 120s, so a slow beat or a busy
 # box is not mistaken for a wedge.
 agent_stamp_stale() {
-  local f ts='' now=${EPOCHSECONDS:-0} interval slack
+  local f ts='' now=${EPOCHSECONDS:-0} AGENT_INTERVAL slack
   f=$(agent_stamp)
   # Never seen it run: not stale, just absent. The caller decides what to do
   # about a unit that has never started.
   [[ -r $f ]] || return 1
   read -r ts <"$f" 2>/dev/null
-  [[ $ts =~ ^[0-9]+$ ]] || return 0
-  interval=${CFG[heartbeat_sec]:-60}
-  [[ $interval =~ ^[0-9]+$ ]] || interval=60
-  slack=$((interval * 3))
+  [[ $ts =~ ^[0-9]{1,12}$ ]] || return 0
+  ts=$((10#$ts))
+  # Use the same bounds as the loop. A bad configuration must not make the
+  # watchdog wait longer than the interval the agent actually uses.
+  agent_interval_v
+  slack=$((AGENT_INTERVAL * 3))
   ((slack < 120)) && slack=120
-  ((now - ts > slack))
+  # A clock correction must not make a wedged agent healthy for hours merely
+  # because its last stamp now lies in the future.
+  ((now - ts > slack || ts - now > slack))
 }
 
 # heartbeat_sec, clamped. A 1-second beat would be a denial of service against
 # our own API and a 0 would spin; anything past an hour is not a heartbeat.
 agent_interval_v() {
-  AGENT_INTERVAL=${CFG[heartbeat_sec]:-60}
-  [[ $AGENT_INTERVAL =~ ^[1-9][0-9]{0,4}$ ]] || AGENT_INTERVAL=60
+  AGENT_INTERVAL=${CFG[heartbeat_sec]:-24}
+  [[ $AGENT_INTERVAL =~ ^[1-9][0-9]{0,4}$ ]] || AGENT_INTERVAL=24
   ((AGENT_INTERVAL < 5)) && AGENT_INTERVAL=5
   ((AGENT_INTERVAL > 3600)) && AGENT_INTERVAL=3600
   return 0
@@ -224,8 +228,9 @@ agent_run() {
     # shellcheck source=/dev/null
     source "$HYN_LIB/setup.sh" 2>/dev/null || true
   fi
-  agent_disk_version_v || AGENT_DISK_VERSION=$HYN_VERSION
-  local started=$AGENT_DISK_VERSION
+  # Compare against the code already loaded, not another read of disk. An
+  # install can finish between sourcing core.sh and reaching this function.
+  local started=$HYN_VERSION
   local stamp
   stamp=$(agent_stamp)
 
@@ -236,6 +241,13 @@ agent_run() {
 
   while :; do
     now=${EPOCHSECONDS:-0}
+    # NTP can move wall time backwards after boot. Reset local deadlines so a
+    # corrected clock cannot suspend repair or heartbeat retries until the old
+    # time catches up.
+    if ((now < beat_at)); then
+      maint_at=0
+      AGENT_RETRY_AT=0
+    fi
     # Written before the work, not after: the stamp answers "is this loop making
     # progress", and a beat that blocks for its full curl timeout is progress.
     printf '%s\n' "$now" >"$stamp.tmp" 2>/dev/null && mv -f "$stamp.tmp" "$stamp" 2>/dev/null || true

@@ -12,6 +12,9 @@
 # detached probes on their own slow cadence and drop results into cache files
 # that the render loop just reads.
 
+# shellcheck source=lib/decimal.sh
+source "${HYN_LIB:-${BASH_SOURCE[0]%/*}}/decimal.sh"
+
 declare -A NET_RX=() NET_TX=() NET_RXR=() NET_TXR=()
 declare -A NET_RERR=() NET_TERR=() NET_RDROP=() NET_TDROP=()
 declare -A NET_RERR_R=() NET_TERR_R=() NET_RDROP_R=() NET_TDROP_R=()
@@ -19,7 +22,7 @@ declare -A NET_RPKT=() NET_TPKT=() NET_RPPS=() NET_TPPS=()
 declare -A NET_PEAK_RX=() NET_PEAK_TX=()
 declare -A _PREV=() _PREV_MS=()
 declare -a NET_IFACES=()
-NET_WAN='' NET_LAST_MS=0
+NET_WAN='' NET_LAST_MS=0 NET_SAMPLE_MONO_MS=0
 
 RING_MAX=512
 ring_push() {
@@ -32,16 +35,29 @@ ring_push() {
 # delta_rate <key> <counter> <elapsed-ms> -> per-second rate in DELTA_RATE.
 # Counter wrap or a device reset shows up as a negative delta; report 0 rather
 # than a fabricated spike, and reseed so the next tick is correct.
-DELTA_RATE=0 DELTA_RAW=0
+DELTA_RATE=0 DELTA_RAW=0 DELTA_VALID=0
 delta_rate() {
   local key=$1 cur=$2 ms=$3 prev d
+  DELTA_RATE=0 DELTA_RAW=0 DELTA_VALID=0
+  if [[ $cur =~ ^[0-9]{1,15}$ ]]; then cur=$((10#$cur))
+  else uint_normalize_v "$cur" || return 0; cur=$UINT_VALUE; fi
   prev=${_PREV[$key]:-}
   _PREV[$key]=$cur
-  if [[ -z $prev ]] || ((ms <= 0)); then DELTA_RATE=0 DELTA_RAW=0; return 0; fi
-  d=$((cur - prev))
-  if ((d < 0)); then DELTA_RATE=0 DELTA_RAW=0; return 0; fi
-  DELTA_RAW=$d
-  DELTA_RATE=$((d * 1000 / ms))
+  [[ -n $prev && $ms =~ ^[1-9][0-9]{0,12}$ ]] || return 0
+  if ((${#cur} < 16 && ${#prev} < 16)); then
+    d=$((cur - prev))
+    ((d >= 0)) || return 0
+    DELTA_RAW=$d DELTA_RATE=$((d * 1000 / ms)) DELTA_VALID=1
+    return 0
+  fi
+  uint_subtract_v "$cur" "$prev" || return 0
+  DELTA_RAW=$UINT_VALUE
+  uint_rate_v "$DELTA_RAW" "$ms" || return 0
+  # UI consumers use signed arithmetic. An impossible >9 EB/s rate is marked
+  # invalid instead of becoming a negative number or corrupting peak values.
+  uint_compare_v "$UINT_VALUE" 9223372036854775807
+  ((UINT_COMPARE <= 0)) || return 0
+  DELTA_RATE=$UINT_VALUE DELTA_VALID=1
   return 0
 }
 
@@ -106,11 +122,18 @@ declare -A NET_HIST_RX_KEYS=()
 # it as a parameter keeps every collector on the same clock, so rates across
 # panels are computed over identical windows.
 net_sample() {
-  local ms=${1:-} now line ifn rest
+  local ms=${1:-} now line ifn rest key old previous_mono=$NET_SAMPLE_MONO_MS
   local -a f=()
+  local -A previous_ifaces=() present_ifaces=()
+  for old in "${NET_IFACES[@]}"; do previous_ifaces[$old]=1; done
   now_ms_v; now=$NOW_MS
+  if declare -F sample_clock_ms_v >/dev/null; then
+    sample_clock_ms_v; NET_SAMPLE_MONO_MS=$SAMPLE_CLOCK_MS
+  else
+    NET_SAMPLE_MONO_MS=$now
+  fi
   if [[ -z $ms ]]; then
-    ms=$((now - NET_LAST_MS))
+    ms=$((NET_SAMPLE_MONO_MS - previous_mono))
     ((NET_LAST_MS == 0)) && ms=0
   fi
   NET_LAST_MS=$now
@@ -131,6 +154,7 @@ net_sample() {
     f=($rest)
     ((${#f[@]} < 16)) && continue
     NET_IFACES+=("$ifn")
+    present_ifaces[$ifn]=1
 
     delta_rate "rx:$ifn" "${f[0]}" "$ms"; NET_RXR[$ifn]=$DELTA_RATE
     delta_rate "tx:$ifn" "${f[8]}" "$ms"; NET_TXR[$ifn]=$DELTA_RATE
@@ -161,6 +185,15 @@ net_sample() {
     ring_push "HRX_$safe" "${NET_RXR[$ifn]}"
     ring_push "HTX_$safe" "${NET_TXR[$ifn]}"
   done <"$HYN_PROC/net/dev"
+
+  # If a NIC disappears, its old baseline must not survive until a new device
+  # with the same name appears. That would divide an old delta by one tick and
+  # fabricate a spike; stale totals must not be exposed as current readings.
+  for old in "${!previous_ifaces[@]}"; do
+    [[ -v present_ifaces[$old] ]] && continue
+    for key in rx tx rp tp re rd te td; do unset '_PREV['"$key:$old"']'; done
+    unset 'NET_RX['"$old"']' 'NET_TX['"$old"']' 'NET_RXR['"$old"']' 'NET_TXR['"$old"']'
+  done
 
   # Auto mode follows route failover instead of holding a stale NIC forever.
   net_find_wan

@@ -90,7 +90,7 @@ LAST_MS=0
 
 sample_all() {
   local now ms
-  now_ms_v; now=$NOW_MS
+  sample_clock_ms_v; now=$SAMPLE_CLOCK_MS
   ms=$((now - LAST_MS))
   ((LAST_MS == 0)) && ms=0
   LAST_MS=$now
@@ -1056,7 +1056,7 @@ cmd_help() {
     '  autostart [status|enable|repair]  verify or repair unattended boot services' \
     '  cloud status          portal URL, node id, and when the last push was' \
     '  cloud usage           local HTTP totals and free-plan budget references' \
-    '  cloud optimize        use local history, 60s beats and 5min check-ins' \
+    '  cloud optimize        48h cloud history, local backup and 24s beats' \
     '  history --local [N]   print the last N private local snapshots as JSONL' \
     '  logs [N]              read local alert and service diagnostics' \
     '  config pull           fetch monitoring settings from the portal' \
@@ -1092,6 +1092,11 @@ cmd_help() {
 # dispatch
 # ---------------------------------------------------------------------------
 main() {
+  # Keep this single-line contract compatible with the updater shipped in
+  # 1.8.0. Version probes must not start background checks or collectors.
+  case ${1:-} in
+    version | --version | -v) printf 'hyn-view %s\n' "$HYN_VERSION"; return 0 ;;
+  esac
   boot
   local cmd=${1:-}
   [[ -n $cmd ]] && shift || true
@@ -1137,9 +1142,9 @@ main() {
         status | '') cloud_status ;;
         usage) cloud_usage "${2:-1}" ;;
         optimize)
-          config_set cloud_storage local && config_set cloud_notifications off && config_set heartbeat_sec 60 &&
-            config_set cloud_checkin_min 5 || return 1
-          printf 'hyn: local history enabled; resident agent reloads within 5 minutes.\n'
+          config_set cloud_storage cloud cloud_push_min 1 heartbeat_sec 24 cloud_checkin_min 1 || return 1
+          printf 'hyn: rolling cloud history and local backup enabled; managed portal settings take precedence.\n'
+          printf 'hyn: resident agent reloads within 5 minutes.\n'
           cloud_usage ;;
         push) cloud_push 0 0 ;;
         pull | config) cloud_config_pull 0 || return 1; config_apply || return 1 ;;
@@ -1148,6 +1153,7 @@ main() {
           # sampling has deliberately been scheduled less often than five minutes.
           is_root && { source "$HYN_LIB/setup.sh" 2>/dev/null && setup_self_heal; } || true
           cloud_run_pending 0 ;;
+        verify-update) cloud_finish_update "${2:-}" "${3:-}" ;;
         link) shift; cloud_link "$@" ;;
         unlink) shift; cloud_unlink "$@" ;;
         *) die "unknown cloud subcommand: $1 (try 'hyn cloud status')" ;;
@@ -1179,9 +1185,6 @@ main() {
       setup_uninstall "$@" ;;
     update | upgrade) cmd_update "$@" ;;
     about | credits) cmd_about ;;
-    version | --version | -v)
-      printf 'hyn-view %s\n' "$HYN_VERSION"
-      printf '%s\n' "$HYN_COPYRIGHT" ;;
     help | --help | -h) cmd_help ;;
     *) die "unknown command: $cmd (try 'hyn help')" ;;
   esac

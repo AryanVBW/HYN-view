@@ -1,6 +1,11 @@
 # Local history on Supabase Free + Heroku student credits
 
-For the current **1.12.0 candidate**, exact local bandwidth accounting and its
+> Superseded storage policy, 2026-09-12: CLI 1.10 now defaults to automatic
+> cloud monitoring with rolling 48-hour retention and longer local backup.
+> See [current monitoring policy](rolling-monitoring.md). The local-only design
+> and five-minute cache descriptions below document the previous release.
+
+For the current **1.10.0 candidate**, exact local bandwidth accounting and its
 remaining Ubuntu release gates, see [CLI release verification](cli-release-readiness.md).
 The dated deployment observations below are historical, not current release evidence.
 

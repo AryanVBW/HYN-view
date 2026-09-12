@@ -1,5 +1,10 @@
 # Rolling Cloud Telemetry Implementation Plan
 
+> Execution scope updated by the user on 2026-09-12: use **48 hours**, cloud and
+> local HYN operational summaries, bounded retry, VPS/container visibility and
+> Ubuntu/ARM CI. See [current policy](../../rolling-monitoring.md). The earlier
+> 72-hour plan below records the original proposal.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make Supabase-backed 72-hour telemetry the primary dashboard source, with a durable local backup and bounded retry behavior.

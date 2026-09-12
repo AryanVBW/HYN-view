@@ -1,0 +1,112 @@
+name: CLI and database checks
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  HYN_NO_POSTINSTALL: '1'
+
+jobs:
+  linux:
+    name: ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            node: '22.23.2'
+          - os: ubuntu-24.04
+            node: '24.21.0'
+          - os: ubuntu-24.04-arm
+            node: '24.21.0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - name: Validate runtime and shell syntax
+        env:
+          EXPECTED_NODE: ${{ matrix.node }}
+        run: |
+          test "$(node -p 'process.versions.node')" = "$EXPECTED_NODE"
+          ((BASH_VERSINFO[0] >= 5))
+          for script in bin/hyn lib/*.sh scripts/*.sh test/*.sh supabase/run-tests.sh; do
+            bash -n "$script"
+          done
+      - name: CLI behavior, delivery, storage, and upgrade checks
+        run: npm test
+      - name: Provider and cgroup fixtures
+        run: bash test/cloud-platform.sh
+      - name: Validate release contents and installed version
+        run: |
+          release_dir=$(mktemp -d "$RUNNER_TEMP/hyn-package.XXXXXX")
+          npm pack --ignore-scripts --json --pack-destination "$release_dir" >"$release_dir/pack.json"
+          node - "$release_dir" <<'JS'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const cp = require('node:child_process');
+          const dest = process.argv[2];
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const [packed] = JSON.parse(fs.readFileSync(path.join(dest, 'pack.json'), 'utf8'));
+          assert.equal(packed.version, pkg.version);
+          assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
+          const files = new Set(packed.files.map(file => file.path));
+          for (const file of ['bin/hyn', 'lib/core.sh', 'lib/cloud.sh', 'lib/cloud-platform.sh',
+            'lib/agent.sh', 'lib/local-store.sh', 'lib/update.sh', 'lib/decimal.sh',
+            'scripts/postinstall.sh', 'test/cloud-platform.sh', 'test/release-reliability.sh']) {
+            assert(files.has(file), `Missing release file: ${file}`);
+          }
+          assert(![...files].some(file => /(^|\/)(\.env(?:\..*)?|secrets|node_modules|web-portal)(\/|$)/.test(file)),
+            'Release must not package local credentials, dependencies, or portal files');
+          cp.execFileSync('tar', ['-xzf', path.join(dest, packed.filename), '-C', dest]);
+          const unpacked = path.join(dest, 'package');
+          const installed = JSON.parse(fs.readFileSync(path.join(unpacked, 'package.json'), 'utf8'));
+          assert.equal(installed.version, pkg.version);
+          const version = cp.execFileSync('bash', [path.join(unpacked, 'bin/hyn'), '--version'], {encoding:'utf8'}).trim();
+          assert.equal(version.split(/\s+/).at(-1), pkg.version, 'CLI and package versions diverged');
+          cp.execFileSync('bash', [path.join(unpacked, 'test/cloud-platform.sh')], {stdio:'inherit'});
+          console.log(`Verified package ${packed.filename} (${packed.files.length} files), CLI ${version}`);
+          JS
+
+  database:
+    name: PostgreSQL / ${{ matrix.mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [schema, migrations, schema-reapply]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install PostgreSQL test runtime
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y postgresql-16 postgresql-contrib-16
+      - name: Fresh schema, upgrades, retention, and authorization
+        env:
+          HYN_TEST_MIGRATIONS: ${{ matrix.mode == 'migrations' && '1' || '0' }}
+          HYN_TEST_SCHEMA_REAPPLY: ${{ matrix.mode == 'schema-reapply' && '1' || '0' }}
+          HYN_TEST_LOCKING: '1'
+        run: bash supabase/run-tests.sh

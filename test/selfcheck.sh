@@ -241,7 +241,9 @@ _default_of() {
   printf '%s' "$v"
 }
 eq 'notification access details default off' 'off' "${CFG[notify_access_details]:-missing}"
-eq 'cloud telemetry defaults to ten minutes' '10' "${CFG[cloud_push_min]:-missing}"
+eq 'cloud telemetry defaults to one minute' '1' "${CFG[cloud_push_min]:-missing}"
+eq 'cloud is the primary paired history store' 'cloud' "${CFG[cloud_storage]:-missing}"
+eq 'default check-in permits one-minute telemetry' '1' "${CFG[cloud_checkin_min]:-missing}"
 eq 'automatic CLI updates are the default' 'install' "$(_default_of auto_update)"
 eq 'default view is the advanced dashboard' 'dash' "$(_default_of dashboard_view)"
 color_detect
@@ -855,6 +857,9 @@ section 'frame rendering'
 # ---------------------------------------------------------------------------
 TERM_COLS=140 TERM_ROWS=45
 PUB_IP='203.0.113.9'
+# Collector modules are loaded dynamically; make the string-key map types
+# explicit for static analysis as well as the runtime.
+declare -A LAT_MS LAT_LOSS LAT_JIT
 LAT_MS=([gw]=420 [1.1.1.1]=8200 [dns]=12000)
 LAT_LOSS=([gw]=0 [1.1.1.1]=0 [dns]=0)
 LAT_JIT=([gw]=100 [1.1.1.1]=300 [dns]=-1)
@@ -1142,10 +1147,13 @@ truthy 'install method is classified' '[[ -n $UPD_METHOD ]]'
 
 # An npm update must refresh the installed units itself. Requiring every server
 # owner to remember a second setup command defeats unattended updates.
-fake_update_root="$TMP/node_modules/hyn-view"
+fake_update_root="$TMP/npm/lib/node_modules/hyn-view"
 fake_update_bin="$TMP/update-bin"
 mkdir -p "$fake_update_root/bin" "$fake_update_bin"
 printf '#!/bin/sh\nexit 0\n' >"$fake_update_bin/npm"
+# Concurrency is covered by update-workflow and unattended with real locks.
+# This fixture only checks setup and restart wiring, including on macOS.
+printf '#!/bin/sh\nexit 0\n' >"$fake_update_bin/flock"
 printf '%s\n' \
   '#!/bin/sh' \
   'if [ "$1" = "--version" ]; then printf "hyn-view 9.9.9\n"; exit 0; fi' \
@@ -1159,11 +1167,12 @@ printf '%s\n' \
   '  *) printf "%s\n" "$*" >>"$HYN_VAR/post-update-systemctl"; exit 0 ;;' \
   'esac' \
   >"$fake_update_bin/systemctl"
-chmod +x "$fake_update_bin/npm" "$fake_update_bin/systemctl" "$fake_update_root/bin/hyn"
+chmod +x "$fake_update_bin/npm" "$fake_update_bin/flock" "$fake_update_bin/systemctl" "$fake_update_root/bin/hyn"
 test_update_progress() { printf '%s|%s\n' "$1" "$2" >>"$HYN_VAR/post-update-progress"; }
 (
   HYN_ROOT="$fake_update_root"
   PATH="$fake_update_bin:$PATH"
+  _HAVE[flock]=1
   UPD_AVAILABLE=1 UPD_LATEST=9.9.9
   UPD_PROGRESS_HOOK=test_update_progress
   is_root() { return 0; }
@@ -1428,14 +1437,14 @@ source "$HYN_LIB/notify.sh"
 
 section 'daily report'
 # ---------------------------------------------------------------------------
-# Hand-built metric rows: cpu 10/20/30, mem 50/60/70, disk 80->82 over 24h,
+# Hand-built metric rows: cpu 10/20/30, mem 50/60/70, disk 80->82 over almost 24h,
 # and rx_total climbing by 2000 bytes.
 mf="$TMP/var/metrics.tsv"
 now=${EPOCHSECONDS:-0}
 : >"$mf"
-printf '%s\t10\t1\t2\t50\t0\t420\t80\t100\t50\t1000\t500\t5\t8200\t6\t1\t1000\t10\t100\t0\n' $((now - 86400)) >>"$mf"
+printf '%s\t10\t1\t2\t50\t0\t420\t80\t100\t50\t1000\t500\t5\t8200\t6\t1\t1000\t10\t100\t0\n' $((now - 86395)) >>"$mf"
 printf '%s\t20\t2\t4\t60\t0\t840\t81\t200\t60\t2000\t700\t7\t9000\t7\t1\t2000\t20\t150\t0\n' $((now - 43200)) >>"$mf"
-printf '%s\t30\t3\t6\t70\t0\t1260\t82\t300\t70\t3000\t900\t9\t9500\t8\t1\t3000\t30\t200\t0\n' "$now" >>"$mf"
+printf '%s\t30\t3\t6\t70\t0\t1260\t82\t300\t70\t3000\t900\t9\t9500\t8\t1\t3000\t30\t200\t0\n' $((now - 3)) >>"$mf"
 CFG[record_interval_min]=5
 truthy 'aggregation succeeds' 'report_aggregate 24'
 eq 'row count'        '3'    "$R_ROWS"
@@ -1456,13 +1465,13 @@ eq 'days until full'  '9'    "${R[disk_days]}"
 
 # A counter that goes backwards means a reboot or NIC reset. The day's transfer
 # must not come out negative.
-printf '%s\t10\t0\t0\t50\t0\t100\t82\t10\t10\t50\t20\t0\t0\t0\t1\t0\t0\t10\t0\n' $((now + 1)) >>"$mf"
+printf '%s\t10\t0\t0\t50\t0\t100\t82\t10\t10\t50\t20\t0\t0\t0\t1\t0\t0\t10\t0\n' $((now - 2)) >>"$mf"
 report_aggregate 24
 truthy 'transfer never goes negative' '(( ${R[rx_bytes]} >= 0 ))'
 eq 'reset preserves earlier received bytes' '2000' "${R[rx_bytes]}"
 eq 'reset preserves earlier sent bytes' '400' "${R[tx_bytes]}"
 eq 'counter reset is reported' '1' "${R[network_resets]}"
-printf '%s\t10\t0\t0\t50\t0\t100\t82\t10\t10\t150\t70\t0\t0\t0\t1\t0\t0\t10\t0\n' $((now + 2)) >>"$mf"
+printf '%s\t10\t0\t0\t50\t0\t100\t82\t10\t10\t150\t70\t0\t0\t0\t1\t0\t0\t10\t0\n' $((now - 1)) >>"$mf"
 report_aggregate 24
 eq 'received bytes continue after reset' '2100' "${R[rx_bytes]}"
 eq 'sent bytes continue after reset' '450' "${R[tx_bytes]}"
@@ -2273,7 +2282,7 @@ _schema="$ROOT/supabase/schema.sql"
 _nodecfg="$ROOT/web-portal/lib/node-config.ts"
 _agent_keys=$(sed -n '/^_cfg_cloud_allowed()/,/^}/p' "$HYN_LIB/core.sh" |
   grep -oE '[a-z_]+ \||[a-z_]+\)' | tr -d ' |)' | grep -v '^$' | sort -u)
-eq 'the agent declares eighteen managed settings' 18 "$(printf '%s\n' "$_agent_keys" | grep -c .)"
+eq 'the agent declares nineteen managed settings' 19 "$(printf '%s\n' "$_agent_keys" | grep -c .)"
 # The database and portal declarations live in the repository, not in the npm
 # package, so this half of the comparison only runs where they exist. Stated as a
 # skip rather than silently passing: a check that quietly does nothing is worse
@@ -2780,11 +2789,18 @@ truthy 'the package runs it'           'grep  "\"postinstall\"" "$ROOT/package.j
 truthy 'the package ships scripts/'    'grep  "\"scripts/\"" "$ROOT/package.json"'
 # 1. It can never fail an install.
 truthy 'a local install is refused' \
-  '( unset npm_config_global; out=$(bash "$_pi" 2>&1); [[ $? -eq 0 && $out == *"local install"* ]] )'
+  '( unset npm_config_global HYN_NO_POSTINSTALL; out=$(bash "$_pi" 2>&1); [[ $? -eq 0 && $out == *"local install"* ]] )'
 truthy 'an opt-out is honoured' \
   '( export HYN_NO_POSTINSTALL=1 npm_config_global=true; out=$(bash "$_pi" 2>&1); [[ $? -eq 0 && $out == *"HYN_NO_POSTINSTALL"* ]] )'
-truthy 'a non-root global install exits cleanly and says what is left to do' \
-  '( export npm_config_global=true; out=$(bash "$_pi" 2>&1); [[ $? -eq 0 ]] )'
+if ((EUID != 0)); then
+  # Exercise the actual non-root guard even on a macOS workstation. The parent
+  # test's opt-out must not hide this branch, and this fixture must never reach
+  # a real global system-service installation when the suite runs as root.
+  truthy 'a non-root global install exits cleanly and says what is left to do' \
+    '( unset HYN_NO_POSTINSTALL; export npm_config_global=true; uname() { printf "Linux\n"; }; export -f uname; out=$(bash "$_pi" 2>&1); [[ $? -eq 0 && $out == *"not running as root"* ]] )'
+else
+  printf '  skip  non-root postinstall guard (running as root; never invoke real global setup)\n'
+fi
 # 2. Nothing in it can write outside what `hyn setup` already writes.
 truthy 'the postinstall delegates rather than writing units itself' \
   '! grep -E  "systemd/system|_write_unit" "$_pi"'
@@ -3060,9 +3076,9 @@ eq 'a too-fast beat is clamped up'  '5'    "$AGENT_INTERVAL"
 CFG[heartbeat_sec]=99999; agent_interval_v
 eq 'a too-slow beat is clamped down' '3600' "$AGENT_INTERVAL"
 CFG[heartbeat_sec]='; rm -rf /'; agent_interval_v
-eq 'a junk interval falls back'     '60'   "$AGENT_INTERVAL"
+eq 'a junk interval falls back'     '24'   "$AGENT_INTERVAL"
 CFG[heartbeat_sec]=0; agent_interval_v
-eq 'zero would spin, so it falls back' '60' "$AGENT_INTERVAL"
+eq 'zero would spin, so it falls back' '24' "$AGENT_INTERVAL"
 CFG[heartbeat_sec]=24
 
 # Liveness is measured, not assumed: this is the difference between a loop that

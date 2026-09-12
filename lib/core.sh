@@ -10,7 +10,7 @@
 # HYN_PROC / HYN_SYS exist so test/selfcheck.sh can point the readers at a
 # fixture tree and assert on known numbers. Never hardcode /proc below.
 
-HYN_VERSION="1.12.0"
+HYN_VERSION="1.10.0"
 HYN_AUTHOR='NEXUSV'
 HYN_AUTHOR_URL='https://www.hyn-view.in'
 HYN_COPYRIGHT='(c) 2026 NEXUSV TECHNOLOGIES PRIVATE LIMITED'
@@ -197,20 +197,20 @@ declare -A CFG=(
   # during `hyn link`; the agent never contacts it.
   [cloud_portal_url]='https://www.hyn-view.in'
   [cloud_node_id]=''
-  [cloud_push_min]=10
-  # Local is the default: no periodic telemetry or diagnostic uploads. An
-  # explicit push/sync shares one transient reading with the hosted portal.
-  [cloud_storage]=local
+  [cloud_push_min]=1
+  # Paired nodes retain rolling cloud telemetry with a bounded local backup.
+  # Explicit local mode remains available through local or managed settings.
+  [cloud_storage]=cloud
   [cloud_notifications]=off
-  [cloud_checkin_min]=5
+  [cloud_checkin_min]=1
   [local_keep_days]=14
   [local_max_mb]=256
   [cloud_timeout]=20
   # Seconds between liveness beats from the resident agent (hyn-agent.service).
   # This is not the reading interval: a beat is one small POST that proves the
-  # machine is alive. The portal's three-minute quiet threshold allows three
-  # missed beats at the default cadence. Detailed history stays local.
-  [heartbeat_sec]=60
+  # machine is alive. The portal's three-minute quiet threshold tolerates
+  # several missed beats without creating false outage alerts.
+  [heartbeat_sec]=24
 
   # --- self update -----------------------------------------------------------
   # off     never look
@@ -270,12 +270,13 @@ _cfg_retired() {
 # The portal is a much narrower trust boundary than a root-owned local config.
 # Keep this list in step with the fields in the portal's NodeSettings form and
 # the database constraint. In particular, no destination, credential, network
-# endpoint, local privacy option or portal connection setting belongs here.
+# endpoint, credential or portal connection setting belongs here. Storage is an
+# explicit managed policy; a remote override takes precedence like other keys.
 _cfg_cloud_allowed() {
   case ${1:-} in
     alert_mem_pct | alert_disk_pct | alert_temp_c | alert_load_per_core | \
       alert_latency_ms | alert_min_severity | alert_repeat_hours | report_at | \
-      notify_max_per_day | cloud_push_min | auto_update | dashboard_view | \
+      notify_max_per_day | cloud_push_min | cloud_storage | auto_update | dashboard_view | \
       alert_enabled | report_enabled | alert_interval_min | record_interval_min | \
       speedtest_per_day | keep_awake) return 0 ;;
     *) return 1 ;;
@@ -288,6 +289,8 @@ _cfg_cloud_allowed() {
 _cfg_cloud_value_allowed() {
   local k=${1:-} v=${2:-}
   case $k in
+    cloud_storage)
+      [[ $v == local || $v == cloud ]] ;;
     alert_enabled | report_enabled | keep_awake)
       [[ $v == on || $v == off ]] ;;
     alert_interval_min | record_interval_min)
@@ -363,8 +366,9 @@ cfg_load() {
   # overrides only the small `_cfg_cloud_allowed` set. Standard installations
   # write defaults for every local key, so putting the cache first would make
   # Account changes appear saved while the generated file silently won forever.
-  # Local-only settings, endpoints, privacy choices and credentials never enter
-  # the portal allowlist and remain entirely under the operator's control.
+  # Endpoints, delivery-identity options and credentials never enter the portal
+  # allowlist. Storage is an explicit managed choice; removing that override
+  # restores the operator's configured local/cloud setting.
   local cloud_cache=''
   if [[ -n ${HYN_VAR:-} ]]; then
     state_dir_v
@@ -414,22 +418,54 @@ cfg_on() { [[ ${CFG[$1]} == on || ${CFG[$1]} == true || ${CFG[$1]} == yes || ${C
 # ver_gt <a> <b> -- true when a is strictly newer than b. Numeric per component,
 # so 0.1.9 correctly sorts BEFORE 0.1.75, which string comparison gets wrong and
 # which is exactly the range real projects live in.
+ver_valid() {
+  local v=${1#v} pre part
+  local pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+  [[ $v =~ $pattern ]] || return 1
+  v=${v%%+*}
+  if [[ $v == *-* ]]; then
+    pre=${v#*-}
+    local -a parts=()
+    IFS=. read -r -a parts <<<"$pre"
+    for part in "${parts[@]}"; do
+      [[ $part =~ ^0[0-9]+$ ]] && return 1
+    done
+  fi
+  return 0
+}
+
 ver_gt() {
-  local a=${1#v} b=${2#v} i x y
-  [[ -n $a && -n $b ]] || return 1
+  local a=${1#v} b=${2#v} i x y apre='' bpre='' LC_ALL=C
+  ver_valid "$a" && ver_valid "$b" || return 1
+  a=${a%%+*}; b=${b%%+*}
+  [[ $a != *-* ]] || apre=${a#*-}
+  [[ $b != *-* ]] || bpre=${b#*-}
   local -a pa=() pb=()
-  local oIFS=$IFS
-  IFS='.'
-  # shellcheck disable=SC2206
-  pa=($a); pb=($b)
-  IFS=$oIFS
+  IFS=. read -r -a pa <<<"${a%%-*}"
+  IFS=. read -r -a pb <<<"${b%%-*}"
   for i in 0 1 2; do
-    x=${pa[i]:-0} y=${pb[i]:-0}
-    x=${x%%-*} y=${y%%-*}
-    [[ $x =~ ^[0-9]+$ ]] || x=0
-    [[ $y =~ ^[0-9]+$ ]] || y=0
-    ((x > y)) && return 0
-    ((x < y)) && return 1
+    x=${pa[i]} y=${pb[i]}
+    # Length plus lexical comparison avoids machine-integer overflow entirely.
+    ((${#x} > ${#y})) && return 0
+    ((${#x} < ${#y})) && return 1
+    [[ $x > $y ]] && return 0
+    [[ $x < $y ]] && return 1
+  done
+  [[ -z $apre && -n $bpre ]] && return 0
+  [[ -n $apre && -n $bpre ]] || return 1
+  IFS=. read -r -a pa <<<"$apre"
+  IFS=. read -r -a pb <<<"$bpre"
+  for ((i=0; i<${#pa[@]}; i++)); do
+    ((i < ${#pb[@]})) || return 0
+    x=${pa[i]} y=${pb[i]}
+    [[ $x != "$y" ]] || continue
+    if [[ $x =~ ^[0-9]+$ && $y =~ ^[0-9]+$ ]]; then
+      ((${#x} > ${#y})) && return 0
+      ((${#x} < ${#y})) && return 1
+    elif [[ $x =~ ^[0-9]+$ ]]; then return 1
+    elif [[ $y =~ ^[0-9]+$ ]]; then return 0
+    fi
+    [[ $x > $y ]]; return
   done
   return 1
 }
@@ -761,6 +797,23 @@ now_ms_v() {
   return 0
 }
 now_ms() { now_ms_v; printf '%s' "$NOW_MS"; }
+
+# Elapsed sampling time must not depend on NTP/wall-clock corrections. Linux
+# uptime includes suspended time; wall time is only a fallback for test hosts.
+SAMPLE_CLOCK_MS=0
+sample_clock_ms_v() {
+  local uptime='' whole fraction
+  if [[ -r $HYN_PROC/uptime ]]; then
+    read -r uptime _ <"$HYN_PROC/uptime" || uptime=''
+  fi
+  if [[ $uptime =~ ^[0-9]{1,12}\.[0-9]+$ ]]; then
+    whole=${uptime%%.*}; fraction=${uptime#*.}000
+    SAMPLE_CLOCK_MS=$((10#$whole * 1000 + 10#${fraction:0:3}))
+  else
+    now_ms_v; SAMPLE_CLOCK_MS=$NOW_MS
+  fi
+  return 0
+}
 
 # Atomic-ish write for cache/state files: a half-written cache read by the
 # render loop would show garbage, and these are cheap to make safe.

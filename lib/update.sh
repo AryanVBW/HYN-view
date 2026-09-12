@@ -58,8 +58,16 @@ UPD_PARSED=''
 _upd_parse_latest() {
   local body=$1 m
   UPD_PARSED=''
-  [[ $body == *'"latest"'* ]] || return 1
-  m=${body#*\"latest\"}
+  [[ $body == *'"dist-tags"'* ]] || return 1
+  m=${body#*\"dist-tags\"}
+  while [[ $m == [[:space:]]* ]]; do m=${m#?}; done
+  [[ $m == :* ]] || return 1
+  m=${m#:}
+  while [[ $m == [[:space:]]* ]]; do m=${m#?}; done
+  [[ $m == \{* ]] || return 1
+  m=${m#\{}; m=${m%%\}*}
+  [[ $m == *'"latest"'* ]] || return 1
+  m=${m#*\"latest\"}
   while [[ $m == [[:space:]]* ]]; do m=${m#?}; done
   [[ $m == :* ]] || return 1
   m=${m#:}
@@ -67,7 +75,7 @@ _upd_parse_latest() {
   [[ $m == \"* ]] || return 1
   m=${m#\"}
   m=${m%%\"*}
-  [[ $m =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$ ]] || { UPD_PARSED=$m; return 1; }
+  ver_valid "$m" || { UPD_PARSED=$m; return 1; }
   UPD_PARSED=$m
   return 0
 }
@@ -75,6 +83,19 @@ _upd_parse_latest() {
 update_cache_file() {
   state_dir_v
   printf '%s/update-check' "$STATE_DIR"
+}
+
+# A unique temporary file prevents a foreground check and a detached check
+# from consuming each other's partially written cache.
+_update_cache_write() {
+  local ts=$1 version=$2 f tmp
+  f=$(update_cache_file)
+  mkdir -p "${f%/*}" 2>/dev/null || return 1
+  tmp=$(mktemp "$f.XXXXXX") || return 1
+  if ! { printf '%s\n%s\n' "$ts" "$version" >"$tmp" && mv -f "$tmp" "$f"; }; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 # Reads the cache into UPD_LATEST / UPD_AVAILABLE. Cheap, no network.
@@ -87,7 +108,11 @@ update_read() {
   [[ $ts =~ ^[0-9]+$ ]] || return 1
   UPD_CHECKED=$ts
   UPD_LATEST=$v
-  [[ -n $v ]] || return 1
+  [[ -n $v ]] || return 1 # Empty, timestamped entries back off registry failures.
+  ver_valid "$v" || {
+    UPD_CHECKED=0 UPD_LATEST=''
+    return 1
+  }
   ver_gt "$v" "$HYN_VERSION" && UPD_AVAILABLE=1
   return 0
 }
@@ -103,13 +128,13 @@ update_check_async() {
   hours=${CFG[update_check_hours]:-12}
   [[ $hours =~ ^[0-9]+$ ]] || hours=12
   update_read
-  ((UPD_CHECKED > 0 && now - UPD_CHECKED < hours * 3600)) && return 0
+  ((UPD_CHECKED > 0 && now >= UPD_CHECKED && now - UPD_CHECKED < hours * 3600)) && return 0
   # Never two at once, and never a fresh attempt on every launch when the
   # registry is unreachable: the timestamp is written before the fetch.
   if ((_UPD_PID > 0)) && kill -0 "$_UPD_PID" 2>/dev/null; then return 0; fi
   state_dir_v
   [[ -d $STATE_DIR ]] || mkdir -p "$STATE_DIR" 2>/dev/null || return 1
-  printf '%s\n%s\n' "$now" "$UPD_LATEST" >"$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f"
+  _update_cache_write "$now" "$UPD_LATEST" || return 1
   {
     local body ver
     body=$(curl -fsSL --max-time 8 --proto "$(_upd_proto)" \
@@ -117,7 +142,7 @@ update_check_async() {
       "$UPD_REGISTRY/$HYN_PKG" 2>/dev/null) || body=''
     if _upd_parse_latest "$body"; then
       ver=$UPD_PARSED
-      printf '%s\n%s\n' "${EPOCHSECONDS:-0}" "$ver" >"$f.tmp2" && mv -f "$f.tmp2" "$f"
+      _update_cache_write "${EPOCHSECONDS:-0}" "$ver"
     fi
   } &
   _UPD_PID=$!
@@ -127,12 +152,15 @@ update_check_async() {
 # Blocking check, for `hyn update` and doctor where waiting is the point.
 update_check_now() {
   UPD_LAST_ERR=''
+  # Preserve the last known version for display, but an unsuccessful fresh
+  # check must never leave a previous install decision marked as available.
+  UPD_AVAILABLE=0
   have curl || {
     UPD_LAST_ERR='curl is required to check for updates'
     warn "$UPD_LAST_ERR"
     return 1
   }
-  local body ver f
+  local body ver
   body=$(curl -fsSL --max-time 12 --proto "$(_upd_proto)" \
     -H 'Accept: application/vnd.npm.install-v1+json' \
     "$UPD_REGISTRY/$HYN_PKG" 2>/dev/null) || {
@@ -154,10 +182,7 @@ update_check_now() {
   UPD_CHECKED=${EPOCHSECONDS:-0}
   UPD_AVAILABLE=0
   ver_gt "$ver" "$HYN_VERSION" && UPD_AVAILABLE=1
-  f=$(update_cache_file)
-  state_dir_v
-  [[ -d $STATE_DIR ]] || mkdir -p "$STATE_DIR" 2>/dev/null
-  printf '%s\n%s\n' "$UPD_CHECKED" "$ver" >"$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f"
+  _update_cache_write "$UPD_CHECKED" "$ver" || true
   return 0
 }
 
@@ -168,10 +193,10 @@ update_detect_method() {
   UPD_METHOD=''
   # A git checkout being run in place: `git pull` is the correct upgrade, and
   # npm would not know about it at all.
-  if [[ -d $HYN_ROOT/.git ]]; then UPD_METHOD=git; return 0; fi
+  if [[ -e $HYN_ROOT/.git ]]; then UPD_METHOD=git; return 0; fi
   # Inside a global node_modules tree.
   case $HYN_ROOT in
-    */node_modules/*) UPD_METHOD=npm; return 0 ;;
+    */lib/node_modules/"$HYN_PKG") UPD_METHOD=npm; return 0 ;;
   esac
   UPD_METHOD=unknown
   return 0
@@ -245,21 +270,72 @@ update_apply() {
   mkdir -p "$STATE_DIR" || return 1
   # util-linux supplies flock on supported Ubuntu systems. Hold the descriptor
   # through npm, setup and verification, including across child processes.
-  if have flock; then
-    exec {lock_fd}>"$STATE_DIR/update.lock" || return 1
-    if ! flock -n "$lock_fd"; then
-      exec {lock_fd}>&-
-      UPD_LAST_ERR='another package update is already running'
-      return 1
-    fi
+  have flock || { UPD_LAST_ERR='flock is required for safe updates; install util-linux'; return 1; }
+  exec {lock_fd}>"$STATE_DIR/update.lock" || return 1
+  if ! flock -n "$lock_fd"; then
+    exec {lock_fd}>&-
+    UPD_LAST_ERR='another package update is already running'
+    return 1
   fi
   _update_apply "$@"; rc=$?
   [[ -z $lock_fd ]] || exec {lock_fd}>&-
   return "$rc"
 }
 
+UPD_INSTALLED=''
+_update_installed_version() {
+  local output
+  UPD_INSTALLED=''
+  [[ -x $HYN_ROOT/bin/hyn ]] || return 1
+  output=$("$HYN_ROOT/bin/hyn" --version 2>/dev/null) || return 1
+  output=${output%%$'\n'*}
+  [[ $output == 'hyn-view '* ]] || return 1
+  output=${output#hyn-view }
+  ver_valid "$output" || return 1
+  UPD_INSTALLED=$output
+}
+
+# npm can remove the old tree before an install fails. Keep the last executable
+# release on the same filesystem and put it back before returning an error.
+# This recovers ordinary install/verification failures; it is not a power-loss
+# transaction, which requires a bootstrap outside the npm-managed package.
+_update_restore_package() {
+  local backup=$1 refresh=${2:-0} failed="$1/failed" cause=$UPD_LAST_ERR name
+  local prefix=${HYN_ROOT%/lib/node_modules/"$HYN_PKG"}
+  [[ -n $prefix ]] || prefix=/
+  if [[ -e $HYN_ROOT ]] && ! mv "$HYN_ROOT" "$failed"; then
+    UPD_LAST_ERR="$cause; rollback failed, previous package saved at $backup/package"
+    return 1
+  fi
+  if ! mv "$backup/package" "$HYN_ROOT"; then
+    # Keep at least the unsuccessful install addressable if restoration failed.
+    [[ ! -e $failed ]] || mv "$failed" "$HYN_ROOT" 2>/dev/null || true
+    UPD_LAST_ERR="$cause; rollback failed, previous package saved at $backup/package"
+    return 1
+  fi
+  # npm also owns the command links, and an unsuccessful reification can
+  # remove them along with the package. Preserve the exact previous links.
+  for name in hyn hyn-view; do
+    if [[ -L $backup/bin/$name ]]; then
+      if ! { cp -Pp "$backup/bin/$name" "$backup/.restore-link" && mv -f "$backup/.restore-link" "$prefix/bin/$name"; }; then
+        UPD_LAST_ERR="$cause; package restored, but command link recovery failed (saved at $backup/bin/$name)"
+        return 1
+      fi
+    fi
+  done
+  rm -rf "$backup"
+  UPD_LAST_ERR="$cause; previous package restored"
+  if ((refresh)) && is_root; then
+    if ! "$HYN_ROOT/bin/hyn" setup --no-wizard >/dev/null 2>&1 || ! update_refresh_services; then
+      UPD_LAST_ERR="$cause; previous package restored, but service recovery needs sudo hyn doctor --fix"
+      return 1
+    fi
+    UPD_LAST_ERR="$cause; previous package and services restored"
+  fi
+}
+
 _update_apply() {
-  local force=${1:-0} installed=''
+  local force=${1:-0} installed='' prefix backup
   UPD_LAST_ERR=''
   update_detect_method
   if ((UPD_AVAILABLE == 0 && force == 0)); then
@@ -268,54 +344,90 @@ _update_apply() {
   fi
   case $UPD_METHOD in
     npm)
-      have npm || { warn 'npm is not on PATH, cannot self-update'; return 1; }
+      have npm || { UPD_LAST_ERR='npm is not on PATH, cannot self-update'; warn "$UPD_LAST_ERR"; return 1; }
       # A global install lives in a root-owned tree on a normal Ubuntu box.
       if [[ ! -w $HYN_ROOT ]] && ! is_root; then
-        warn "cannot write $HYN_ROOT — re-run as: sudo hyn update"
+        UPD_LAST_ERR="cannot write $HYN_ROOT; re-run as: sudo hyn update"
+        warn "$UPD_LAST_ERR"
         return 1
       fi
-      printf 'hyn: updating %s -> %s via npm\n' "$HYN_VERSION" "${UPD_LATEST:-latest}"
-      update_emit_progress installing "Downloading and installing hyn-view ${UPD_LATEST:-latest}"
-      if npm install -g "$HYN_PKG@${UPD_LATEST:-latest}" >/dev/null 2>&1; then
-        if is_root && [[ -x $HYN_ROOT/bin/hyn ]]; then
-          update_emit_progress restarting 'Refreshing configuration and restarting hyn-view timers'
-          if "$HYN_ROOT/bin/hyn" setup --no-wizard >/dev/null 2>&1; then
-            if ! update_refresh_services; then
-              warn "package updated, but managed services did not restart cleanly: $UPD_LAST_ERR"
-              return 1
-            fi
-          else
-            UPD_LAST_ERR='background services could not be refreshed'
-            warn 'package updated, but background services could not be refreshed; run: sudo hyn setup --no-wizard'
-            return 1
-          fi
-        fi
-
-        update_emit_progress verifying 'Verifying the installed CLI and managed timers'
-        if [[ -x $HYN_ROOT/bin/hyn ]]; then
-          installed=$("$HYN_ROOT/bin/hyn" --version 2>/dev/null)
-          installed=${installed%%$'\n'*}
-          installed=${installed##* }
-        fi
-        if [[ -z $installed || ! $installed =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$ ]]; then
-          UPD_LAST_ERR='the installed CLI version could not be verified'
-          warn "$UPD_LAST_ERR"
-          return 1
-        fi
-        if [[ -n $UPD_LATEST && $installed != "$UPD_LATEST" ]]; then
-          UPD_LAST_ERR="expected $UPD_LATEST but found $installed after installation"
-          warn "$UPD_LAST_ERR"
-          return 1
-        fi
-
-        HYN_VERSION=$installed
-        UPD_AVAILABLE=0
-        printf 'hyn: updated to %s; managed services restarted and verified.\n' "$installed"
-        return 0
+      if ! ver_valid "$UPD_LATEST"; then
+        UPD_LAST_ERR='a verified registry version is required before installing'
+        warn "$UPD_LAST_ERR"
+        return 1
       fi
-      UPD_LAST_ERR='npm install failed; the installed package may be incomplete and will need another update attempt'
-      warn "$UPD_LAST_ERR"
-      return 1
+      # Re-read disk after acquiring the install lock: another process may
+      # already have updated it since this process loaded its old libraries.
+      if ver_gt "$HYN_VERSION" "$UPD_LATEST" || { _update_installed_version && ver_gt "$UPD_INSTALLED" "$UPD_LATEST"; }; then
+        UPD_LAST_ERR="refusing to downgrade the installed CLI to $UPD_LATEST"
+        warn "$UPD_LAST_ERR"
+        return 1
+      fi
+      prefix=${HYN_ROOT%/lib/node_modules/"$HYN_PKG"}
+      [[ -n $prefix ]] || prefix=/
+      backup=$(mktemp -d "${HYN_ROOT%/*}/.hyn-update.XXXXXX") || {
+        UPD_LAST_ERR='cannot create an update recovery directory'; warn "$UPD_LAST_ERR"; return 1;
+      }
+      if ! cp -pR "$HYN_ROOT" "$backup/package"; then
+        rm -rf "$backup"
+        UPD_LAST_ERR='cannot save the previous package before installing'
+        warn "$UPD_LAST_ERR"
+        return 1
+      fi
+      local name
+      mkdir "$backup/bin" || { rm -rf "$backup"; UPD_LAST_ERR='cannot save the previous command links'; return 1; }
+      for name in hyn hyn-view; do
+        if [[ -L $prefix/bin/$name ]] && ! cp -Pp "$prefix/bin/$name" "$backup/bin/$name"; then
+          rm -rf "$backup"
+          UPD_LAST_ERR='cannot save the previous command links'
+          warn "$UPD_LAST_ERR"
+          return 1
+        fi
+      done
+      printf 'hyn: updating %s -> %s via npm\n' "$HYN_VERSION" "$UPD_LATEST"
+      update_emit_progress installing "Downloading and installing hyn-view $UPD_LATEST"
+      # Bind both prefix and registry to the installation/check we verified.
+      # Defer lifecycle setup until the installed command has passed its check.
+      if ! npm install -g "$HYN_PKG@$UPD_LATEST" --prefix "$prefix" --registry "$UPD_REGISTRY" --ignore-scripts >/dev/null 2>&1; then
+        UPD_LAST_ERR='npm install failed'
+        _update_restore_package "$backup" || true
+        warn "$UPD_LAST_ERR"
+        return 1
+      fi
+      update_emit_progress verifying 'Verifying the installed CLI before changing managed services'
+      if ! _update_installed_version; then
+        UPD_LAST_ERR='the installed CLI version could not be verified'
+      elif [[ $UPD_INSTALLED != "$UPD_LATEST" ]]; then
+        UPD_LAST_ERR="expected $UPD_LATEST but found $UPD_INSTALLED after installation"
+      fi
+      if [[ -n $UPD_LAST_ERR ]]; then
+        _update_restore_package "$backup" || true
+        warn "$UPD_LAST_ERR"
+        return 1
+      fi
+      installed=$UPD_INSTALLED
+      if is_root; then
+        update_emit_progress restarting 'Refreshing configuration and restarting hyn-view timers'
+        if ! "$HYN_ROOT/bin/hyn" setup --no-wizard >/dev/null 2>&1; then
+          UPD_LAST_ERR='background services could not be refreshed'
+        elif ! update_refresh_services; then
+          : # update_refresh_services records the failing service in UPD_LAST_ERR.
+        fi
+        if [[ -n $UPD_LAST_ERR ]]; then
+          _update_restore_package "$backup" 1 || true
+          warn "$UPD_LAST_ERR"
+          return 1
+        fi
+      fi
+      rm -rf "$backup"
+      HYN_VERSION=$installed
+      UPD_AVAILABLE=0
+      if is_root; then
+        printf 'hyn: updated to %s; managed services restarted and verified.\n' "$installed"
+      else
+        printf 'hyn: updated to %s; run sudo hyn setup --no-wizard to refresh managed services.\n' "$installed"
+      fi
+      return 0
       ;;
     git)
       have git || { warn 'git is not on PATH'; return 1; }
@@ -359,8 +471,14 @@ update_startup() {
         else
           # Detached: a launch must not wait on a package install, and the
           # running process keeps using the code it already loaded either way.
-          { update_apply 0 >/dev/null 2>&1; } &
-          UPD_STATE='installing'
+          # The maintenance unit records this too. Interactive launches need
+          # the same retry delay when npm or setup keeps failing.
+          if (umask 077; printf '%s\n' "$now" >"$STATE_DIR/automatic-update-attempt"); then
+            { update_apply 0 >/dev/null 2>&1; } &
+            UPD_STATE='installing'
+          else
+            UPD_STATE='available'
+          fi
         fi
       fi
       update_check_async

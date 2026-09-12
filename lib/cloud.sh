@@ -40,19 +40,17 @@ json_field_v() {
   while [[ $m == [[:space:]]* ]]; do m=${m#?}; done
   if [[ $m == \"* ]]; then
     m=${m#\"}
-    # Stop at the first unescaped quote.
-    local out='' c
-    while [[ -n $m ]]; do
-      c=${m:0:1}
-      if [[ $c == '\' ]]; then
-        out+=${m:0:2}
-        m=${m:2}
-        continue
-      fi
-      [[ $c == '"' ]] && break
-      out+=$c
-      m=${m:1}
-    done
+    # Read whole quoted spans. Per-character slicing becomes quadratic for
+    # the large base64 templates returned by the managed-settings endpoint.
+    local out='' part tail slashes closed=0
+    while IFS= read -r -d '"' part; do
+      out+=$part
+      tail=$part; slashes=0
+      while [[ ${tail: -1} == \\ ]]; do slashes=$((slashes + 1)); tail=${tail%?}; done
+      if ((slashes % 2 == 0)); then closed=1; break; fi
+      out+='"'
+    done <<<"$m"
+    ((closed)) || return 1
     # Undo the escapes we might plausibly receive.
     out=${out//\\n/$'\n'}
     out=${out//\\\"/\"}
@@ -76,8 +74,35 @@ CLOUD_LAST_ERR=''
 CLOUD_SENT_BYTES=0
 CLOUD_RECEIVED_BYTES=0
 
+# A replay pass shares one monotonic deadline across HTTPS discovery and all
+# upload requests. Outside replay this preserves each operation's normal curl
+# timeout. Milliseconds avoid rounding a nearly exhausted budget up a second.
+_cloud_request_timeout_v() {
+  local requested=$1 remaining whole fraction cap
+  CLOUD_REQUEST_TIMEOUT=$requested
+  [[ -n ${CLOUD_RPC_DEADLINE_MS:-} ]] || return 0
+  [[ $CLOUD_RPC_DEADLINE_MS =~ ^[0-9]{1,16}$ ]] || {
+    CLOUD_LAST_CODE=0; CLOUD_LAST_ERR='invalid cloud retry time budget'; return 1;
+  }
+  sample_clock_ms_v
+  remaining=$((CLOUD_RPC_DEADLINE_MS - SAMPLE_CLOCK_MS))
+  if ((remaining <= 0)); then
+    CLOUD_LAST_CODE=0
+    CLOUD_LAST_ERR='cloud retry time budget exhausted; remaining readings stay queued'
+    return 1
+  fi
+  if [[ $requested =~ ^([0-9]{1,4})(\.([0-9]{1,3}))?$ ]]; then
+    whole=${BASH_REMATCH[1]}; fraction=${BASH_REMATCH[3]:-0}000
+    cap=$((10#$whole * 1000 + 10#${fraction:0:3}))
+    ((cap <= 0 || cap >= remaining)) || remaining=$cap
+  fi
+  printf -v CLOUD_REQUEST_TIMEOUT '%d.%03d' "$((remaining / 1000))" "$((remaining % 1000))"
+}
+
 # shellcheck source=lib/local-store.sh
 source "${HYN_LIB:-${BASH_SOURCE[0]%/*}}/local-store.sh"
+# shellcheck source=lib/cloud-platform.sh
+source "${HYN_LIB:-${BASH_SOURCE[0]%/*}}/cloud-platform.sh"
 
 CLOUD_RESOLVED_URL=''
 cloud_official_url() {
@@ -106,7 +131,8 @@ cloud_resolve_portal() {
     u=$preferred; preferred=$other; other=$u
   fi
   for u in "$preferred" "$other"; do
-    response=$(curl -fsS --connect-timeout 5 --max-time 20 "$u/health" 2>/dev/null) || continue
+    _cloud_request_timeout_v 20 || return 1
+    response=$(curl -fsS --connect-timeout 5 --max-time "$CLOUD_REQUEST_TIMEOUT" "$u/health" 2>/dev/null) || continue
     json_field_v "$response" service || continue
     [[ $JSON_FIELD == hyn-agent-v1 ]] || continue
     CLOUD_RESOLVED_URL=$u
@@ -153,6 +179,10 @@ cloud_linked() {
 # same reason, even though it is a public value.
 _cloud_rpc() {
   local fn=$1 body=$2 result
+  # Discovery is itself fallible. Never attribute the previous request's HTTP
+  # rejection to a new payload that has not reached the ingest endpoint yet.
+  CLOUD_LAST_CODE=0 CLOUD_LAST_BODY='' CLOUD_LAST_ERR=''
+  _cloud_request_timeout_v "${CFG[cloud_timeout]:-20}" || return 1
   cloud_resolve_portal || return 1
   CLOUD_SENT_BYTES=0 CLOUD_RECEIVED_BYTES=0
   _cloud_rpc_once "$fn" "$body"; result=$?
@@ -169,6 +199,9 @@ _cloud_rpc() {
 
 _cloud_rpc_once() {
   local fn=$1 body=$2 url key tmp out rc endpoint mode=hosted
+  local timeout=${CLOUD_RPC_TIMEOUT_OVERRIDE:-${CFG[cloud_timeout]:-20}}
+  _cloud_request_timeout_v "$timeout" || return 1
+  timeout=$CLOUD_REQUEST_TIMEOUT
   url=$(cloud_url)
   key=${CFG[cloud_anon_key]}
   CLOUD_LAST_ERR='' CLOUD_LAST_BODY='' CLOUD_LAST_CODE=0
@@ -209,13 +242,13 @@ _cloud_rpc_once() {
   # away turns "invalid node token" into a bare 400.
   if [[ $mode == direct ]]; then
     out=$(printf 'header = "apikey: %s"\nheader = "Authorization: Bearer %s"\n' "$key" "$key" |
-      curl -sS --max-time "${CFG[cloud_timeout]:-20}" --config - \
+      curl -sS --max-time "$timeout" --config - \
         -X POST "$endpoint" \
         -H 'Content-Type: application/json' \
         -w $'\n%{http_code} %{size_upload} %{size_download}' \
         --data-binary "@$tmp" 2>&1)
   else
-    out=$(curl -sS --max-time "${CFG[cloud_timeout]:-20}" \
+    out=$(curl -sS --max-time "$timeout" \
       -X POST "$endpoint" \
       -H 'Content-Type: application/json' \
       -H "User-Agent: hyn-view/$HYN_VERSION" \
@@ -282,9 +315,55 @@ _jbig() {
 }
 
 CLOUD_PAYLOAD=''
+_cloud_monitoring_add() {
+  local ts=$1 level=$2 code=$3 count=$4
+  [[ $count =~ ^[0-9]{1,9}$ ]] || return 0
+  count=$((10#$count))
+  ((count > 0)) || return 0
+  [[ $CLOUD_MONITORING_LOGS == '[' ]] || CLOUD_MONITORING_LOGS+=','
+  CLOUD_MONITORING_LOGS+="{\"ts\":\"$ts\",\"level\":\"$level\",\"code\":\"$code\",\"count\":$count}"
+}
+
+# Upload only structured HYN operational events, never journal text, command
+# arguments or error bodies. The same events remain in the local snapshot.
+cloud_monitoring_logs_v() {
+  local ts=$1 stamp status detail prefix f restarts=0 value unit
+  CLOUD_MONITORING_LOGS='['
+  _cloud_monitoring_add "$ts" info sample_collected 1
+  state_dir_v
+  for prefix in heartbeat cloud_upload; do
+    f="$STATE_DIR/cloud-last-push"
+    [[ $prefix != heartbeat ]] || f=$(cloud_heartbeat_stamp)
+    stamp='' status='' detail=''
+    [[ ! -r $f ]] || IFS=$'\t' read -r stamp status detail <"$f"
+    case $prefix:$status in
+      heartbeat:ok | cloud_upload:ok) _cloud_monitoring_add "$ts" info "${prefix}_ok" 1 ;;
+      heartbeat:fail | cloud_upload:fail) _cloud_monitoring_add "$ts" warn "${prefix}_failed" 1 ;;
+      cloud_upload:paused) _cloud_monitoring_add "$ts" info cloud_upload_paused 1 ;;
+      cloud_upload:suspended) _cloud_monitoring_add "$ts" warn cloud_upload_suspended 1 ;;
+    esac
+  done
+  for unit in "${HW_UNITS[@]}"; do
+    value=${HW_RESTARTS[$unit]:-0}
+    [[ $value =~ ^[0-9]{1,7}$ ]] && restarts=$((restarts + 10#$value))
+  done
+  _cloud_monitoring_add "$ts" warn agent_restarts "$restarts"
+  _cloud_monitoring_add "$ts" crit service_failed "${HW_FAILED:-0}"
+  _cloud_monitoring_add "$ts" warn service_warning "${HW_JOURNAL_WARN:-0}"
+  _cloud_monitoring_add "$ts" crit service_error "${HW_JOURNAL_ERR:-0}"
+  local active=0 i
+  for ((i = 0; i < ${#AL_ID[@]}; i++)); do
+    [[ ${AL_RESOLVED[i]:-0} == 1 ]] || active=$((active + 1))
+  done
+  _cloud_monitoring_add "$ts" warn alerts_active "$active"
+  CLOUD_MONITORING_LOGS+=']'
+}
+
 cloud_payload_v() {
-  local iface=${NET_WAN:-none} ts
+  local iface=${NET_WAN:-none} ts fraction
   printf -v ts '%(%Y-%m-%dT%H:%M:%S%z)T' -1
+  fraction=${EPOCHREALTIME#*[.,]}
+  ts="${ts:0:19}.${fraction:0:6}${ts:19}"
   update_read >/dev/null 2>&1 || true
 
   # Root filesystem is the one mount worth promoting to a top-level number; the
@@ -310,6 +389,10 @@ cloud_payload_v() {
   local p
   p='{'
   p+="\"ts\": \"$ts\""
+  cloud_platform_json_v
+  p+=", \"platform\": $CLOUD_PLATFORM_JSON"
+  cloud_monitoring_logs_v "$ts"
+  p+=", \"monitoring_logs\": $CLOUD_MONITORING_LOGS"
   p+=", \"host\": \"$(_jstr "$HOSTNAME_S")\""
   p+=", \"agent_version\": \"$(_jstr "$HYN_VERSION")\""
   p+=", \"agent_update\": {\"latest\": \"$(_jstr "$UPD_LATEST")\""
@@ -602,10 +685,12 @@ cloud_heartbeat_age_v() {
   return 0
 }
 
-# Send WAN counters only; detailed readings and logs remain local. A subshell
-# preserves the successful heartbeat result if an older portal lacks this RPC.
+# Persist cumulative WAN counters at each beat, but report them at most once
+# per minute after a successful upload. Cumulative counters include the bytes
+# observed during skipped/failed requests. The isolated subshell preserves the
+# successful heartbeat result if an older portal lacks the bandwidth RPC.
 cloud_record_bandwidth() (
-  local token=$1 iface boot line name rx tx body
+  local token=$1 iface boot line name rx tx body lock_fd stamp last='' now=${EPOCHSECONDS:-0}
   declare -F net_find_wan >/dev/null || return 0
   net_find_wan || return 0
   iface=$NET_WAN
@@ -621,8 +706,20 @@ cloud_record_bandwidth() (
     read -r -a fields <<<"${line#*:}"
     rx=${fields[0]:-}; tx=${fields[8]:-}
     [[ $rx =~ ^[0-9]{1,20}$ && $tx =~ ^[0-9]{1,20}$ ]] || return 0
+    local_bandwidth_record "$iface" "$boot" "$rx" "$tx" || warn 'cannot save local bandwidth calculation'
+    state_dir_v
+    have flock || return 0
+    umask 077
+    exec {lock_fd}>"$STATE_DIR/cloud-bandwidth.lock" || return 0
+    flock -w 0 "$lock_fd" || return 0
+    stamp="$STATE_DIR/cloud-bandwidth-sent"
+    [[ ! -r $stamp ]] || read -r last <"$stamp"
+    if [[ $last =~ ^[0-9]{1,12}$ ]] && ((now >= last && now - last < 60)); then return 0; fi
     body="{\"p_node_token\":\"$(_jstr "$token")\",\"p_iface\":\"$(_jstr "$iface")\",\"p_boot_id\":\"$boot\",\"p_rx\":$rx,\"p_tx\":$tx}"
-    _cloud_rpc hyn_record_bandwidth "$body" >/dev/null 2>&1 || true
+    if _cloud_rpc hyn_record_bandwidth "$body" >/dev/null 2>&1 &&
+       json_field_v "$CLOUD_LAST_BODY" status && [[ $JSON_FIELD == ok ]]; then
+      _cloud_stamp "$stamp" "$now" || true
+    fi
     return 0
   done <"$HYN_PROC/net/dev"
 )
@@ -646,7 +743,7 @@ cloud_heartbeat() {
   token=$(secret cloud_node_token)
   body="{\"p_node_token\": \"$(_jstr "$token")\", \"p_agent_version\": \"$(_jstr "$HYN_VERSION")\"}"
   f=$(cloud_heartbeat_stamp)
-  [[ ${CFG[cloud_storage]:-local} == local ]] && rpc=hyn_local_heartbeat
+  [[ ${CFG[cloud_storage]:-cloud} == local ]] && rpc=hyn_local_heartbeat
   if _cloud_rpc "$rpc" "$body"; then
     json_field_v "$CLOUD_LAST_BODY" node_status && CLOUD_HEARTBEAT_STATUS=$JSON_FIELD
     _cloud_stamp "$f" "${EPOCHSECONDS:-0}" ok "${CLOUD_HEARTBEAT_STATUS:-active}"
@@ -685,7 +782,7 @@ _cloud_push_stamp() {
 cloud_web_notify() {
   local subject=${1:0:300} text=${2:0:10000} html=${3:0:20000}
   local severity=${4:-info} category=${5:-alert} token body checksum bucket material
-  if [[ ${CFG[cloud_storage]:-local} != cloud ]] && ! cfg_on cloud_notifications; then
+  if [[ ${CFG[cloud_storage]:-cloud} != cloud ]] && ! cfg_on cloud_notifications; then
     CLOUD_LAST_ERR='cloud notifications are disabled in local mode; enable cloud_notifications locally to share email content'
     return 1
   fi
@@ -719,31 +816,48 @@ cloud_collect_full() {
   net_link "${NET_WAN:-}" 2>/dev/null || true
   net_identity 1 2>/dev/null || true
   net_tuning 2>/dev/null || true
-  local prows=${CFG[proc_rows]:-8} psort=${CFG[proc_sort]:-cpu}
+  local prows=${CFG[proc_rows]:-8} psort=${CFG[proc_sort]:-cpu} started elapsed
+  sample_clock_ms_v; started=$SAMPLE_CLOCK_MS
   proc_sample 0 "$prows" "$psort" 2>/dev/null || true
   sleep 1
-  proc_sample 1000 "$prows" "$psort" 2>/dev/null || true
+  sample_clock_ms_v; elapsed=$((SAMPLE_CLOCK_MS - started))
+  ((elapsed > 0)) || elapsed=0
+  proc_sample "$elapsed" "$prows" "$psort" 2>/dev/null || true
+  cloud_platform_collect
   cloud_payload_v
   local_store_snapshot || { warn 'cannot save local telemetry; check local disk permissions/space'; return 1; }
 }
 
 cloud_ingest_collected() {
-  local quiet=${1:-0} token body f rpc=hyn_ingest
+  local quiet=${1:-0} token body f rpc=hyn_ingest queued=''
   CLOUD_INGESTED=0
-  if [[ ${CFG[cloud_storage]:-local} != cloud ]]; then
+  if [[ ${CLOUD_LOCAL_PAYLOAD:-} != "$CLOUD_PAYLOAD" ]]; then
+    local_store_snapshot || { CLOUD_LAST_ERR='cannot save the local telemetry backup'; return 1; }
+  fi
+  if [[ ${CFG[cloud_storage]:-cloud} != cloud ]]; then
     if [[ -n ${CFG[cloud_url]:-} && -n ${CFG[cloud_anon_key]:-} ]]; then
       CLOUD_LAST_ERR='local storage mode cannot upload readings directly to Supabase; use the hosted portal for transient viewing'
       ((quiet)) || warn "$CLOUD_LAST_ERR"
       return 1
     fi
     rpc=hyn_transient_snapshot
+  else
+    queued=$(local_outbox_enqueue) || {
+      CLOUD_LAST_ERR='cannot persist the cloud retry record (check local disk space, permissions and reading size); local backup retained'
+      ((quiet)) || warn "$CLOUD_LAST_ERR"
+      return 1
+    }
   fi
   token=$(secret cloud_node_token)
   body="{\"p_node_token\": \"$(_jstr "$token")\", \"p_payload\": $CLOUD_PAYLOAD}"
   f=$(_cloud_push_stamp)
-  if _cloud_rpc "$rpc" "$body"; then
+  if _cloud_rpc "$rpc" "$body" && cloud_ingest_acknowledged "$rpc"; then
     CLOUD_INGESTED=1
+    if [[ -n $queued ]]; then
+      rm -f -- "$queued" && _local_store_sync "${queued%/*}" || warn 'cloud reading accepted; acknowledgement persistence failed and may be retried'
+    fi
     _cloud_stamp "$f" "${EPOCHSECONDS:-0}" ok
+    [[ $rpc != hyn_ingest ]] || cloud_outbox_flush || true
     ((quiet)) || printf 'hyn: pushed to %s\n' "$(cloud_url)"
     return 0
   fi
@@ -761,6 +875,99 @@ cloud_ingest_collected() {
   ((quiet)) || warn "push failed: $CLOUD_LAST_ERR"
   return 1
 }
+
+# HTTP success alone cannot acknowledge a paused, rejected or malformed result.
+# The server may explicitly discard a reading older than its 48-hour window;
+# that is an acknowledgement because the longer local backup still exists.
+cloud_ingest_acknowledged() {
+  local rpc=${1:-hyn_ingest}
+  case $rpc in
+    hyn_transient_snapshot)
+      # Explicit local-mode viewing uses the hosted cache contract, not the
+      # durable database RPC response. Never treat a plain HTTP 200 as proof
+      # that the portal actually accepted the temporary snapshot.
+      if json_field_v "$CLOUD_LAST_BODY" status && [[ $JSON_FIELD == 200 ]] &&
+         json_field_v "$CLOUD_LAST_BODY" storage && [[ $JSON_FIELD == transient ]]; then return 0; fi ;;
+    hyn_ingest)
+      if json_field_v "$CLOUD_LAST_BODY" status && [[ $JSON_FIELD == ok ]]; then return 0; fi ;;
+  esac
+  json_field_v "$CLOUD_LAST_BODY" node_status || true
+  case $JSON_FIELD in
+    paused) CLOUD_LAST_ERR='node paused' ;;
+    suspended) CLOUD_LAST_ERR='node suspended' ;;
+    *) CLOUD_LAST_ERR='cloud did not acknowledge telemetry; local backup retained' ;;
+  esac
+  return 1
+}
+
+_cloud_outbox_permanent_rejection() {
+  [[ $CLOUD_LAST_CODE == 413 ]] && return 0
+  [[ $CLOUD_LAST_CODE == 400 ]] || return 1
+  # The portal also maps database outages, permission failures and missing RPCs
+  # to HTTP 400. Only known, deterministic payload validation errors may retire
+  # an outbox entry (after its local backup is durable); unknown errors retry.
+  local message=${CLOUD_LAST_ERR,,}
+  message=${message#http 400: }
+  case $message in
+    'request body must be valid json' | 'request body must be a json object' | \
+      'monitoring payload must be an object' | 'monitoring payload exceeds 64 kib' | \
+      'stored monitoring payload exceeds 16 kib' | \
+      'monitoring timestamp is in the future or invalid') return 0 ;;
+    'invalid input syntax for type smallint: '* | \
+      'invalid input syntax for type integer: '* | \
+      'invalid input syntax for type bigint: '* | \
+      'invalid input syntax for type numeric: '* | \
+      'invalid input syntax for type real: '* | \
+      'invalid input syntax for type double precision: '* | \
+      'invalid input syntax for type timestamp with time zone: '* | \
+      'invalid input syntax for type timestamp without time zone: '* | \
+      'invalid input syntax for type json') return 0 ;;
+  esac
+  return 1
+}
+
+# New readings always go first so recovery never makes the current dashboard
+# wait behind an outage backlog. Then replay at most six older records / 1 MiB,
+# bounded by a 15-second time budget. Lost acknowledgements are safe because
+# ingestion deduplicates by node and the ORIGINAL sample timestamp.
+cloud_outbox_flush() (
+  [[ ${CFG[cloud_storage]:-cloud} == cloud ]] || return 0
+  local_store_dir_v || return 1
+  have flock || return 1
+  local lock_fd node=${CFG[cloud_node_id]:-} f name recorded item_node bytes checksum
+  local payload token body count=0 total=0 CLOUD_RPC_DEADLINE_MS
+  sample_clock_ms_v; CLOUD_RPC_DEADLINE_MS=$((SAMPLE_CLOCK_MS + 15000))
+  umask 077
+  exec {lock_fd}>"$LOCAL_STORE/outbox.lock" || return 1
+  flock -w 0 "$lock_fd" || return 0
+  _local_outbox_prune_locked || return 1
+  token=$(secret cloud_node_token)
+  while IFS= read -r f; do
+    [[ -f $f && ! -L $f ]] || continue
+    name=${f##*/}
+    [[ $name =~ ^([0-9]{1,12})_([A-Za-z0-9-]{1,64})_([0-9]{1,5})_([0-9]+)\.json$ ]] || continue
+    recorded=$((10#${BASH_REMATCH[1]})) item_node=${BASH_REMATCH[2]} bytes=$((10#${BASH_REMATCH[3]})) checksum=${BASH_REMATCH[4]}
+    [[ $item_node == "$node" ]] || continue
+    ((recorded <= ${EPOCHSECONDS:-0} + 300)) || continue
+    _cloud_request_timeout_v "${CFG[cloud_timeout]:-20}" || break
+    ((count < 6 && total + bytes <= 1048576)) || break
+    ((bytes > 0 && bytes <= 60000)) || continue
+    payload=$(<"$f")
+    [[ $payload == '{'* && $payload == *'}' ]] || continue
+    body="{\"p_node_token\":\"$(_jstr "$token")\",\"p_payload\":$payload}"
+    count=$((count + 1)); total=$((total + bytes))
+    if ! { _cloud_rpc hyn_ingest "$body" && cloud_ingest_acknowledged; }; then
+      if _cloud_outbox_permanent_rejection; then
+        local_outbox_quarantine "$f" "$payload" "$CLOUD_LAST_CODE" || return 1
+        warn "cloud rejected a queued reading (HTTP $CLOUD_LAST_CODE); preserved in local history, continuing later readings"
+        continue
+      fi
+      return 1
+    fi
+    rm -f -- "$f" || return 1
+    _local_store_sync "$LOCAL_STORE/outbox" || return 1
+  done < <(_local_outbox_paths)
+)
 
 # ---------------------------------------------------------------------------
 # portal-requested maintenance
@@ -956,7 +1163,7 @@ _cloud_run_pending() {
 # lease-expired command may be reclaimed after a crash, and installing the same
 # npm release twice still converges on the same package and systemd units.
 cloud_command_poll() {
-  local quiet=${1:-0} token body status action id
+  local quiet=${1:-0} token body status='' action='' id=''
   CLOUD_COMMAND_CLAIMED=0
   CLOUD_COMMAND_UPDATED=0
   CLOUD_COMMAND_SYNCED=0
@@ -987,6 +1194,37 @@ cloud_command_poll() {
   CLOUD_COMMAND_CLAIMED=1
   CLOUD_COMMAND_ID=$id
   cloud_command_execute "$action" "$quiet"
+}
+
+# Verification must load the installed collectors, not merely replace the
+# HYN_VERSION variable in the old updater's shell. No credential crosses argv.
+cloud_verify_installed_update() {
+  "$HYN_ROOT/bin/hyn" cloud verify-update "$CLOUD_COMMAND_TARGET" "$CLOUD_COMMAND_ID"
+}
+
+cloud_finish_update() {
+  local target=${1:-} id=${2:-}
+  ver_valid "$target" && [[ -z $id || $id =~ ^[0-9a-fA-F-]{36}$ ]] || return 1
+  CLOUD_COMMAND_TARGET=$target CLOUD_COMMAND_ID=$id
+  if [[ $HYN_VERSION != "$target" ]]; then
+    cloud_command_report failed failed 'Installed collector version changed before verification; retry the update' "$target" "$HYN_VERSION" || true
+    return 1
+  fi
+  cloud_command_report running verifying \
+    "Synchronizing fresh telemetry from hyn-view $HYN_VERSION" "$target" "$HYN_VERSION" || return 1
+  if ! cloud_collect_full; then
+    cloud_command_report failed failed 'Update installed, but local snapshot could not be saved' "$target" "$HYN_VERSION" || true
+    return 1
+  fi
+  if ! cloud_ingest_collected 1 || ((CLOUD_INGESTED == 0)); then
+    cloud_command_report failed failed \
+      "hyn-view $HYN_VERSION installed, but fresh telemetry did not reach the portal: ${CLOUD_LAST_ERR:-upload failed}" \
+      "$target" "$HYN_VERSION" || true
+    return 1
+  fi
+  cloud_command_report succeeded completed \
+    "Updated to hyn-view $HYN_VERSION; managed services restarted, verified, and current telemetry synchronized" \
+    "$target" "$HYN_VERSION"
 }
 
 # The command body itself, reached either straight from the check-in or from
@@ -1061,27 +1299,12 @@ cloud_command_execute() {
       ((quiet)) || printf 'hyn: updated to %s (not linked, so no reading was sent)\n' "$HYN_VERSION"
       return 0
     fi
-    # Do not declare the portal operation complete until a full snapshot using
-    # the newly installed version has been accepted. Otherwise the modal and
-    # completion email can say "updated" while every chart and the fleet
-    # version still show the pre-update reading until the next interval.
-    cloud_command_report running verifying \
-      "Synchronizing fresh telemetry from hyn-view $HYN_VERSION" \
-      "$CLOUD_COMMAND_TARGET" "$HYN_VERSION" || true
-    if ! cloud_collect_full; then
-      cloud_command_report failed failed 'Update installed, but local snapshot could not be saved' "$CLOUD_COMMAND_TARGET" "$HYN_VERSION" || true
-      return 1
-    fi
-    if ! cloud_ingest_collected 1 || ((CLOUD_INGESTED == 0)); then
-      cloud_command_report failed failed \
-        "hyn-view $HYN_VERSION was installed and its services restarted, but fresh telemetry did not reach the portal: ${CLOUD_LAST_ERR:-upload failed; run sudo hyn doctor}" \
+    if ! cloud_verify_installed_update; then
+      cloud_command_report failed failed 'Package installed, but verification by the installed CLI failed; retry synchronization' \
         "$CLOUD_COMMAND_TARGET" "$HYN_VERSION" || true
       return 1
     fi
     CLOUD_COMMAND_SYNCED=1
-    cloud_command_report succeeded completed \
-      "Updated to hyn-view $HYN_VERSION; managed services restarted, verified, and current telemetry synchronized" \
-      "$CLOUD_COMMAND_TARGET" "$HYN_VERSION" || true
     return 0
   fi
   UPD_PROGRESS_HOOK=''
@@ -1105,8 +1328,12 @@ cloud_push() {
 
   if ((respect_interval)); then
     state_dir_v
-    local check_ts='' check_min=${CFG[cloud_checkin_min]:-5}
-    [[ $check_min =~ ^[1-9][0-9]{0,2}$ ]] && ((check_min <= 60)) || check_min=5
+    local check_ts='' check_min=${CFG[cloud_checkin_min]:-1} push_min=${CFG[cloud_push_min]:-1}
+    [[ $check_min =~ ^[1-9][0-9]{0,2}$ ]] && ((check_min <= 60)) || check_min=1
+    [[ $push_min =~ ^[1-9][0-9]{0,3}$ ]] && ((push_min <= 1440)) || push_min=1
+    # A legacy five-minute control interval cannot suppress one-minute cloud
+    # readings after the fleet receives its explicit managed storage policy.
+    if [[ ${CFG[cloud_storage]:-cloud} == cloud ]] && ((check_min > push_min)); then check_min=$push_min; fi
     [[ -r $STATE_DIR/cloud-checkin ]] && read -r check_ts <"$STATE_DIR/cloud-checkin"
     if [[ $check_ts =~ ^[0-9]+$ ]] && ((${EPOCHSECONDS:-0} >= check_ts && ${EPOCHSECONDS:-0} - check_ts < check_min * 60)); then
       return 0
@@ -1117,7 +1344,7 @@ cloud_push() {
   # A check-in is also the node's opportunity to receive dashboard-managed
   # settings and email presentation. Reload CFG after a successful pull so the
   # new values affect this same cycle. Only the narrow portal allowlist wins;
-  # endpoints, credentials, privacy choices and all other local settings remain
+  # endpoints, credentials and other local-only settings remain
   # controlled by the root-owned files.
   #
   # This same RPC is what records the durable heartbeat, so one flaky response
@@ -1148,7 +1375,7 @@ cloud_push() {
 
   # Local recording has its own timer, independent of network health. Scheduled
   # check-ins exchange control data only; explicit push/sync shares one reading.
-  if ((respect_interval)) && [[ ${CFG[cloud_storage]:-local} != cloud ]]; then return 0; fi
+  if ((respect_interval)) && [[ ${CFG[cloud_storage]:-cloud} != cloud ]]; then return 0; fi
 
   # The timer wakes every minute so a dashboard change is picked up quickly.
   # Expensive collection and ingestion still happen only at cloud_push_min --
@@ -1157,8 +1384,8 @@ cloud_push() {
   # reading. Waiting up to cloud_push_min to show the result of an action someone
   # just took is indistinguishable from the action not working.
   if ((respect_interval && CLOUD_COMMAND_UPDATED == 0 && CLOUD_CONFIG_CHANGED == 0)); then
-    local prior_ts='' prior_status='' prior_error='' interval=${CFG[cloud_push_min]:-10}
-    [[ $interval =~ ^[1-9][0-9]*$ ]] || interval=10
+    local prior_ts='' prior_status='' prior_error='' interval=${CFG[cloud_push_min]:-1}
+    [[ $interval =~ ^[1-9][0-9]*$ ]] || interval=1
     local prior_stamp
     prior_stamp=$(_cloud_push_stamp)
     [[ -r $prior_stamp ]] && IFS=$'\t' read -r prior_ts prior_status prior_error <"$prior_stamp"
@@ -1382,6 +1609,40 @@ cloud_template_write() {
 }
 
 CLOUD_NODE_STATUS=''
+# Reject truncated envelopes before allowing an empty config to release saved
+# overrides. Delimiters inside quoted JSON strings are not structural.
+_cloud_complete_object() {
+  local stack='' quoted=0 part has_quote tail slashes c started=0 finished=0 LC_ALL=C
+  # Skip quoted spans in chunks: templates can contain hundreds of kilobytes
+  # of base64. Slicing that full string once per character is quadratic in Bash.
+  while :; do
+    has_quote=1
+    IFS= read -r -d '"' part || has_quote=0
+    [[ -n $part || $has_quote == 1 ]] || break
+    if ((quoted)); then
+      ((has_quote)) || return 1
+      tail=$part; slashes=0
+      while [[ ${tail: -1} == \\ ]]; do slashes=$((slashes + 1)); tail=${tail%?}; done
+      ((slashes % 2)) || quoted=0
+    else
+      while IFS= read -r -N 1 c; do
+        [[ $c != [[:space:]] ]] || continue
+        ((finished == 0)) || return 1
+        if ((started == 0)); then [[ $c == '{' ]] || return 1; started=1; fi
+        case $c in
+          '{' | '[') stack+=$c ;;
+          '}') [[ ${stack: -1} == '{' ]] || return 1; stack=${stack%?} ;;
+          ']') [[ ${stack: -1} == '[' ]] || return 1; stack=${stack%?} ;;
+        esac
+        [[ -n $stack ]] || finished=1
+      done <<<"$part"
+      if ((has_quote)); then ((started && !finished)) || return 1; quoted=1; fi
+    fi
+    ((has_quote)) || break
+  done <<<"$1"
+  ((started && finished && !quoted))
+}
+
 # Set by cloud_config_pull: 1 when the pulled settings differed from the cached
 # ones. cloud_push reads it to send a reading in the same cycle, so a change made
 # in the portal is visible on the portal.
@@ -1402,17 +1663,25 @@ cloud_config_pull() {
   token=$(secret cloud_node_token)
   body="{\"p_node_token\": \"$(_jstr "$token")\"}"
   local config_rpc=hyn_fetch_config
-  if [[ ${CFG[cloud_storage]:-local} != cloud ]] && ! cfg_on cloud_notifications; then
+  if [[ ${CFG[cloud_storage]:-cloud} != cloud ]] && ! cfg_on cloud_notifications; then
     config_rpc=hyn_fetch_local_config
   fi
   _cloud_rpc "$config_rpc" "$body" || {
     ((quiet)) || warn "config pull failed: $CLOUD_LAST_ERR"
     return 1
   }
+  if ! _cloud_complete_object "$CLOUD_LAST_BODY"; then
+    CLOUD_LAST_ERR='portal returned incomplete settings; keeping the previous configuration'
+    return 1
+  fi
 
-  local status reason
+  local status='' reason=''
   json_field_v "$CLOUD_LAST_BODY" node_status && status=$JSON_FIELD
   json_field_v "$CLOUD_LAST_BODY" status_reason && reason=$JSON_FIELD
+  case $status in
+    active | paused | suspended) ;;
+    *) CLOUD_LAST_ERR='portal returned an invalid settings response'; return 1 ;;
+  esac
   CLOUD_NODE_STATUS=$status
 
   local encoded
@@ -1437,19 +1706,35 @@ cloud_config_pull() {
     rest=${rest#*:}
     while [[ $rest == [[:space:]]* ]]; do rest=${rest#?}; done
     if [[ $rest == \{* ]]; then
-      local depth=0 i c
+      local depth=0 i c quoted=0 escaped=0
       for ((i = 0; i < ${#rest}; i++)); do
         c=${rest:i:1}
+        cfgobj+=$c
+        if ((quoted)); then
+          if ((escaped)); then escaped=0
+          elif [[ $c == \\ ]]; then escaped=1
+          elif [[ $c == '"' ]]; then quoted=0; fi
+          continue
+        fi
+        [[ $c != '"' ]] || { quoted=1; continue; }
         [[ $c == '{' ]] && depth=$((depth + 1))
         [[ $c == '}' ]] && depth=$((depth - 1))
-        cfgobj+=$c
         ((depth == 0)) && break
       done
     fi
   fi
 
+  if [[ -z $cfgobj || ${depth:-1} != 0 ]]; then
+    CLOUD_LAST_ERR='portal returned incomplete settings; keeping the previous configuration'
+    return 1
+  fi
+
   # Flatten "key": value pairs into the key=value form cfg_load already parses,
   # so no new config format enters the codebase.
+  local f tmp
+  f=$(cloud_config_cache)
+  local -A previous=()
+  [[ ! -r $f ]] || _read_kv "$f" previous
   local -a lines=()
   if [[ -n $cfgobj && $cfgobj != '{}' ]]; then
     local inner=${cfgobj#\{}
@@ -1460,7 +1745,7 @@ cloud_config_pull() {
       k=${pair%%:*}
       v=${pair#*:}
       k=${k//\"/}
-      k=${k// /}
+      k=${k//[[:space:]]/}
       v=${v#"${v%%[![:space:]]*}"}
       v=${v%"${v##*[![:space:]]}"}
       v=${v//\"/}
@@ -1472,20 +1757,24 @@ cloud_config_pull() {
       if _cfg_cloud_allowed "$k" && _cfg_cloud_value_allowed "$k" "$v"; then
         lines+=("$k=$v")
       else
+        # An invalid replacement must not erase a previously valid setting.
+        # Omitted keys still release an override intentionally.
+        if _cfg_cloud_allowed "$k" && [[ -n ${previous[$k]:-} ]] &&
+           _cfg_cloud_value_allowed "$k" "${previous[$k]}"; then
+          lines+=("$k=${previous[$k]}")
+        fi
         ((quiet)) || warn "portal sent a local-only, unknown or unsafe setting, ignoring: $k"
       fi
     done
     unset IFS
   fi
 
-  local f tmp
-  f=$(cloud_config_cache)
-  tmp="$f.tmp"
+  tmp=$(mktemp "$f.tmp.XXXXXX") || { warn "cannot write $f"; return 1; }
   {
     printf '# Written by `hyn config pull`. Do not edit: it is overwritten.\n'
     printf '# Edit these settings in the web portal instead.\n'
-    ((${#lines[@]})) && printf '%s\n' "${lines[@]}"
-  } >"$tmp" || { warn "cannot write $f"; return 1; }
+    if ((${#lines[@]})); then printf '%s\n' "${lines[@]}"; fi
+  } >"$tmp" || { rm -f "$tmp"; warn "cannot write $f"; return 1; }
 
   # Did anything actually change? The answer decides whether this check-in also
   # sends a reading. Without it, a threshold edited in the portal is accepted
@@ -1497,7 +1786,7 @@ cloud_config_pull() {
   if [[ ! -r $f ]] || ! cmp -s "$tmp" "$f"; then
     CLOUD_CONFIG_CHANGED=1
   fi
-  mv -f "$tmp" "$f" || { warn "cannot write $f"; return 1; }
+  _local_store_publish "$tmp" "$f" || { warn "cannot persist $f"; return 1; }
 
   # The whole file is rewritten every pull rather than merged, so a setting the
   # portal stops sending goes back to the agent's own default instead of being
@@ -1562,8 +1851,9 @@ cloud_status() {
   url=$(cloud_url)
   token=$(secret cloud_node_token)
   printf 'cloud    %s\n' "$(cfg_on cloud_enabled && printf enabled || printf disabled)"
-  printf 'storage  %s (history: %s/local)\n' "${CFG[cloud_storage]:-local}" "$(state_dir)"
-  printf 'check-in every %s minute(s)\n' "${CFG[cloud_checkin_min]:-5}"
+  printf 'storage  %s (local backup: %s/local)\n' "${CFG[cloud_storage]:-cloud}" "$(state_dir)"
+  printf 'check-in every %s minute(s), capped by the cloud reading interval\n' "${CFG[cloud_checkin_min]:-1}"
+  printf 'cloud history: rolling 48 hours; local history: %s days / %s MiB\n' "${CFG[local_keep_days]:-14}" "${CFG[local_max_mb]:-256}"
   printf 'url      %s\n' "${url:-(not set)}"
   printf 'anon key %s\n' "$([[ -n ${CFG[cloud_anon_key]} ]] && printf 'set' || printf '(not set)')"
   printf 'portal   %s\n' "${CFG[cloud_portal_url]:-(not set)}"

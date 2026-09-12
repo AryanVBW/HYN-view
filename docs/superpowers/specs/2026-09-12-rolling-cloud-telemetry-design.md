@@ -1,5 +1,10 @@
 # Rolling Cloud Telemetry With Local Backup
 
+> Superseded by the user's 2026-09-12 correction: cloud retention is **48 hours**,
+> and bounded HYN operational summaries plus dashboard details are copied to
+> cloud and local storage. See [implemented policy](../../rolling-monitoring.md).
+> The 72-hour proposal below is retained as design history, not the active policy.
+
 ## Goal
 
 Make the hosted dashboard the primary, dependable view of every linked server while keeping long-term and sensitive history on the server itself. Supabase retains only the most recent 72 hours of dashboard-safe telemetry. The existing local archive remains an independent, longer-lived backup and supplies a bounded retry queue when cloud delivery fails.

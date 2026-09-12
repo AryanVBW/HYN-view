@@ -1,4 +1,43 @@
-# HYN CLI 1.12.0 release verification
+# HYN CLI 1.10.0 release verification
+
+## September 12 monitoring update
+
+CLI **1.10.0** is the chosen next release after npm latest **1.9.0**.
+The current work adds [rolling 48-hour cloud monitoring](rolling-monitoring.md),
+continuous bounded secondary local backups, offline delivery replay, VPS/cgroup
+observations and Ubuntu x64/ARM CI. The portal now has compact history queries,
+small freshness polling, current-reading age and a protected retention endpoint.
+This supersedes the September 11 local-only behavior described below.
+
+The complete CLI gate passed 1,507 checks with CI's `HYN_NO_POSTINSTALL=1`:
+1,009 selfchecks, 149 cloud integration, 83 updater, 119 local storage/replay,
+38 unattended, 7 bandwidth, 27 release, 29 report and 46 platform checks.
+Shell syntax, warning-level ShellCheck, whitespace checks and npm package-content
+validation passed. Package metadata and the executable both report 1.10.0.
+
+Portal verification passed: 135 helper/release checks, 26 UI checks, 32 route
+checks, full typecheck and production build. Lint has no errors and one existing
+image-optimization warning. The PostgreSQL migration chain plus schema reapply
+passed 307 checks, including the new retention suite twice.
+
+Supabase access was restored and migration `20260912190000` was applied to HYN
+project `iycjemnbfyuastnvagcj`. Database Cron is enabled, its five-minute retention
+job succeeded, and expired metrics were confirmed absent after cleanup. Pruning
+is denied to anonymous/ordinary authenticated roles and permitted to service-role
+maintenance. Portal commit `d1de3ef` is pushed and deployed to Heroku;
+[production run 34709931660](https://github.com/V1vekW/HYN-view-web/actions/runs/34709931660)
+passed validation, the production database gate, deployment and smoke checks.
+
+npm publish authentication was restored using the existing publishing account.
+Observed live installation
+metadata showed three 1.8.0 nodes using cloud mode and four 1.9.0 nodes still
+using local mode despite the new managed cloud policy. Those local-mode agents
+require the 1.10.0 package before this setting can take effect. This is not proof
+of a new CLI install, its local backup, or a new-agent round trip.
+The npm latest version was rechecked as **1.9.0** on September 12; the older
+observations below are historical, not present registry or deployment claims.
+
+## September 11 baseline
 
 Status on 2026-09-11: **local release candidate; not published or certified for production**.
 The target is Ubuntu with Bash 5+, GNU coreutils and util-linux `flock`, supervised

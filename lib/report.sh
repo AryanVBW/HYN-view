@@ -4,8 +4,8 @@
 # A daily report needs history, and history needs someone to write it down. So
 # there are two halves:
 #
-#   record_sample()  one TSV row, appended by the hyn-record timer every few
-#                    minutes. Cheap and append-only.
+#   record_sample()  one TSV row, durably recorded by the hyn-record timer every
+#                    few minutes in a bounded history file.
 #   report_run()     aggregates the last 24h into something worth reading.
 #
 # The report deliberately reports CHANGE as well as level. "Disk at 71%" is not
@@ -16,7 +16,10 @@
 #   1 ts  2 cpu  3 steal  4 iowait  5 mem  6 swap  7 load_milli  8 disk_max_pct
 #   9 rx_bps 10 tx_bps 11 rx_total 12 tx_total 13 retrans_pm 14 lat_us
 #  15 ct_pct 16 hw_active 17 hw_rss 18 hw_cpu 19 procs 20 hw_restarts
-#  21 power_deciwatts 22 boot_id 23 wan_iface
+#  21 power_deciwatts 22 boot_id 23 wan_iface 24 ifindex 25 monotonic_ms
+
+# shellcheck source=lib/decimal.sh
+source "${HYN_LIB:-${BASH_SOURCE[0]%/*}}/decimal.sh"
 
 metrics_file() {
   state_dir_v
@@ -32,16 +35,21 @@ alert_log_file() {
 # recording
 # ---------------------------------------------------------------------------
 record_sample() {
-  local f keep
+  local f keep row started elapsed
   # Two samples for rates, same as snapshot and the alert run.
+  sample_clock_ms_v; started=$SAMPLE_CLOCK_MS
   net_sample 0
+  net_snmp 0
   cpu_sample 0
   power_read 0
+  cfg_on highway_track && hw_process 0
   sleep 1
-  net_sample 1000
-  net_snmp 1000
-  cpu_sample 1000
-  power_read 1000
+  sample_clock_ms_v; elapsed=$((SAMPLE_CLOCK_MS - started))
+  ((elapsed > 0)) || elapsed=0
+  net_sample "$elapsed"
+  net_snmp "$elapsed"
+  cpu_sample "$elapsed"
+  power_read "$elapsed"
   mem_sample
   sys_sample
   psi_sample
@@ -49,7 +57,7 @@ record_sample() {
   net_conntrack
   net_latency_read
   net_retrans_permille
-  cfg_on highway_track && hw_sample 1000
+  cfg_on highway_track && hw_sample "$elapsed"
 
   local ifc=${NET_WAN:-} loadm=0 diskmax=0 mp lat=0 k hwrest=0 u r
   [[ ${LOAD1:-} =~ ^[0-9.]+$ ]] && { parse_fixed3_v "$LOAD1"; loadm=$FIX3; }
@@ -75,63 +83,111 @@ record_sample() {
   # defaults it, so a 20-column row simply has no power history. An unreadable
   # sensor records as empty, never 0: averaging a fabricated zero into the day
   # would understate every figure in the report.
-  local boot='-'
+  local boot='-' ifindex='-' mono=${NET_SAMPLE_MONO_MS:--}
   [[ ! -r $HYN_PROC/sys/kernel/random/boot_id ]] || read -r boot <"$HYN_PROC/sys/kernel/random/boot_id"
   [[ $boot =~ ^[A-Za-z0-9-]{1,64}$ ]] || boot='-'
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  if [[ $ifc =~ ^[A-Za-z0-9_.:-]{1,64}$ && -r $HYN_SYS/class/net/$ifc/ifindex ]]; then
+    read -r ifindex <"$HYN_SYS/class/net/$ifc/ifindex" || ifindex='-'
+  fi
+  [[ $ifindex =~ ^[1-9][0-9]{0,9}$ ]] || ifindex='-'
+  [[ $mono =~ ^[0-9]{1,15}$ ]] || mono='-'
+  printf -v row '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
     "${EPOCHSECONDS:-0}" "$CPU_PCT" "$CPU_STEAL" "$CPU_IOWAIT" "$MEM_PCT" "$SWAP_PCT" \
     "$loadm" "$diskmax" "${NET_RXR[$ifc]:-0}" "${NET_TXR[$ifc]:-0}" \
     "${NET_RX[$ifc]:-0}" "${NET_TX[$ifc]:-0}" "$NET_RETRANS_PM" "$lat" \
     "${CT_PCT:-0}" "${HW_ACTIVE:-0}" "${HW_RSS:-0}" "${HW_CPU:-0}" \
-    "${PROC_TOTAL:-0}" "$hwrest" "${PWR_INPUT_DW:--}" "$boot" "${ifc:--}" >>"$f"
+    "${PROC_TOTAL:-0}" "$hwrest" "${PWR_INPUT_DW:--}" "$boot" "${ifc:--}" "$ifindex" "$mono"
 
   # Trim by age rather than line count, so changing the record interval does not
   # silently change how much history is kept.
   keep=${CFG[metrics_keep_days]:-8}
-  [[ $keep =~ ^[0-9]+$ ]] || keep=8
-  _metrics_trim "$f" $((keep * 86400))
+  [[ $keep =~ ^[1-9][0-9]{0,2}$ ]] || keep=8
+  _metrics_append_rows "$f" $((keep * 86400)) "$row" || {
+    warn 'cannot save local report sample; check disk space, permissions and locking'; return 1;
+  }
   # Detailed local history is recorded even while unpaired or offline. It is
   # never wrapped in a token or queued for a later bulk upload.
+  if declare -F cloud_platform_collect >/dev/null; then cloud_platform_collect; fi
   cloud_payload_v
   local_store_snapshot || { warn 'cannot save detailed local history'; return 1; }
   return 0
 }
 
+# The lock covers the complete append/rotation transaction. Publish a flushed
+# replacement so a crash or concurrent collector cannot leave half a row in the
+# committed file, or lose an append when another process rotates it.
+_metrics_append_rows() (
+  local f=$1 maxage=$2 tmp lock_fd orphan last=''
+  shift 2
+  (($# > 0)) || return 0
+  have flock || { warn 'local report history requires flock'; return 1; }
+  umask 077
+  exec {lock_fd}>"$f.lock" || return 1
+  flock -w 10 "$lock_fd" || { warn 'local report history is busy'; return 1; }
+  # A killed writer releases flock but cannot clean its unpublished file.
+  # Under this lock, every matching temporary belongs to an earlier writer.
+  for orphan in "$f".pending.*; do
+    [[ -f $orphan ]] || continue
+    rm -f "$orphan" || return 1
+  done
+  tmp=$(mktemp "$f.pending.XXXXXX") || return 1
+  if [[ -e $f ]]; then
+    cat "$f" >"$tmp" || { rm -f "$tmp"; return 1; }
+    last=$(tail -c 1 "$f") || { rm -f "$tmp"; return 1; }
+    # Preserve an old interrupted row as a separate invalid row, rather than
+    # joining it to and corrupting the next good sample.
+    if [[ -n $last ]]; then
+      printf '\n' >>"$tmp" || { rm -f "$tmp"; return 1; }
+    fi
+  fi
+  printf '%s\n' "$@" >>"$tmp" || { rm -f "$tmp"; return 1; }
+  _metrics_trim "$tmp" "$maxage" || { rm -f "$tmp"; return 1; }
+  _metrics_sync "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
+  _metrics_sync "${f%/*}"
+)
+
+_metrics_sync() {
+  [[ ${OSTYPE:-} == linux* ]] || return 0
+  # GNU sync with a pathname fsyncs that file (or directory); -f would flush
+  # every dirty file on the containing filesystem, including unrelated work.
+  sync -- "$1"
+}
+
 _metrics_trim() {
-  local f=$1 maxage=$2 cutoff line ts tmp n=0 total=0
+  local f=$1 maxage=$2 cutoff line ts tmp n=0
   cutoff=$((${EPOCHSECONDS:-0} - maxage))
   [[ -r $f ]] || return 0
   # Only rewrite when there is actually something to drop; this runs every few
   # minutes and rewriting a 2000-line file each time is pointless I/O.
   while IFS=$'\t' read -r ts _; do
-    ((total++))
-    [[ $ts =~ ^[0-9]+$ ]] && ((ts < cutoff)) && ((n++))
+    [[ $ts =~ ^[0-9]{1,12}$ ]] && ((10#$ts < cutoff)) && ((n++))
   done <"$f"
   ((n == 0)) && return 0
-  tmp="$f.tmp.$$"
-  : >"$tmp" || return 1
-  while IFS= read -r line; do
+  tmp=$(mktemp "$f.trim.XXXXXX") || return 1
+  while IFS= read -r line || [[ -n $line ]]; do
     ts=${line%%$'\t'*}
-    [[ $ts =~ ^[0-9]+$ ]] || continue
-    ((ts >= cutoff)) && printf '%s\n' "$line" >>"$tmp"
+    [[ $ts =~ ^[0-9]{1,12}$ ]] && ((10#$ts < cutoff)) && continue
+    printf '%s\n' "$line" >>"$tmp" || { rm -f "$tmp"; return 1; }
   done <"$f"
-  mv -f "$tmp" "$f"
+  mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
   return 0
 }
 
 # Append-only record of what fired, so the daily report can say what happened
 # overnight without keeping the alert engine's state around.
 alerts_log_new() {
-  local f i now=${EPOCHSECONDS:-0}
+  local f i row now=${EPOCHSECONDS:-0}
+  local -a rows=()
   f=$(alert_log_file)
   state_dir_v
   [[ -d $STATE_DIR ]] || mkdir -p "$STATE_DIR" 2>/dev/null || return 1
   for ((i = 0; i < ${#AL_ID[@]}; i++)); do
     ((${AL_NEW[i]})) || continue
-    printf '%s\t%s\t%s\t%s\n' "$now" "${AL_SEV[i]}" "${AL_ID[i]}" "${AL_MSG[i]}" >>"$f"
+    printf -v row '%s\t%s\t%s\t%s' "$now" "${AL_SEV[i]}" "${AL_ID[i]}" "${AL_MSG[i]}"
+    rows+=("$row")
   done
-  _metrics_trim "$f" $((31 * 86400))
-  return 0
+  _metrics_append_rows "$f" $((31 * 86400)) "${rows[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -169,47 +225,131 @@ _downsample() {
 
 # Aggregate the last <hours> of samples. All integer maths; averages are
 # accumulated as sums and divided once at the end.
+declare -a METRIC_FIELDS=()
+_metrics_row_v() {
+  local line=$1 i value
+  METRIC_FIELDS=()
+  [[ $line != *$'\034'* ]] || return 1
+  # A non-whitespace delimiter preserves empty columns. IFS=tab collapses
+  # adjacent tabs and can silently move a later value into a missing field.
+  IFS=$'\034' read -r -a METRIC_FIELDS <<<"${line//$'\t'/$'\034'}"
+  ((${#METRIC_FIELDS[@]} >= 20 && ${#METRIC_FIELDS[@]} != 22 && ${#METRIC_FIELDS[@]} != 24)) || return 1
+  for ((i=0; i<20; i++)); do
+    value=${METRIC_FIELDS[i]}
+    if ((i == 10 || i == 11)); then
+      uint_normalize_v "$value" || return 1
+      uint_compare_v "$UINT_VALUE" 18446744073709551615
+      ((UINT_COMPARE <= 0)) || return 1
+      METRIC_FIELDS[i]=$UINT_VALUE
+    elif ((i == 16)); then
+      [[ $value =~ ^[0-9]{1,18}$ ]] || return 1
+      METRIC_FIELDS[i]=$((10#$value))
+    else
+      [[ $value =~ ^[0-9]{1,12}$ ]] || return 1
+      METRIC_FIELDS[i]=$((10#$value))
+    fi
+  done
+  for i in 1 2 3 4 5; do ((METRIC_FIELDS[i] <= 100)) || return 1; done
+  # df can legitimately report more than 100% when available space is negative.
+  ((METRIC_FIELDS[7] <= 10000)) || return 1
+  value=${METRIC_FIELDS[20]:--}
+  if [[ -n $value && $value != - ]]; then
+    [[ $value =~ ^[0-9]{1,9}$ ]] || return 1
+    METRIC_FIELDS[20]=$((10#$value))
+  else METRIC_FIELDS[20]=-; fi
+  [[ ${METRIC_FIELDS[21]:--} =~ ^[A-Za-z0-9-]{1,64}$ ]] || return 1
+  [[ ${METRIC_FIELDS[22]:--} =~ ^[A-Za-z0-9_.:-]{1,64}$ ]] || return 1
+  value=${METRIC_FIELDS[23]:--}
+  [[ $value == - || $value =~ ^[1-9][0-9]{0,9}$ ]] || return 1
+  value=${METRIC_FIELDS[24]:--}
+  [[ $value == - || $value =~ ^[0-9]{1,15}$ ]] || return 1
+  [[ $value == - ]] || METRIC_FIELDS[24]=$((10#$value))
+  return 0
+}
+
 report_aggregate() {
-  local hours=${1:-24} f cutoff line
+  local hours=${1:-24} f cutoff line now=${EPOCHSECONDS:-0}
   local ts cpu steal iowait mem swap loadm diskmax rxb txb rxt txt retr lat ctp hwa hwr hwc procs hwrest
   f=$(metrics_file)
   R=() R_ROWS=0
+  RH_CPU=() RH_MEM=() RH_DISK=() RH_RX=() RH_TX=()
   [[ -r $f ]] || return 1
+  [[ $hours =~ ^[1-9][0-9]{0,3}$ ]] || return 1
   cutoff=$((${EPOCHSECONDS:-0} - hours * 3600))
 
   local n=0
   local cpu_s=0 cpu_max=0 steal_s=0 steal_max=0 io_s=0 io_max=0
   local mem_s=0 mem_max=0 swap_max=0 load_s=0 load_max=0
   local disk_first=-1 disk_last=0 disk_max=0
-  local rx_max=0 tx_max=0 rxt_last=-1 txt_last=-1 rx_bytes=0 tx_bytes=0 resets=0
+  local rx_max=0 tx_max=0 rxt_last='' txt_last='' rx_bytes=0 tx_bytes=0 resets=0 rx_cmp tx_cmp
   local retr_s=0 retr_max=0 lat_s=0 lat_n=0 lat_max=0 ct_max=0
   local hw_up=0 hw_rss_max=0 hw_cpu_s=0 hw_rest_max=0 hw_rest_first=-1
   local procs_max=0 first_ts=0 last_ts=0
-  local cpu_busy_n=0 mem_busy_n=0
+  local cpu_busy_s2=0 mem_busy_s2=0 prev_cpu=0 prev_mem=0 observed_s=0 gaps=0 gap_s=0
+  local skipped=0 future=0 out_of_order=0 broken=0 legacy=0 dt gap_limit
   # Power is summed separately because it is the one column that is legitimately
   # absent: a box with no sensor, or a run before this release, contributes no
   # sample rather than a zero. pwr_n is therefore not n.
-  local pwr_s=0 pwr_n=0 pwr_max=0 pwr_min=-1
-  local pwr boot iface last_boot='' last_iface=''
+  local pwr_s=0 pwr_n=0 pwr_max=0 pwr_min=-1 prev_pwr=- pwr_s2=0 pwr_span=0
+  local pwr boot iface generation mono last_boot='' last_iface='' last_generation='-' last_mono='-'
   local -a s_cpu=() s_mem=() s_disk=() s_rx=() s_tx=()
 
   local busy_cpu=${CFG[report_busy_cpu_pct]:-80}
   local busy_mem=${CFG[report_busy_mem_pct]:-85}
-  [[ $busy_cpu =~ ^[0-9]+$ ]] || busy_cpu=80
-  [[ $busy_mem =~ ^[0-9]+$ ]] || busy_mem=85
+  [[ $busy_cpu =~ ^[0-9]{1,3}$ ]] || busy_cpu=80
+  [[ $busy_mem =~ ^[0-9]{1,3}$ ]] || busy_mem=85
+  busy_cpu=$((10#$busy_cpu)); busy_mem=$((10#$busy_mem))
+  local ival=${CFG[record_interval_min]:-5}
+  [[ $ival =~ ^[1-9][0-9]{0,3}$ ]] || ival=5
+  gap_limit=$((ival * 120 + 60))
+  # Sparse hourly/daily samples cannot establish energy or busy duration in
+  # the hours between them. Never bridge more than fifteen minutes.
+  ((gap_limit <= 900)) || gap_limit=900
 
-  while IFS=$'\t' read -r ts cpu steal iowait mem swap loadm diskmax rxb txb rxt txt retr lat ctp hwa hwr hwc procs hwrest pwr boot iface; do
-    [[ $ts =~ ^[0-9]+$ ]] || continue
+  while IFS= read -r line || [[ -n $line ]]; do
+    if ! _metrics_row_v "$line"; then skipped=$((skipped + 1)); broken=1; continue; fi
+    ts=${METRIC_FIELDS[0]}
     ((ts < cutoff)) && continue
+    if ((ts > now)); then future=$((future + 1)); broken=1; continue; fi
+    cpu=${METRIC_FIELDS[1]} steal=${METRIC_FIELDS[2]} iowait=${METRIC_FIELDS[3]}
+    mem=${METRIC_FIELDS[4]} swap=${METRIC_FIELDS[5]} loadm=${METRIC_FIELDS[6]} diskmax=${METRIC_FIELDS[7]}
+    rxb=${METRIC_FIELDS[8]} txb=${METRIC_FIELDS[9]} rxt=${METRIC_FIELDS[10]} txt=${METRIC_FIELDS[11]}
+    retr=${METRIC_FIELDS[12]} lat=${METRIC_FIELDS[13]} ctp=${METRIC_FIELDS[14]} hwa=${METRIC_FIELDS[15]}
+    hwr=${METRIC_FIELDS[16]} hwc=${METRIC_FIELDS[17]} procs=${METRIC_FIELDS[18]} hwrest=${METRIC_FIELDS[19]}
+    pwr=${METRIC_FIELDS[20]} boot=${METRIC_FIELDS[21]:--} iface=${METRIC_FIELDS[22]:--}
+    generation=${METRIC_FIELDS[23]:--} mono=${METRIC_FIELDS[24]:--}
+    if ((n > 0)); then
+      if ((ts < last_ts)) || { [[ $boot == "$last_boot" && $mono != - && $last_mono != - ]] && ((mono < last_mono)); }; then
+        out_of_order=$((out_of_order + 1)); broken=1; continue
+      fi
+    fi
+    [[ $boot != - ]] || legacy=$((legacy + 1))
+    if ((n > 0)); then
+      dt=$((ts - last_ts))
+      if ((dt > 0)); then
+        if ((dt <= gap_limit && broken == 0)) && [[ $boot != - && $boot == "$last_boot" ]]; then
+          observed_s=$((observed_s + dt))
+          # Trapezoidal estimates over covered intervals only. Keep twice the
+          # seconds/energy until final display division to avoid per-row loss.
+          cpu_busy_s2=$((cpu_busy_s2 + ((prev_cpu >= busy_cpu) + (cpu >= busy_cpu)) * dt))
+          mem_busy_s2=$((mem_busy_s2 + ((prev_mem >= busy_mem) + (mem >= busy_mem)) * dt))
+          if [[ $pwr != - && $prev_pwr != - ]]; then
+            pwr_s2=$((pwr_s2 + (pwr + prev_pwr) * dt))
+            pwr_span=$((pwr_span + dt))
+          fi
+        else
+          gaps=$((gaps + 1)); gap_s=$((gap_s + dt))
+        fi
+      fi
+    fi
+    prev_cpu=$cpu; prev_mem=$mem; prev_pwr=$pwr; broken=0
     ((n == 0)) && first_ts=$ts
     last_ts=$ts
     ((n++))
     cpu=${cpu:-0}; ((cpu_s += cpu)); ((cpu > cpu_max)) && cpu_max=$cpu
-    ((cpu >= busy_cpu)) && ((cpu_busy_n++))
     steal=${steal:-0}; ((steal_s += steal)); ((steal > steal_max)) && steal_max=$steal
     iowait=${iowait:-0}; ((io_s += iowait)); ((iowait > io_max)) && io_max=$iowait
     mem=${mem:-0}; ((mem_s += mem)); ((mem > mem_max)) && mem_max=$mem
-    ((mem >= busy_mem)) && ((mem_busy_n++))
     swap=${swap:-0}; ((swap > swap_max)) && swap_max=$swap
     loadm=${loadm:-0}; ((load_s += loadm)); ((loadm > load_max)) && load_max=$loadm
     diskmax=${diskmax:-0}
@@ -221,11 +361,13 @@ report_aggregate() {
     rxt=${rxt:-0}; txt=${txt:-0}
     # Sum observed deltas across resets. A new baseline must never erase bytes
     # already observed earlier in the reporting window.
-    if ((rxt_last >= 0 && txt_last >= 0)); then
-      if ((rxt >= rxt_last && txt >= txt_last)) &&
-         [[ $boot == "$last_boot" && $iface == "$last_iface" ]]; then
-        ((rx_bytes += rxt - rxt_last))
-        ((tx_bytes += txt - txt_last))
+    if [[ -n $rxt_last && -n $txt_last ]]; then
+      uint_compare_v "$rxt" "$rxt_last"; rx_cmp=$UINT_COMPARE
+      uint_compare_v "$txt" "$txt_last"; tx_cmp=$UINT_COMPARE
+      if ((rx_cmp >= 0 && tx_cmp >= 0)) &&
+         [[ $boot == "$last_boot" && $iface == "$last_iface" && $generation == "$last_generation" ]]; then
+        uint_subtract_v "$rxt" "$rxt_last"; uint_add_v "$rx_bytes" "$UINT_VALUE"; rx_bytes=$UINT_VALUE
+        uint_subtract_v "$txt" "$txt_last"; uint_add_v "$tx_bytes" "$UINT_VALUE"; tx_bytes=$UINT_VALUE
       else
         ((resets++))
       fi
@@ -233,7 +375,7 @@ report_aggregate() {
     rxt_last=$rxt
     txt=${txt:-0}
     txt_last=$txt
-    last_boot=$boot; last_iface=$iface
+    last_boot=$boot; last_iface=$iface; last_generation=$generation; last_mono=$mono
     retr=${retr:-0}; ((retr_s += retr)); ((retr > retr_max)) && retr_max=$retr
     lat=${lat:-0}
     if ((lat > 0)); then ((lat_s += lat)); ((lat_n++)); ((lat > lat_max)) && lat_max=$lat; fi
@@ -257,6 +399,9 @@ report_aggregate() {
     s_rx+=("$rxb"); s_tx+=("$txb")
   done <"$f"
 
+  R[observed_s]=$observed_s R[gap_s]=$gap_s R[gaps]=$gaps
+  R[invalid_rows]=$skipped R[future_rows]=$future R[out_of_order_rows]=$out_of_order R[legacy_rows]=$legacy
+  R[skipped_rows]=$((skipped + future + out_of_order))
   ((n == 0)) && return 1
   R_ROWS=$n
   R[rows]=$n
@@ -291,18 +436,14 @@ report_aggregate() {
     R[pwr_avg]=$((pwr_s / pwr_n))
     R[pwr_max]=$pwr_max
     R[pwr_min]=$((pwr_min < 0 ? 0 : pwr_min))
-    # Energy over the window, in watt-hours. Average watts times the span the
-    # samples actually cover -- not the nominal 24h, because a box that was off
-    # for six hours did not draw anything during them.
-    R[pwr_wh]=$((pwr_s / pwr_n * (last_ts - first_ts) / 36000))
+    R[pwr_wh]=$((pwr_s2 / 72000))
   else
     R[pwr_avg]=0 R[pwr_max]=0 R[pwr_min]=0 R[pwr_wh]=0
   fi
-  # Minutes spent above the busy thresholds, derived from the sample interval.
-  local ival=${CFG[record_interval_min]:-5}
-  [[ $ival =~ ^[0-9]+$ ]] || ival=5
-  R[cpu_busy_min]=$((cpu_busy_n * ival))
-  R[mem_busy_min]=$((mem_busy_n * ival))
+  R[pwr_span_s]=$pwr_span R[pwr_dws2]=$pwr_s2 R[pwr_mwh]=$((pwr_s2 / 72))
+  R[cpu_busy_s2]=$cpu_busy_s2 R[mem_busy_s2]=$mem_busy_s2
+  R[cpu_busy_min]=$((cpu_busy_s2 / 120))
+  R[mem_busy_min]=$((mem_busy_s2 / 120))
   _downsample s_cpu RH_CPU
   _downsample s_mem RH_MEM
   _downsample s_disk RH_DISK
@@ -369,6 +510,18 @@ report_speed() {
 # ---------------------------------------------------------------------------
 # rendering
 # ---------------------------------------------------------------------------
+# Bash formatters accept signed integers. Keep larger exact counter totals as
+# decimal bytes instead of overflowing while choosing a display unit.
+_report_size_v() {
+  local bytes=$1
+  uint_normalize_v "$bytes" || { FMT_OUT='-'; return 0; }
+  bytes=$UINT_VALUE
+  uint_compare_v "$bytes" 9223372036854775807
+  if ((UINT_COMPARE > 0)); then FMT_OUT="$bytes B"
+  else fmt_size_v "$bytes"; fi
+}
+_report_size() { _report_size_v "$1"; printf '%s' "$FMT_OUT"; }
+
 # Plain-text sparkline for the text report. Same glyphs as the dashboard, so the
 # email and the terminal look like the same tool.
 _t_spark() {
@@ -398,7 +551,7 @@ _verdict() {
   local days=${R[disk_days]:-0} hwup=${R[hw_up_pct]:-100}
   if ((RA_CRIT > 0)); then printf 'ATTENTION — %d critical alert(s) in the last 24h' "$RA_CRIT"; return; fi
   if cfg_on highway_track && ((HW_PRESENT)) && ((hwup < 99)); then
-    printf 'DEGRADED — Highway was active for only %s%% of the day' "$hwup"; return
+    printf 'DEGRADED — Highway was active in only %s%% of samples' "$hwup"; return
   fi
   if ((days > 0 && days < 14)); then
     printf 'PLAN AHEAD — largest filesystem fills in about %s days' "$days"; return
@@ -426,18 +579,22 @@ report_text() {
     else
       printf '  samples          none recorded yet — is hyn-record.timer running?\n'
     fi
+    ((${R[skipped_rows]:-0} == 0)) || printf '  excluded rows    %s invalid, future or out-of-order sample(s)\n' "${R[skipped_rows]}"
     printf '\n'
 
     if ((R_ROWS > 0)); then
       printf 'PERFORMANCE (last %sh)\n' "$hours"
-      printf '  cpu              avg %s%%   peak %s%%   %s min above %s%%\n' \
+      printf '  coverage         %s; %s unobserved between samples\n' \
+        "$(fmt_dur "${R[observed_s]:-0}")" "$(fmt_dur "${R[gap_s]:-0}")"
+      printf '                   averages are sampled; busy time and energy are estimates\n'
+      printf '  cpu              avg %s%%   peak %s%%   ~%s min above %s%%\n' \
         "${R[cpu_avg]}" "${R[cpu_max]}" "${R[cpu_busy_min]}" "${CFG[report_busy_cpu_pct]:-80}"
       printf '  cpu steal        avg %s%%   peak %s%%%s\n' "${R[steal_avg]}" "${R[steal_max]}" \
         "$( ((${R[steal_max]} >= 10)) && printf '   <- host is oversold' )"
       printf '  iowait           avg %s%%   peak %s%%\n' "${R[io_avg]}" "${R[io_max]}"
       printf '  load average     avg %s   peak %s   (%s cores)\n' \
         "$(fmt_fixed "${R[load_avg]}" 1000 2)" "$(fmt_fixed "${R[load_max]}" 1000 2)" "$CPU_COUNT"
-      printf '  memory           avg %s%%   peak %s%%   %s min above %s%%\n' \
+      printf '  memory           avg %s%%   peak %s%%   ~%s min above %s%%\n' \
         "${R[mem_avg]}" "${R[mem_max]}" "${R[mem_busy_min]}" "${CFG[report_busy_mem_pct]:-85}"
       printf '  swap             peak %s%%\n' "${R[swap_max]}"
       printf '  processes        peak %s\n' "${R[procs_max]}"
@@ -447,7 +604,12 @@ report_text() {
         printf '  power draw       avg %sW   peak %sW   low %sW\n' \
           "$(fmt_fixed "${R[pwr_avg]}" 10 1)" "$(fmt_fixed "${R[pwr_max]}" 10 1)" \
           "$(fmt_fixed "${R[pwr_min]}" 10 1)"
-        printf '  energy used      ~%s Wh over the window\n' "${R[pwr_wh]}"
+        if ((${R[pwr_span_s]:-0} > 0)); then
+          printf '  sampled energy   ~%s Wh over %s of covered intervals\n' \
+            "$(fmt_fixed "${R[pwr_mwh]}" 1000 3)" "$(fmt_dur "${R[pwr_span_s]}")"
+        else
+          printf '  sampled energy   unavailable; no continuous power sample pairs\n'
+        fi
       fi
       _t_spark RH_CPU '  cpu trend        '
       _t_spark RH_MEM '  memory trend     '
@@ -456,9 +618,9 @@ report_text() {
       printf 'STORAGE\n'
       local mp
       for mp in "${MOUNTS[@]}"; do
-        fmt_size_v "${MP_USED[$mp]:-0}"; local u=$FMT_OUT
-        fmt_size_v "${MP_SIZE[$mp]:-0}"; local t=$FMT_OUT
-        fmt_size_v "${MP_AVAIL[$mp]:-0}"
+        _report_size_v "${MP_USED[$mp]:-0}"; local u=$FMT_OUT
+        _report_size_v "${MP_SIZE[$mp]:-0}"; local t=$FMT_OUT
+        _report_size_v "${MP_AVAIL[$mp]:-0}"
         printf '  %-16s %3s%%   %s of %s   %s free\n' "$mp" "${MP_PCT[$mp]}" "$u" "$t" "$FMT_OUT"
       done
       if ((${R[disk_delta]} != 0)); then
@@ -470,8 +632,8 @@ report_text() {
       printf '\n'
 
       printf 'NETWORK (%s)\n' "${NET_WAN:-no interface}"
-      fmt_size_v "${R[rx_bytes]}"; local rxb=$FMT_OUT
-      fmt_size_v "${R[tx_bytes]}"
+      _report_size_v "${R[rx_bytes]}"; local rxb=$FMT_OUT
+      _report_size_v "${R[tx_bytes]}"
       printf '  transferred      %s down / %s up in %sh\n' "$rxb" "$FMT_OUT" "$hours"
       ((${R[network_resets]:-0} == 0)) || printf '  coverage         %s counter reset(s); unobserved traffic excluded\n' "${R[network_resets]}"
       fmt_rate_v "${R[rx_peak]}"; local rxp=$FMT_OUT
@@ -518,7 +680,7 @@ report_text() {
         printf '  status           %s — %s\n' "$HW_HEALTH" "$HW_HEALTH_WHY"
         printf '  version          %s%s\n' "${HW_VERSION:-unknown}" \
           "$( ((HW_UPDATE)) && printf '   (update available: %s)' "$HW_LATEST" )"
-        ((R_ROWS > 0)) && printf '  active           %s%% of the last %sh\n' "${R[hw_up_pct]}" "$hours"
+        ((R_ROWS > 0)) && printf '  active           %s%% of samples in the last %sh\n' "${R[hw_up_pct]}" "$hours"
         local u
         for u in "${HW_UNITS[@]}"; do
           printf '  %-16s %s/%s   %s restart(s) total\n' \
@@ -528,15 +690,15 @@ report_text() {
         if ((HW_PID > 0)); then
           fmt_dur_v "$HW_UPTIME"
           printf '  process          pid %s, up %s, %s threads\n' "$HW_PID" "$FMT_OUT" "$HW_THR"
-          fmt_size_v "$HW_RSS"; local hr=$FMT_OUT
-          fmt_size_v "${R[hw_rss_max]:-0}"
+          _report_size_v "$HW_RSS"; local hr=$FMT_OUT
+          _report_size_v "${R[hw_rss_max]:-0}"
           printf '  memory           %s now, %s peak in %sh\n' "$hr" "$FMT_OUT" "$hours"
           printf '  cpu              %s%% now, %s%% avg over %sh\n' \
             "$(fmt_fixed "$HW_CPU" 10 1)" "$(fmt_fixed "${R[hw_cpu_avg]:-0}" 10 1)" "$hours"
         fi
         if [[ -n $HW_NEBULA ]]; then
-          fmt_size_v "${NET_RX[$HW_NEBULA]:-0}"; local nr=$FMT_OUT
-          fmt_size_v "${NET_TX[$HW_NEBULA]:-0}"
+          _report_size_v "${NET_RX[$HW_NEBULA]:-0}"; local nr=$FMT_OUT
+          _report_size_v "${NET_TX[$HW_NEBULA]:-0}"
           printf '  mesh tunnel      %s   %s in / %s out since boot\n' "$HW_NEBULA" "$nr" "$FMT_OUT"
         else
           printf '  mesh tunnel      not detected\n'
@@ -628,7 +790,7 @@ report_connection_text() {
     [[ -n ${IF_SPEED[$ifn]:-} ]] && spd="$(fmt_rate $((IF_SPEED[ifn] * 125000)))"
     printf '  %-13s %-9s %-8s %-20s %-12s %s / %s%s\n' \
       "$ifn" "${IF_TYPE[$ifn]:-?}" "${IF_STATE[$ifn]:-?}" "${IF_IP[$ifn]:--}" "$spd" \
-      "$(fmt_size "${NET_RX[$ifn]:-0}")" "$(fmt_size "${NET_TX[$ifn]:-0}")" \
+      "$(_report_size "${NET_RX[$ifn]:-0}")" "$(_report_size "${NET_TX[$ifn]:-0}")" \
       "$( [[ -n ${IF_SSID[$ifn]:-} ]] && printf '  ssid=%s' "${IF_SSID[$ifn]}" )"
   done
   printf '\n'
@@ -653,7 +815,7 @@ report_connection_html() {
     printf '<tr><td style="padding:3px 12px 3px 0">%s</td><td style="padding:3px 12px 3px 0;color:#666">%s</td><td style="padding:3px 12px 3px 0">%s</td><td style="padding:3px 12px 3px 0;font-variant-numeric:tabular-nums">%s</td><td style="padding:3px 0;font-variant-numeric:tabular-nums">%s / %s</td></tr>' \
       "$(html_escape "$ifn")" "$(html_escape "${IF_TYPE[$ifn]:-?}")" \
       "$(html_escape "${IF_STATE[$ifn]:-?}")" "$(html_escape "${IF_IP[$ifn]:--}")" \
-      "$(fmt_size "${NET_RX[$ifn]:-0}")" "$(fmt_size "${NET_TX[$ifn]:-0}")"
+      "$(_report_size "${NET_RX[$ifn]:-0}")" "$(_report_size "${NET_TX[$ifn]:-0}")"
   done
   printf '</table>'
   return 0
@@ -703,7 +865,8 @@ report_html() {
       e_kpi 'CPU avg' "${R[cpu_avg]:-0}%" "peak ${R[cpu_max]:-0}%" "$cpucol"
       e_kpi 'Memory avg' "${R[mem_avg]:-0}%" "peak ${R[mem_max]:-0}%" "$memcol"
       e_kpi 'Disk' "${R[disk_now]:-0}%" "$(printf '%+d pts / %sh' "${R[disk_delta]:-0}" "$hours")" "$dskcol"
-      fmt_size_v $((${R[rx_bytes]:-0} + ${R[tx_bytes]:-0}))
+      uint_add_v "${R[rx_bytes]:-0}" "${R[tx_bytes]:-0}"
+      _report_size_v "$UINT_VALUE"
       e_kpi 'Transferred' "$FMT_OUT" "in ${hours}h" "$E_ACCENT"
       e_kpi_close
     fi
@@ -740,7 +903,8 @@ report_html() {
       ((${R[swap_max]:-0} > 0)) && e_bar 'Swap (peak)' "${R[swap_max]}" "${R[swap_max]}%"
       printf '</td></tr></table>'
       e_kv_open
-      e_kv 'Busy time' "${R[cpu_busy_min]:-0} min above ${CFG[report_busy_cpu_pct]:-80}% cpu, ${R[mem_busy_min]:-0} min above ${CFG[report_busy_mem_pct]:-85}% memory"
+      e_kv 'Sample coverage' "$(fmt_dur "${R[observed_s]:-0}") covered; $(fmt_dur "${R[gap_s]:-0}") unobserved between samples; ${R[skipped_rows]:-0} invalid/future/out-of-order rows excluded"
+      e_kv 'Busy time estimate' "about ${R[cpu_busy_min]:-0} min above ${CFG[report_busy_cpu_pct]:-80}% cpu, ${R[mem_busy_min]:-0} min above ${CFG[report_busy_mem_pct]:-85}% memory; averages below describe samples"
       e_kv 'Load average' "avg $(fmt_fixed "${R[load_avg]:-0}" 1000 2), peak $(fmt_fixed "${R[load_max]:-0}" 1000 2) over $CPU_COUNT cores"
       # steal is the one number here an operator can act on, by changing provider
       if ((${R[steal_max]:-0} >= 10)); then
@@ -752,7 +916,9 @@ report_html() {
       e_kv 'Processes' "peak ${R[procs_max]:-0}"
       if ((${R[pwr_n]:-0} > 0)); then
         e_kv 'Power draw' "avg $(fmt_fixed "${R[pwr_avg]}" 10 1)W, peak $(fmt_fixed "${R[pwr_max]}" 10 1)W, low $(fmt_fixed "${R[pwr_min]}" 10 1)W"
-        e_kv 'Energy' "about ${R[pwr_wh]} Wh over the window"
+        if ((${R[pwr_span_s]:-0} > 0)); then
+          e_kv 'Sampled energy estimate' "about $(fmt_fixed "${R[pwr_mwh]}" 1000 3) Wh over $(fmt_dur "${R[pwr_span_s]}") of covered intervals"
+        else e_kv 'Sampled energy estimate' 'unavailable; no continuous power sample pairs'; fi
       fi
       e_spark RH_CPU 'CPU trend' "$E_ACCENT"
       e_spark RH_MEM 'Memory trend' "$E_ACCENT"
@@ -763,7 +929,7 @@ report_html() {
       printf '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:0 26px">'
       local mp
       for mp in "${MOUNTS[@]}"; do
-        fmt_size_v "${MP_AVAIL[$mp]:-0}"
+        _report_size_v "${MP_AVAIL[$mp]:-0}"
         e_bar "$mp" "${MP_PCT[$mp]:-0}" "$FMT_OUT free"
       done
       printf '</td></tr></table>'
@@ -782,7 +948,7 @@ report_html() {
       e_section 'Network'
       e_kv_open
       e_kv 'Interface' "${NET_WAN:-none}${NET_IDENT_LABEL:+ ($NET_IDENT_LABEL)}"
-      e_kv 'Transferred' "$(fmt_size "${R[rx_bytes]:-0}") down / $(fmt_size "${R[tx_bytes]:-0}") up"
+      e_kv 'Transferred' "$(_report_size "${R[rx_bytes]:-0}") down / $(_report_size "${R[tx_bytes]:-0}") up"
       ((${R[network_resets]:-0} == 0)) || e_kv 'Network coverage' "${R[network_resets]} counter reset(s); unobserved traffic excluded"
       e_kv 'Peak rate' "$(fmt_rate "${R[rx_peak]:-0}") down / $(fmt_rate "${R[tx_peak]:-0}") up"
       local rcol=$E_INK
@@ -866,7 +1032,7 @@ report_html() {
       printf '<td style="padding:5px 10px 5px 0;color:%s">%s</td>' "$scol" "$(html_escape "${IF_STATE[$ifn]:-?}")"
       printf '<td style="padding:5px 10px 5px 0;color:%s;font-family:%s">%s</td>' "$E_INK" "$E_MONO" "$(html_escape "${IF_IP[$ifn]:--}")"
       printf '<td style="padding:5px 0;color:%s;font-family:%s">%s / %s</td></tr>' \
-        "$E_INK" "$E_MONO" "$(fmt_size "${NET_RX[$ifn]:-0}")" "$(fmt_size "${NET_TX[$ifn]:-0}")"
+        "$E_INK" "$E_MONO" "$(_report_size "${NET_RX[$ifn]:-0}")" "$(_report_size "${NET_TX[$ifn]:-0}")"
     done
     printf '</table></td></tr></table>'
 
@@ -902,11 +1068,11 @@ report_html() {
       e_kv 'Status' "$HW_HEALTH — $HW_HEALTH_WHY" "$hcol"
       e_kv 'Version' "${HW_VERSION:-unknown}" "$( ((HW_UPDATE)) && printf '%s' "$E_WARN" )"
       ((HW_UPDATE)) && e_kv 'Update available' "$HW_LATEST" "$E_WARN"
-      ((R_ROWS > 0)) && e_kv 'Active' "${R[hw_up_pct]:-0}% of the window"
+      ((R_ROWS > 0)) && e_kv 'Active' "${R[hw_up_pct]:-0}% of samples"
       ((${R[hw_restarts]:-0} > 0)) && e_kv 'Restarts' "${R[hw_restarts]} in ${hours}h" "$E_WARN"
       if ((HW_PID > 0)); then
         e_kv 'Process' "pid $HW_PID · up $(fmt_dur "$HW_UPTIME") · $HW_THR threads"
-        e_kv 'Memory' "$(fmt_size "$HW_RSS") now, $(fmt_size "${R[hw_rss_max]:-0}") peak"
+        e_kv 'Memory' "$(_report_size "$HW_RSS") now, $(_report_size "${R[hw_rss_max]:-0}") peak"
         e_kv 'CPU' "$(fmt_fixed "$HW_CPU" 10 1)% now, $(fmt_fixed "${R[hw_cpu_avg]:-0}" 10 1)% avg"
       fi
       e_kv 'Mesh tunnel' "${HW_NEBULA:-not detected}" "$( [[ -z $HW_NEBULA ]] && printf '%s' "$E_WARN" )"
@@ -945,7 +1111,7 @@ report_html() {
         printf '<td style="padding:5px 10px 5px 0;color:%s;font-family:%s">%s%%</td>' \
           "$E_INK" "$E_MONO" "$(fmt_fixed "${P_CPU[j]}" 10 1)"
         printf '<td style="padding:5px 10px 5px 0;color:%s;font-family:%s">%s</td>' \
-          "$E_INK" "$E_MONO" "$(fmt_size "${P_RSS[j]}")"
+          "$E_INK" "$E_MONO" "$(_report_size "${P_RSS[j]}")"
         printf '<td style="padding:5px 0;color:%s;font-weight:600">%s</td></tr>' \
           "$E_INK" "$(html_escape "${P_NAME[j]}")"
       done

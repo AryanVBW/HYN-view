@@ -137,24 +137,30 @@ _record() {
 # Two samples a second apart, because rates are deltas. Same reason `hyn
 # snapshot` does it.
 alerts_collect() {
+  local started elapsed
+  sample_clock_ms_v; started=$SAMPLE_CLOCK_MS
   net_sample 0
+  net_snmp 0
   cpu_sample 0
   disk_sample 0
   # Seeds the RAPL energy counters so the read after the sleep has a previous
   # sample to differentiate against; without this pair every non-interactive
   # invocation would report no CPU power at all.
   power_read 0
+  cfg_on highway_track && hw_process 0
   sleep 1
-  net_sample 1000
-  net_snmp 1000
+  sample_clock_ms_v; elapsed=$((SAMPLE_CLOCK_MS - started))
+  ((elapsed > 0)) || elapsed=0
+  net_sample "$elapsed"
+  net_snmp "$elapsed"
   net_sockstat
-  cpu_sample 1000
+  cpu_sample "$elapsed"
   mem_sample
   sys_sample
-  disk_sample 1000
+  disk_sample "$elapsed"
   psi_sample
   thermal_read
-  power_read 1000
+  power_read "$elapsed"
   cpu_freq_read
   cpu_freq_all
   sensors_read
@@ -164,7 +170,7 @@ alerts_collect() {
   net_latency_read
   cfg_on tcp_states && net_tcp_states
   sys_failed_units
-  cfg_on highway_track && hw_sample 1000
+  cfg_on highway_track && hw_sample "$elapsed"
   st_history_read 1
   net_retrans_permille
   sys_whoami

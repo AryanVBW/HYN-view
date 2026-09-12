@@ -407,17 +407,18 @@ cloud_node_id=${CFG[cloud_node_id]}
 cloud_api_url=${CFG[cloud_api_url]}
 # Where \`hyn link\` tells you to open a browser. The agent never contacts it.
 cloud_portal_url=${CFG[cloud_portal_url]}
-# Minutes between full portal readings. The heartbeat and settings check stay at
-# one minute regardless. Also settable from the portal, which wins.
+# Minutes between full portal readings (default 1). Heartbeats are independent.
+# Also settable from the portal, whose explicit settings take precedence.
 cloud_push_min=${CFG[cloud_push_min]}
-# local: retain history here; explicit push/sync is transient. cloud: opt in to
-# the legacy Supabase telemetry archive. Never managed by the portal.
+# cloud: rolling 48-hour portal history plus bounded local backup. local: local
+# history only; explicit push/sync shares a temporary reading. Managed storage
+# policy takes precedence; clear that portal override to use a local setting.
 cloud_storage=${CFG[cloud_storage]}
 # Explicit consent to send notification/report content through the portal.
 cloud_notifications=${CFG[cloud_notifications]}
 # Minutes between managed-property and command checks (1..60).
 cloud_checkin_min=${CFG[cloud_checkin_min]}
-# Detailed snapshots and request accounting stay here, with bounded retention.
+# Secondary snapshots and request accounting stay here, with bounded retention.
 local_keep_days=${CFG[local_keep_days]}
 local_max_mb=${CFG[local_max_mb]}
 # Seconds between liveness beats from the resident agent (hyn-agent.service).
@@ -620,7 +621,7 @@ setup_timers() {
 
   # Wake every minute to pull account settings quickly. `hyn push --scheduled`
   # performs the full telemetry collection only when cloud_push_min is due, so
-  # the managed ten-minute default does not run expensive probes every minute.
+  # longer custom intervals do not run expensive probes every minute.
   #
   # Timeout is 120s, not the shared 180s: the portal calls a node quiet after
   # three missed minutes, so one run allowed to hang for the full 180s would
@@ -899,9 +900,37 @@ setup_heal_agent() {
     # shellcheck source=/dev/null
     source "$HYN_LIB/agent.sh" 2>/dev/null || return 0
   }
-  if agent_stamp_stale; then
-    warn 'hyn-agent.service is running but has not beaten recently; restarting it'
-    systemctl restart hyn-agent.service >/dev/null 2>&1 || true
+  local stamp missing tmp since='' now=${EPOCHSECONDS:-0} AGENT_INTERVAL slack
+  stamp=$(agent_stamp)
+  missing="$stamp.missing-since"
+  if [[ ! -r $stamp ]]; then
+    # An active process can hang before its first tick. Record the first
+    # observation separately from the heartbeat so startup gets a grace period
+    # without permanently exempting a loop that never produces any stamp.
+    if [[ ! -r $missing ]]; then
+      tmp=$(mktemp "$missing.XXXXXX") || return 0
+      printf '%s\n' "$now" >"$tmp" && mv -f "$tmp" "$missing" || {
+        rm -f "$tmp"; return 0;
+      }
+      return 0
+    fi
+    IFS= read -r since <"$missing" || true
+    agent_interval_v
+    slack=$((AGENT_INTERVAL * 3))
+    ((slack < 120)) && slack=120
+    if [[ $since =~ ^[0-9]{1,12}$ ]]; then
+      since=$((10#$since))
+      ((now - since <= slack && since - now <= slack)) && return 0
+    fi
+  else
+    [[ ! -e $missing ]] || rm -f "$missing"
+    agent_stamp_stale || return 0
+  fi
+  # Reset the grace period only when the restart succeeded, so a failed
+  # systemctl call remains eligible for repair on the next pass.
+  if systemctl restart hyn-agent.service >/dev/null 2>&1; then
+    rm -f "$missing"
+    warn 'hyn-agent.service stopped producing liveness stamps; restarted it'
   fi
   return 0
 }

@@ -1,11 +1,16 @@
 # hyn-view
 
-**CLI 1.10 stores history locally by default.** The website runs on Heroku using
+**CLI 1.10 uploads monitoring every minute and keeps a continuous local backup.**
+See the [release verification and Ubuntu acceptance notes](docs/cli-release-readiness.md)
+for what has been tested and what still needs verification before publication.
+The website runs on Heroku using
 GitHub Student Developer Pack credits, with Supabase Free for authentication,
-permissions and managed settings. Scheduled checks do not upload full telemetry.
-An explicit sync shares one temporary reading with the portal for five minutes.
-Historical cloud charts and report delivery described below require explicit
-cloud storage/notification opt-in.
+permissions, managed settings and the latest **48 hours** of monitoring history.
+Cloud records expire automatically; longer local history follows its own age and
+disk budget. Failed uploads enter a bounded local retry queue. HYN operational
+summaries and alerts are included; raw host logs and credentials are never uploaded.
+See [the current storage policy](docs/rolling-monitoring.md) for exact limits,
+VPS/container reporting, and the database → portal → CLI rollout order.
 
 ```sh
 sudo hyn autostart enable # one-time boot, recovery and keep-awake setup
@@ -17,7 +22,7 @@ sudo hyn logs 100        # local diagnostics
 ```
 
 See [local storage, free-plan budgets and Heroku rollout](docs/local-storage-and-hosting.md)
-for retention, permissions, on-demand viewing and the required portal/database
+for historical deployment observations and the required portal/database
 upgrade order. The CLI checks both `https://www.hyn-view.in` and
 `https://hyn-view.in`, caches the working HTTPS endpoint, and preserves custom
 endpoint settings.
@@ -43,7 +48,7 @@ curl -fsSL https://www.hyn-view.in/install.sh | sudo bash
 One command, one password prompt, nothing to answer. It installs node if the box
 has none, installs the CLI globally from npm, writes `/etc/hyn-view/config`,
 installs and starts the systemd units — including the resident agent that beats
-every 60 seconds and updates itself — and then *verifies* that the agent is
+every 24 seconds by default and updates itself — and then *verifies* that the agent is
 actually running rather than trusting that it must be.
 
 If you would rather do it by hand, npm is the same installation:
