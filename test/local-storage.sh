@@ -14,7 +14,7 @@ PASS=0 FAIL=0
 check() { if eval "$2"; then PASS=$((PASS + 1)); else printf 'FAIL %s\n' "$1"; FAIL=$((FAIL + 1)); fi; }
 is_root() { return 0; }
 cfg_load
-check 'default history is cloud with one-minute readings' '[[ ${CFG[cloud_storage]} == cloud && ${CFG[cloud_push_min]} == 1 && ${CFG[cloud_checkin_min]} == 1 && ${CFG[heartbeat_sec]} == 24 ]]'
+check 'default history uploads and beats every five minutes' '[[ ${CFG[cloud_storage]} == cloud && ${CFG[cloud_push_min]} == 5 && ${CFG[cloud_checkin_min]} == 5 && ${CFG[heartbeat_sec]} == 300 && ${CFG[record_interval_min]} == 1 ]]'
 check 'bad numeric property is refused without changing file' '! config_set cloud_checkin_min 0 2>/dev/null && [[ ! -f $HYN_ETC/config ]]'
 BAD_SETTING=$'mono\ncloud_storage=cloud'
 check 'multiline cannot inject a second property' '! config_set theme "$BAD_SETTING" 2>/dev/null'

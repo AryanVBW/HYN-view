@@ -13,8 +13,8 @@ network failures do not erase that secondary copy.
   collection, heartbeat/upload outcomes, active alerts and service issues.
   They are not a copy of all host journal files or application log text. HYN's
   raw local diagnostics remain accessible with `hyn logs`.
-- The default heartbeat is 24 seconds through the web portal; existing explicit
-  60-second settings remain valid. Heartbeats update a node record, not an
+- The managed heartbeat runs every five minutes through the web portal. The UI
+  marks it delayed at ten minutes and gone quiet at fifteen. Heartbeats update a node record, not an
   append-only table. WAN cloud reports are coalesced while local counters continue.
 - The browser checks a small freshness response every 15 seconds while visible
   and online. It reloads telemetry when the latest sample or configuration changes,
@@ -69,10 +69,11 @@ VM scheduling and account-wide resource inventories are outside this collector.
 
 ## Existing installations and rollout
 
-1. Apply `20260912190000_rolling_cloud_telemetry.sql`. The one-time fleet policy
-   sets `cloud_storage=cloud` and changes the old default ten-minute interval to
-   one minute. Explicit non-default intervals remain. Later local-only choices
-   survive migration reapplication.
+1. Apply `20260912190000_rolling_cloud_telemetry.sql`, then
+   `20260913120000_five_minute_monitoring_cadence.sql`. The cadence policy sets
+   five-minute heartbeat, check-in and cloud upload intervals while local metric
+   sampling remains every minute. It preserves an explicit `cloud_storage=local`
+   privacy choice and survives migration reapplication.
 2. Verify `hyn_metric_history`, `hyn_fleet_metric_history`, `hyn_prune_telemetry`, the read cutoff, and the
    retention scheduler. Deploy the portal only after this database gate passes.
 3. Publish/install CLI 1.10.0 and verify an actual server's running version,
@@ -83,7 +84,7 @@ The default changes do not magically replace an already installed package. An
 operator can activate cloud mode on a compatible existing CLI explicitly:
 
 ```sh
-sudo hyn config set cloud_storage cloud cloud_push_min 1
+sudo hyn config set cloud_storage cloud cloud_push_min 5 cloud_checkin_min 5 heartbeat_sec 300 record_interval_min 1
 sudo hyn push
 ```
 

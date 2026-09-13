@@ -638,7 +638,7 @@ cloud_payload_v() {
 # It is deliberately NOT `hyn_fetch_config`. That call is what the one-minute
 # check-in uses, and it is expensive on the portal side -- it claims the
 # watchdog, base64-encodes two email templates and triggers queued-notification
-# dispatch. Running it every 24 seconds would multiply all of that by two and a
+# dispatch. Running it on every lightweight heartbeat would duplicate that work
 # half for information the beat does not need. This RPC touches one column.
 #
 # Nothing here parses telemetry, and a failure is not an error condition worth
@@ -755,7 +755,7 @@ cloud_heartbeat() {
   # A portal that has not been taught this RPC yet (an older deployment, or a
   # self-hoster who has not applied the migration) must not leave the machine
   # with no heartbeat at all. Fall back to the config pull, which has always
-  # recorded one, and say so once rather than every 24 seconds.
+  # recorded one, and say so once rather than on every heartbeat.
   case $CLOUD_LAST_ERR in
     *'404'* | *'unknown agent action'* | *'does not exist'* | *'not find'*)
       if cloud_config_pull 1; then

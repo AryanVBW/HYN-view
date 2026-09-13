@@ -241,9 +241,10 @@ _default_of() {
   printf '%s' "$v"
 }
 eq 'notification access details default off' 'off' "${CFG[notify_access_details]:-missing}"
-eq 'cloud telemetry defaults to one minute' '1' "${CFG[cloud_push_min]:-missing}"
+eq 'cloud telemetry defaults to five minutes' '5' "${CFG[cloud_push_min]:-missing}"
 eq 'cloud is the primary paired history store' 'cloud' "${CFG[cloud_storage]:-missing}"
-eq 'default check-in permits one-minute telemetry' '1' "${CFG[cloud_checkin_min]:-missing}"
+eq 'default managed check-in is five minutes' '5' "${CFG[cloud_checkin_min]:-missing}"
+eq 'local sampling remains every minute' '1' "${CFG[record_interval_min]:-missing}"
 eq 'automatic CLI updates are the default' 'install' "$(_default_of auto_update)"
 eq 'default view is the advanced dashboard' 'dash' "$(_default_of dashboard_view)"
 color_detect
@@ -2282,7 +2283,7 @@ _schema="$ROOT/supabase/schema.sql"
 _nodecfg="$ROOT/web-portal/lib/node-config.ts"
 _agent_keys=$(sed -n '/^_cfg_cloud_allowed()/,/^}/p' "$HYN_LIB/core.sh" |
   grep -oE '[a-z_]+ \||[a-z_]+\)' | tr -d ' |)' | grep -v '^$' | sort -u)
-eq 'the agent declares nineteen managed settings' 19 "$(printf '%s\n' "$_agent_keys" | grep -c .)"
+eq 'the agent declares twenty-one managed settings' 21 "$(printf '%s\n' "$_agent_keys" | grep -c .)"
 # The database and portal declarations live in the repository, not in the npm
 # package, so this half of the comparison only runs where they exist. Stated as a
 # skip rather than silently passing: a check that quietly does nothing is worse
@@ -2310,10 +2311,11 @@ done
 # The value validators must agree too, not just the key names. A bound the portal
 # accepts and the agent rejects is a setting that saves and never applies.
 truthy 'a threshold the portal accepts is one the agent applies' \
-  '_cfg_cloud_value_allowed alert_disk_pct 100 && _cfg_cloud_value_allowed cloud_push_min 1440'
+  '_cfg_cloud_value_allowed alert_disk_pct 100 && _cfg_cloud_value_allowed cloud_push_min 1440 && _cfg_cloud_value_allowed cloud_checkin_min 5 && _cfg_cloud_value_allowed heartbeat_sec 300'
 falsy 'a threshold past the shared bound is refused' \
   '_cfg_cloud_value_allowed alert_disk_pct 101 || _cfg_cloud_value_allowed cloud_push_min 1441'
 falsy 'zero is not a valid push interval'   '_cfg_cloud_value_allowed cloud_push_min 0'
+falsy 'unsafe managed heartbeat is rejected' '_cfg_cloud_value_allowed heartbeat_sec 3601'
 falsy 'an empty value never overrides a default' \
   '_cfg_cloud_value_allowed alert_disk_pct "" || _cfg_cloud_value_allowed auto_update ""'
 truthy 'the portal can set dashboard_view to dash or simple' \
@@ -3002,7 +3004,7 @@ truthy 'the collector memory cap is tight' '[[ $_push_svc == *MemoryMax=256M* ]]
 # unit rather than a relaxed collector.
 truthy 'the maintenance unit has room for node' '[[ $_maint == *MemoryMax=1G* ]]'
 truthy 'the maintenance unit still yields to the node' '[[ $_maint == *OOMScoreAdjust=500* ]]'
-# ...and must finish inside the portal's three-minute quiet window, on its own.
+# ...and must remain bounded on its own.
 contains 'the check-in unit cannot hang past two intervals' 'TimeoutStartSec=120' "$_push_svc"
 
 # 15s of jitter plus 30s of timer coalescing turned a "one minute" heartbeat into
@@ -3069,17 +3071,17 @@ truthy 'the agent is not reaped for still running' '[[ $_agent != *TimeoutStartS
 
 # The loop's own logic, driven directly.
 source "$HYN_LIB/agent.sh"
-CFG[heartbeat_sec]=24; agent_interval_v
-eq 'the default beat is 24s'        '24'   "$AGENT_INTERVAL"
+CFG[heartbeat_sec]=300; agent_interval_v
+eq 'the default beat is 300s'       '300'  "$AGENT_INTERVAL"
 CFG[heartbeat_sec]=1; agent_interval_v
 eq 'a too-fast beat is clamped up'  '5'    "$AGENT_INTERVAL"
 CFG[heartbeat_sec]=99999; agent_interval_v
 eq 'a too-slow beat is clamped down' '3600' "$AGENT_INTERVAL"
 CFG[heartbeat_sec]='; rm -rf /'; agent_interval_v
-eq 'a junk interval falls back'     '24'   "$AGENT_INTERVAL"
+eq 'a junk interval falls back'     '300'  "$AGENT_INTERVAL"
 CFG[heartbeat_sec]=0; agent_interval_v
-eq 'zero would spin, so it falls back' '24' "$AGENT_INTERVAL"
-CFG[heartbeat_sec]=24
+eq 'zero would spin, so it falls back' '300' "$AGENT_INTERVAL"
+CFG[heartbeat_sec]=300
 
 # Liveness is measured, not assumed: this is the difference between a loop that
 # is running and a loop that is working, and the portal cannot tell a wedged

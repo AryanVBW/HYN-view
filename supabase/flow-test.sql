@@ -867,7 +867,9 @@ begin
     '{"auto_update":"surprise"}'::jsonb,
     '{"dashboard_view":"fancy"}'::jsonb,
     '{"report_at":"99:99"}'::jsonb,
-    '{"cloud_push_min":"0"}'::jsonb
+    '{"cloud_push_min":"0"}'::jsonb,
+    '{"cloud_checkin_min":"61"}'::jsonb,
+    '{"heartbeat_sec":"4"}'::jsonb
   ] loop
     rejected := false;
     begin
@@ -890,6 +892,7 @@ update public.nodes
      "alert_load_per_core":"400", "alert_latency_ms":"250",
      "alert_min_severity":"warn", "alert_repeat_hours":"6",
      "report_at":"07:30", "notify_max_per_day":"25", "cloud_push_min":"5",
+     "cloud_checkin_min":"5", "heartbeat_sec":"300",
      "auto_update":"install", "dashboard_view":"simple"
    }'::jsonb
  where id = (select v from t where k = 'node_id')::uuid;
@@ -901,7 +904,7 @@ begin
     from public.nodes nrow,
          lateral jsonb_object_keys(nrow.config)
    where nrow.id = (select v from t where k = 'node_id')::uuid;
-  if n <> 12 then raise exception 'portal allowlist rejected a supported setting'; end if;
+  if n <> 14 then raise exception 'portal allowlist rejected a supported setting'; end if;
   raise notice 'PASS  every portal-exposed monitoring setting remains writable';
 end $$;
 
@@ -1627,7 +1630,7 @@ begin
   set local role postgres;
   update public.nodes
      set agent_version = '1.7.0', last_seen_at = now(),
-         last_heartbeat_at = now() - interval '4 minutes'
+         last_heartbeat_at = now() - interval '16 minutes'
    where id = (select v from t where k = 'node_id')::uuid;
   update public.metrics
      set payload = coalesce(payload, '{}'::jsonb)
@@ -1644,7 +1647,7 @@ begin
   end if;
   overview := public.hyn_admin_overview();
   if (overview->>'nodes_stale')::integer <> 1 then
-    raise exception 'heartbeat-capable node should be quiet after three misses: %', overview;
+    raise exception 'heartbeat-capable node should be quiet after fifteen minutes: %', overview;
   end if;
 
   set local role postgres;

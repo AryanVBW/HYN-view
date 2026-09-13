@@ -181,7 +181,7 @@ declare -A CFG=(
   [report_hours]=24
   [report_busy_cpu_pct]=80
   [report_busy_mem_pct]=85
-  [record_interval_min]=5
+  [record_interval_min]=1
   [metrics_keep_days]=8
 
   # --- web portal / cloud sync ----------------------------------------------
@@ -197,20 +197,20 @@ declare -A CFG=(
   # during `hyn link`; the agent never contacts it.
   [cloud_portal_url]='https://www.hyn-view.in'
   [cloud_node_id]=''
-  [cloud_push_min]=1
+  [cloud_push_min]=5
   # Paired nodes retain rolling cloud telemetry with a bounded local backup.
   # Explicit local mode remains available through local or managed settings.
   [cloud_storage]=cloud
   [cloud_notifications]=off
-  [cloud_checkin_min]=1
+  [cloud_checkin_min]=5
   [local_keep_days]=14
   [local_max_mb]=256
   [cloud_timeout]=20
   # Seconds between liveness beats from the resident agent (hyn-agent.service).
   # This is not the reading interval: a beat is one small POST that proves the
-  # machine is alive. The portal's three-minute quiet threshold tolerates
-  # several missed beats without creating false outage alerts.
-  [heartbeat_sec]=24
+  # machine is alive. The portal delays status after ten minutes and marks a
+  # machine quiet after fifteen, allowing two missed five-minute beats.
+  [heartbeat_sec]=300
 
   # --- self update -----------------------------------------------------------
   # off     never look
@@ -276,7 +276,7 @@ _cfg_cloud_allowed() {
   case ${1:-} in
     alert_mem_pct | alert_disk_pct | alert_temp_c | alert_load_per_core | \
       alert_latency_ms | alert_min_severity | alert_repeat_hours | report_at | \
-      notify_max_per_day | cloud_push_min | cloud_storage | auto_update | dashboard_view | \
+      notify_max_per_day | cloud_push_min | cloud_checkin_min | heartbeat_sec | cloud_storage | auto_update | dashboard_view | \
       alert_enabled | report_enabled | alert_interval_min | record_interval_min | \
       speedtest_per_day | keep_awake) return 0 ;;
     *) return 1 ;;
@@ -311,6 +311,10 @@ _cfg_cloud_value_allowed() {
       [[ $v =~ ^(0|[1-9][0-9]{0,4})$ ]] && ((10#$v <= 10000)) ;;
     cloud_push_min)
       [[ $v =~ ^[1-9][0-9]{0,3}$ ]] && ((10#$v <= 1440)) ;;
+    cloud_checkin_min)
+      [[ $v =~ ^[1-9][0-9]{0,2}$ ]] && ((10#$v <= 60)) ;;
+    heartbeat_sec)
+      [[ $v =~ ^[1-9][0-9]{0,3}$ ]] && ((10#$v >= 5 && 10#$v <= 3600)) ;;
     alert_min_severity)
       [[ $v == crit || $v == warn || $v == info ]] ;;
     auto_update)
