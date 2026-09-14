@@ -442,7 +442,7 @@ end;
 $$;
 alter table public.nodes add column if not exists telemetry_policy_version integer not null default 0;
 update public.nodes set
- config = config || jsonb_build_object('cloud_storage','cloud',
+ config = config || jsonb_build_object('cloud_storage',coalesce(config->>'cloud_storage','cloud'),
    'cloud_push_min',case when coalesce(config->>'cloud_push_min','10')='10' then '1' else config->>'cloud_push_min' end),
  telemetry_policy_version=1
 where telemetry_policy_version=0 and not is_demo;

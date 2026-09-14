@@ -37,7 +37,8 @@ end $$;
 
 update public.nodes
 set config=config||jsonb_build_object(
-  'heartbeat_sec','300','cloud_checkin_min','5','cloud_push_min','5','record_interval_min','1'
+  'heartbeat_sec','300','cloud_checkin_min','5','cloud_push_min','5','record_interval_min','1',
+  'cloud_storage',coalesce(config->>'cloud_storage','cloud')
 ), telemetry_policy_version=2
 where telemetry_policy_version<2 and not is_demo;
 alter table public.nodes alter column telemetry_policy_version set default 2;

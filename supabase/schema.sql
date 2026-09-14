@@ -6253,11 +6253,15 @@ end;
 
 $$;
 alter table public.nodes add column if not exists telemetry_policy_version integer not null default 0;
+-- Schema reapplication is an upgrade path as well as fresh-install setup.
+-- Apply cadence v2 to both the original policy and v1, while leaving an
+-- explicit local-only storage choice untouched.
 update public.nodes set
- config = config || jsonb_build_object('cloud_storage','cloud',
+ config = config || jsonb_build_object(
+   'cloud_storage',coalesce(config->>'cloud_storage','cloud'),
    'cloud_push_min','5','cloud_checkin_min','5','heartbeat_sec','300','record_interval_min','1'),
  telemetry_policy_version=2
-where telemetry_policy_version=0 and not is_demo;
+where telemetry_policy_version<2 and not is_demo;
 alter table public.nodes alter column telemetry_policy_version set default 2;
 alter table public.nodes alter column config set default '{"auto_update":"install","cloud_storage":"cloud","cloud_push_min":"5","cloud_checkin_min":"5","heartbeat_sec":"300","record_interval_min":"1"}'::jsonb;
 

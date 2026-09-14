@@ -1315,7 +1315,7 @@ cloud_command_execute() {
 }
 
 cloud_push() {
-  local quiet=${1:-0} respect_interval=${2:-0}
+  local quiet=${1:-0} respect_interval=${2:-0} skip_control_pull=0
   CLOUD_COMMAND_SYNCED=0
   cloud_configured || {
     ((quiet)) || warn 'not configured for cloud sync; run: sudo hyn link'
@@ -1336,9 +1336,13 @@ cloud_push() {
     if [[ ${CFG[cloud_storage]:-cloud} == cloud ]] && ((check_min > push_min)); then check_min=$push_min; fi
     [[ -r $STATE_DIR/cloud-checkin ]] && read -r check_ts <"$STATE_DIR/cloud-checkin"
     if [[ $check_ts =~ ^[0-9]+$ ]] && ((${EPOCHSECONDS:-0} >= check_ts && ${EPOCHSECONDS:-0} - check_ts < check_min * 60)); then
-      return 0
+      # Control polling is throttled independently from monitoring collection.
+      # A collection that finishes after its nominal five-minute boundary must
+      # still be eligible at the next one-minute timer wake-up.
+      skip_control_pull=1
+    else
+      _cloud_stamp "$STATE_DIR/cloud-checkin" "${EPOCHSECONDS:-0}"
     fi
-    _cloud_stamp "$STATE_DIR/cloud-checkin" "${EPOCHSECONDS:-0}"
   fi
 
   # A check-in is also the node's opportunity to receive dashboard-managed
@@ -1352,8 +1356,10 @@ cloud_push() {
   # missed minutes, and a single dropped packet should not spend one of them.
   local pulled=0
   CLOUD_CONFIG_CHANGED=0
-  if cloud_config_pull 1; then
-    pulled=1
+  if ((skip_control_pull == 0)); then
+    if cloud_config_pull 1; then
+      pulled=1
+    fi
   fi
   if ((pulled)); then
     config_apply || warn 'portal settings saved; automatic maintenance will retry applying schedules'
@@ -1363,7 +1369,7 @@ cloud_push() {
   # explicit request from the operator; making it wait on an unrelated RPC is
   # how a machine ends up sitting at "waiting for the machine to check in" while
   # it is in fact checking in every minute.
-  cloud_command_poll 1 || true
+  ((skip_control_pull)) || cloud_command_poll 1 || true
   # Sync (and a completed in-process update) performs its own complete
   # collection and ingest. Do not immediately send a duplicate snapshot from the
   # ordinary scheduled path.
@@ -1371,7 +1377,7 @@ cloud_push() {
   # A portal command is explicit and therefore takes priority over the detached
   # automatic updater. With no command, a policy change to auto_update still
   # takes effect in this same check-in.
-  ((CLOUD_COMMAND_CLAIMED)) || update_startup
+  ((skip_control_pull)) || ((CLOUD_COMMAND_CLAIMED)) || update_startup
 
   # Local recording has its own timer, independent of network health. Scheduled
   # check-ins exchange control data only; explicit push/sync shares one reading.
