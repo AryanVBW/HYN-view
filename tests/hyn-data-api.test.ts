@@ -28,10 +28,11 @@ const fetchMock = mock.method(globalThis, "fetch", async (input: string | URL | 
   return Response.json([{ id: "node-1", name: "krishna" }]);
 });
 
-const { userDataRpc } = await import("../lib/hyn-data.ts");
+const loaded = import("../lib/hyn-data.ts");
 
 test("portal RPCs authenticate with the service key and the signed-in user id", async (t) => {
   t.after(() => fetchMock.mock.restore());
+  const { userDataRpc } = await loaded;
   const result = await userDataRpc("hyn_list_nodes");
   assert.equal(result.error, null);
   assert.deepEqual(result.data, [{ id: "node-1", name: "krishna" }]);
