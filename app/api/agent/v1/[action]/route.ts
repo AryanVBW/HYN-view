@@ -18,7 +18,7 @@ import {
 } from "@/lib/web-notification";
 import { monitorNodeHeartbeat } from "@/workflows/heartbeat-watchdog";
 import { acceptTransientSnapshot } from "@/lib/transient-snapshot";
-import { dataApiUrl, isD1Data, proxyAgent } from "@/lib/hyn-data";
+import { dataApiUrl, isD1Data } from "@/lib/hyn-data";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,29 +35,70 @@ export async function POST(
   const rpc = agentRpcForAction(action);
   if (!rpc) return jsonError(404, "unknown agent action");
   if (isD1Data()) {
+    const declaredLength = Number(request.headers.get("content-length") ?? 0);
+    if (declaredLength > MAX_AGENT_BODY_BYTES) {
+      return jsonError(413, "agent request exceeds 1 MB");
+    }
+    const raw = await request.text();
+    if (new TextEncoder().encode(raw).length > MAX_AGENT_BODY_BYTES) {
+      return jsonError(413, "agent request exceeds 1 MB");
+    }
+    let body: Record<string, unknown>;
+    try { body = JSON.parse(raw || "{}") as Record<string, unknown>; }
+    catch { return jsonError(400, "request body must be valid JSON"); }
+    if (!body || Array.isArray(body) || typeof body !== "object") {
+      return jsonError(400, "request body must be a JSON object");
+    }
     if (rpc === "hyn_ingest") {
-      const raw = await request.text();
-      if (new TextEncoder().encode(raw).length > MAX_AGENT_BODY_BYTES) {
-        return jsonError(413, "agent request exceeds 1 MB");
-      }
-      let body: Record<string, unknown>;
-      try { body = JSON.parse(raw || "{}") as Record<string, unknown>; }
-      catch { return jsonError(400, "request body must be valid JSON"); }
       body = enrichIngestWithPublicIp(
         body,
         request.headers.get("x-forwarded-for") ?? request.headers.get("x-real-ip"),
       );
-      const res = await fetch(`${dataApiUrl()}/api/agent/v1/${encodeURIComponent(rpc)}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      return new NextResponse(res.body, {
-        status: res.status,
-        headers: { "content-type": res.headers.get("content-type") ?? "application/json", "Cache-Control": "no-store" },
-      });
     }
-    return proxyAgent(rpc, request);
+    const res = await fetch(`${dataApiUrl()}/api/agent/v1/${encodeURIComponent(rpc)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    let payload: unknown = null;
+    try { payload = await res.json(); } catch { payload = null; }
+    if (!res.ok) {
+      const message = payload && typeof payload === "object" && "message" in payload
+        ? String((payload as { message: unknown }).message)
+        : res.statusText || "agent request failed";
+      const status = /invalid node token|revoked/i.test(message) ? 401 : res.status >= 400 && res.status < 600 ? res.status : 400;
+      return jsonError(status, message);
+    }
+    const response = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? payload as Record<string, unknown>
+      : null;
+    after(async () => {
+      try {
+        if (rpc === "hyn_queue_web_notification") {
+          const jobId = typeof response?.id === "string" ? response.id : null;
+          if (jobId) await dispatchQueuedWebNotification(jobId);
+        }
+        if (rpc === "hyn_report_node_command") {
+          const commandId = typeof body.p_command_id === "string" ? body.p_command_id : null;
+          const terminal = body.p_status === "succeeded" || body.p_status === "failed";
+          if (commandId && terminal) await dispatchCommandNotification(commandId);
+        }
+        if (rpc === "hyn_fetch_config") {
+          const nodeId = typeof response?.node_id === "string" ? response.node_id : null;
+          await dispatchQueuedWebNotification();
+          if (nodeId) await retryNodeCommandNotification(nodeId);
+        }
+        if (rpc === "hyn_ingest") {
+          const nodeId = typeof response?.node_id === "string" ? response.node_id : null;
+          if (nodeId) await dispatchScheduledEmails(nodeId);
+        }
+      } catch (dispatchError) {
+        console.error("[agent-d1] after-proxy dispatch failed; the next heartbeat will retry it", dispatchError);
+      }
+    });
+    return NextResponse.json(payload, {
+      headers: { "Cache-Control": "no-store" },
+    });
   }
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     return jsonError(503, "agent API is not configured");

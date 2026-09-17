@@ -76,7 +76,10 @@ jobs:
           printf 'machine git.heroku.com\nlogin heroku\npassword %s\n' "$HEROKU_API_KEY" > "$HOME/.netrc"
           trap 'rm -f "$HOME/.netrc"' EXIT
           heroku git:remote --app "$HEROKU_APP_NAME"
-          git push heroku HEAD:refs/heads/main
+          # Heroku git is a deploy remote, not source history. GitHub main is
+          # never force-pushed. --force replaces a diverged heroku/main so the
+          # exact validated commit becomes the running slug.
+          git push heroku HEAD:refs/heads/main --force
           heroku releases --app "$HEROKU_APP_NAME" --num 3
       - name: Enable tested delivery controls
         run: heroku config:set HYN_DELIVERY_CONTROLS_ENABLED=true --app "$HEROKU_APP_NAME"

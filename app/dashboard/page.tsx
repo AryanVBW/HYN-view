@@ -45,6 +45,7 @@ import {
 } from "@/lib/dashboard-data";
 import { heartbeatState } from "@/lib/heartbeat";
 import { commandBlockedReason, readAgentRelease } from "@/lib/node-command";
+import { isD1Data, userDataRpc } from "@/lib/hyn-data";
 import { readTransientSnapshot, snapshotMetric } from "@/lib/transient-snapshot";
 import { monitoringRevision } from "@/lib/monitoring-state";
 import { mergeMonitoringHistory } from "@/lib/monitoring-data";
@@ -143,7 +144,11 @@ export default async function DashboardPage({
 
   const localMode = node.config?.cloud_storage === "local"
     || (node.telemetry_mode === "local" && node.config?.cloud_storage !== "cloud");
-  const transient = localMode && node.status === "active" ? readTransientSnapshot(node.id) : null;
+  const transient = localMode && node.status === "active"
+    ? (isD1Data()
+      ? (await userDataRpc<Record<string, unknown>>("hyn_transient_get", { p_node: node.id })).data
+      : readTransientSnapshot(node.id))
+    : null;
   const telemetry = await loadNodeTelemetry(node.id, localMode);
 
   const metrics = mergeMonitoringHistory(telemetry.history, telemetry.latest);
