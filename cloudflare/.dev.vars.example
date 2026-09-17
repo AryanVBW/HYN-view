@@ -1,0 +1,8 @@
+# Optional local HS256 fixture. Production verifies ES256 via Supabase JWKS.
+# Never commit the real values.
+SUPABASE_JWT_SECRET=
+SUPABASE_URL=https://iycjemnbfyuastnvagcj.supabase.co
+SUPABASE_JWT_ISS=https://iycjemnbfyuastnvagcj.supabase.co/auth/v1
+PAIRING_PEPPER=
+DATA_SERVICE_KEY=
+BOOTSTRAP_EMAIL=

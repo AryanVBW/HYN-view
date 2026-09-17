@@ -1,0 +1,49 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hyn-view-data",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": true,
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.01 }
+  },
+  "vars": {
+    "SUPABASE_URL": "https://iycjemnbfyuastnvagcj.supabase.co",
+    "SUPABASE_JWT_ISS": "https://iycjemnbfyuastnvagcj.supabase.co/auth/v1"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "hyn-view-production",
+      "database_id": "6f77e7c9-4069-444e-9058-1e0fba7ebf40",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "env": {
+    "staging": {
+      "name": "hyn-view-data-staging",
+      "vars": {
+        "SUPABASE_URL": "https://iycjemnbfyuastnvagcj.supabase.co",
+        "SUPABASE_JWT_ISS": "https://iycjemnbfyuastnvagcj.supabase.co/auth/v1"
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "hynview",
+          "database_id": "c52d3260-b44e-4b37-80bc-57c34bf03fdb",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "triggers": {
+        "crons": ["*/5 * * * *"]
+      }
+    }
+  }
+}

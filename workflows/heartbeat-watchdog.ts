@@ -16,7 +16,27 @@ type HeartbeatCheck = {
   owner?: string;
   heartbeatAt?: string | null;
   ageSeconds?: number | null;
+  recipient?: string | null;
+  incident_enabled?: boolean;
+  template?: string | null;
 };
+
+function d1Url() {
+  return (process.env.HYN_DATA_API_URL ?? "").replace(/\/$/, "");
+}
+
+async function d1Rpc<T>(name: string, args: Record<string, unknown>): Promise<T> {
+  const base = d1Url();
+  const key = process.env.HYN_DATA_SERVICE_KEY ?? "";
+  if (!base || !key) throw new FatalError("D1 service credentials are not configured");
+  const res = await fetch(`${base}/rpc/${encodeURIComponent(name)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+    body: JSON.stringify(args),
+  });
+  if (!res.ok) throw new Error(`data request failed: ${name}`);
+  return await res.json() as T;
+}
 
 function serviceClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -27,6 +47,9 @@ function serviceClient() {
 
 async function checkHeartbeat(nodeId: string): Promise<HeartbeatCheck> {
   "use step";
+  if (d1Url()) {
+    return d1Rpc<HeartbeatCheck>("hyn_heartbeat_watchdog_tick", { p_node: nodeId });
+  }
   const supabase = serviceClient();
   const { data: node, error: nodeError } = await supabase
     .from("nodes")
@@ -75,19 +98,27 @@ async function checkHeartbeat(nodeId: string): Promise<HeartbeatCheck> {
 async function sendHeartbeatTransition(check: HeartbeatCheck) {
   "use step";
   if (!check.nodeId || !check.owner || !check.state) return { status: "invalid" };
-  const supabase = serviceClient();
-  const { data: preference, error: preferenceError } = await supabase
-    .from("email_preferences")
-    .select("recipient,incident_enabled")
-    .eq("node_id", check.nodeId)
-    .maybeSingle();
-  if (preferenceError) throw preferenceError;
-  if (!preference?.recipient || !preference.incident_enabled) return { status: "disabled" };
-  const { data: template } = await supabase
-    .from("notification_templates")
-    .select("html_template")
-    .eq("template_key", "alert")
-    .maybeSingle();
+  let recipient = check.recipient ?? null;
+  let templateHtml = check.template ?? null;
+  if (!d1Url()) {
+    const supabase = serviceClient();
+    const { data: preference, error: preferenceError } = await supabase
+      .from("email_preferences")
+      .select("recipient,incident_enabled")
+      .eq("node_id", check.nodeId)
+      .maybeSingle();
+    if (preferenceError) throw preferenceError;
+    if (!preference?.recipient || !preference.incident_enabled) return { status: "disabled" };
+    recipient = preference.recipient;
+    const { data: template } = await supabase
+      .from("notification_templates")
+      .select("html_template")
+      .eq("template_key", "alert")
+      .maybeSingle();
+    templateHtml = template?.html_template ?? null;
+  } else if (!recipient || check.incident_enabled === false) {
+    return { status: "disabled" };
+  }
 
   const offline = check.state === "offline";
   const subject = offline
@@ -98,7 +129,7 @@ async function sendHeartbeatTransition(check: HeartbeatCheck) {
     : `The machine resumed its one-minute heartbeat at ${check.heartbeatAt ?? "the current check"}.`;
   const content = `<p style="margin:0 0 16px;color:#dcecf2">${escapeHtml(detail)}</p><pre style="white-space:pre-wrap;border:1px solid #17333d;background:#05090c;padding:14px;color:#dcecf2">sudo hyn doctor --fix</pre>`;
   const html = renderManagedHynEmail({
-    template: template?.html_template ?? "{{content}}",
+    template: templateHtml ?? "{{content}}",
     values: {
       subject,
       hostname: check.hostname ?? check.nodeName ?? "linked machine",
@@ -112,24 +143,39 @@ async function sendHeartbeatTransition(check: HeartbeatCheck) {
     delivery: { kind: "incident", ownerId: check.owner, nodeId: check.nodeId },
     apiKey: process.env.RESEND_API_KEY ?? "",
     from: process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>",
-    to: preference.recipient,
+    to: recipient!,
     subject,
     html,
     idempotencyKey: `heartbeat:${check.nodeId}:${check.state}:${check.heartbeatAt ?? "missing"}`,
   });
   if (!delivery.ok && delivery.deferred) return { status: "deferred", reason: delivery.error };
-  const { error: logError } = await supabase.from("notification_log").insert({
-    node_id: check.nodeId,
-    owner: check.owner,
-    kind: "resend-cloud",
-    target: preference.recipient,
-    severity: offline ? "crit" : "info",
-    subject,
-    status: delivery.ok ? "sent" : "failed",
-    error: delivery.ok ? null : delivery.error,
-    category: "alert",
-  });
-  if (logError) throw logError;
+  if (d1Url()) {
+    await d1Rpc("hyn_log_notification", {
+      p_node_id: check.nodeId,
+      p_owner: check.owner,
+      p_kind: "resend-cloud",
+      p_target: recipient,
+      p_severity: offline ? "crit" : "info",
+      p_subject: subject,
+      p_status: delivery.ok ? "sent" : "failed",
+      p_error: delivery.ok ? null : delivery.error,
+      p_category: "alert",
+    });
+  } else {
+    const supabase = serviceClient();
+    const { error: logError } = await supabase.from("notification_log").insert({
+      node_id: check.nodeId,
+      owner: check.owner,
+      kind: "resend-cloud",
+      target: recipient,
+      severity: offline ? "crit" : "info",
+      subject,
+      status: delivery.ok ? "sent" : "failed",
+      error: delivery.ok ? null : delivery.error,
+      category: "alert",
+    });
+    if (logError) throw logError;
+  }
   if (!delivery.ok) throw new Error(delivery.error);
   return { status: "sent", providerId: delivery.providerId };
 }

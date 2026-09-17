@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
+import { portalRpc } from "@/lib/data-browser";
 import type { AdminClient } from "@/lib/types";
 
 export type DashboardShare = { viewer_id: string; owner_id: string };
@@ -28,7 +28,7 @@ export function DashboardAccess({
     startTransition(async () => {
       setMessage(null);
       try {
-        const { error: saveError } = await createClient().rpc(
+        const { error: saveError } = await portalRpc(
           "hyn_admin_set_dashboard_access",
           {
             p_viewer: viewerId,

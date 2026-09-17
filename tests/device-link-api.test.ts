@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import {mock,test} from "node:test";
 import {act,createElement} from "react";
 import {JSDOM} from "jsdom";
-mock.module('../lib/supabase/client.ts',{namedExports:{createClient:()=>({rpc:async(name:string)=>({data:name==='hyn_device_lookup'?{status:'pending',hostname:'New server'}:{status:'approved',node_id:'new-device',node_name:'New server'},error:null})})}});
 test('linked server opens directly even while confirmation email is still pending',async()=>{
  const dom=new JSDOM('<div id="root"></div>',{url:'https://portal.example/link'});
  Object.assign(globalThis,{window:dom.window,self:dom.window,document:dom.window.document,IS_REACT_ACT_ENVIRONMENT:true});
@@ -11,7 +10,13 @@ test('linked server opens directly even while confirmation email is still pendin
  const root=createRoot(document.getElementById('root')!);
  const originalFetch=globalThis.fetch;
  let completeEmail!:(response:Response)=>void;
- globalThis.fetch=async(url)=>{assert.equal(url,'/api/email/device-linked');return new Promise<Response>(resolve=>{completeEmail=resolve;});};
+ globalThis.fetch=async(url)=>{
+  const path=String(url);
+  if (path.includes('/api/data/rpc/hyn_device_lookup')) return Response.json({status:'pending',hostname:'New server'});
+  if (path.includes('/api/data/rpc/hyn_device_approve')) return Response.json({status:'approved',node_id:'new-device',node_name:'New server'});
+  assert.equal(path,'/api/email/device-linked');
+  return new Promise<Response>(resolve=>{completeEmail=resolve;});
+ };
  try {
   await act(async()=>root.render(createElement(LinkForm,{nodeCount:2})));
   const input=document.querySelector('input')!;

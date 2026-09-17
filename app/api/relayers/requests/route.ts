@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { storeRpc } from "@/lib/hyn-data";
 import { createClient } from "@/lib/supabase/server";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { fetchFleet } from "@/lib/relayer-provider";
@@ -20,10 +21,10 @@ export async function POST(request: Request) {
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) return fail("Sign in to request a relayer.", 401);
   const { data: active, error: activeError } =
-    await supabase.rpc("hyn_is_active");
+    await storeRpc("hyn_is_active");
   if (activeError || active !== true)
     return fail("An active account is required.", 403);
-  const { data: canRequest, error: roleError } = await supabase.rpc("hyn_can_monitor");
+  const { data: canRequest, error: roleError } = await storeRpc("hyn_can_monitor");
   if (roleError || canRequest !== true) return fail("A Monitor or Super admin role is required to request relayers.", 403);
   let body;
   try {
@@ -38,7 +39,7 @@ export async function POST(request: Request) {
     typeof body.requestId === "string" &&
     UUID.test(body.requestId)
   ) {
-    result = await supabase.rpc("hyn_cancel_relayer_request", {
+    result = await storeRpc("hyn_cancel_relayer_request", {
       p_request_id: body.requestId,
     });
   } else if (
@@ -63,7 +64,7 @@ export async function POST(request: Request) {
       );
     }
     // The caller cannot choose an owner or submit a name trusted by the portal.
-    result = await supabase.rpc("hyn_request_relayer", {
+    result = await storeRpc("hyn_request_relayer", {
       p_relayer_id: relayer.id,
       p_relayer_name: relayer.name.slice(0, 160),
     });

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { storeRpc } from "@/lib/hyn-data";
 import { createClient } from "@/lib/supabase/server";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { fetchFleet } from "@/lib/relayer-provider";
@@ -14,7 +15,7 @@ export async function GET(request: Request) {
   const supabase = await createClient();
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) return fail("Sign in again.", 401);
-  const { data: admin, error } = await supabase.rpc("hyn_is_admin");
+  const { data: admin, error } = await storeRpc("hyn_is_admin");
   if (error || admin !== true)
     return fail("An active administrator account is required.", 403);
   const query = (new URL(request.url).searchParams.get("q") ?? "")

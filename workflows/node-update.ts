@@ -6,10 +6,30 @@ import { FatalError, sleep } from "workflow";
 // with the command-polling release normally finish within a few minutes.
 const UPDATE_TIMEOUT = "24h";
 
+function d1Url() {
+  return (process.env.HYN_DATA_API_URL ?? "").replace(/\/$/, "");
+}
+
 async function expireStuckUpdate(commandId: string) {
   "use step";
 
   console.log(`[node-update] checking timeout for command ${commandId}`);
+  const base = d1Url();
+  if (base) {
+    const key = process.env.HYN_DATA_SERVICE_KEY ?? "";
+    if (!key) throw new FatalError("D1 service credentials are not configured");
+    const res = await fetch(`${base}/rpc/hyn_expire_node_command`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      body: JSON.stringify({ p_id: commandId }),
+    });
+    if (!res.ok) throw new Error("expire command failed");
+    const data = await res.json() as { id?: string; status?: string };
+    if (data.status === "expired") console.warn(`[node-update] command ${commandId} expired`);
+    else console.log(`[node-update] command ${commandId} already reached a terminal state`);
+    return data;
+  }
+
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !serviceKey) {

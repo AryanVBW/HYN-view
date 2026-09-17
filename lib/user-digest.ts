@@ -21,7 +21,7 @@ export function renderUserDigest(name: string, date: string, nodes: DigestNode[]
 
 export async function dispatchUserDigests(triggerNode?: string) {
   const result = { sent: 0, failed: 0, skipped: 0, checked: 0 };
-  if (!deliveryControlsEnabled()) return result;
+  if (!deliveryControlsEnabled() || (process.env.HYN_DATA_API_URL ?? "").replace(/\/$/, "")) return result;
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) throw new Error("Managed delivery controls are not configured");

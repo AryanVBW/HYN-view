@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { diagnoseEmailDelivery } from "@/lib/cloud-email";
+import { storeRpc } from "@/lib/hyn-data";
 import { createClient } from "@/lib/supabase/server";
 
 // Why is email not sending?
@@ -27,7 +28,7 @@ export async function GET() {
   if (!auth.user) {
     return NextResponse.json({ message: "not authenticated" }, { status: 401 });
   }
-  const { data: isAdmin, error } = await supabase.rpc("hyn_is_super_admin");
+  const { data: isAdmin, error } = await storeRpc("hyn_is_super_admin");
   if (error) {
     return NextResponse.json({ message: error.message }, { status: 403 });
   }

@@ -80,6 +80,9 @@ const peak = (values: Array<number | null>) => {
 // calls the same function as a fallback for machines that did not upload near
 // the requested time. cloud_email_dispatches makes both paths idempotent.
 export async function dispatchScheduledEmails(nodeId?: string): Promise<ScheduledEmailResult> {
+  if ((process.env.HYN_DATA_API_URL ?? "").replace(/\/$/, "")) {
+    return { sent: 0, failed: 0, skipped: 0, checked: 0 };
+  }
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
   const resendKey = process.env.RESEND_API_KEY ?? "";
   const from = process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>";

@@ -17,8 +17,11 @@ pnpm install
 pnpm dev
 ```
 
-Apply `../supabase/schema.sql` to the Supabase project before starting. The
-public URL and anon key power authenticated browser access through RLS.
+The public URL and anon key are **Auth only**. Application data is stored in
+Cloudflare D1. See [cloudflare/README.md](cloudflare/README.md).
+
+Set `HYN_DATA_API_URL` to the Worker origin so `/api/agent/v1` and dashboard
+queries stop calling PostgREST.
 
 ## Hosted agent API
 
@@ -37,7 +40,8 @@ daily system-information time. Administrators control all three HTML wrappers.
 Set these server-only deployment variables:
 
 ```text
-SUPABASE_SERVICE_ROLE_KEY
+HYN_DATA_API_URL
+HYN_DATA_SERVICE_KEY
 RESEND_API_KEY
 EMAIL_FROM
 CRON_SECRET

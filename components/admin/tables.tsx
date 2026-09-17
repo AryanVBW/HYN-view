@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Loader2, Pause, Play, ShieldOff, Unplug } from "lucide-react";
 import { DeleteNodeButton } from "@/components/admin/delete-node-button";
-import { createClient } from "@/lib/supabase/client";
+import { portalRpc } from "@/lib/data-browser";
 import {
   compareVersions,
   formatRelative,
@@ -60,8 +60,7 @@ export function NodeTable({
   ) {
     setBusyId(nodeId);
     setError(null);
-    const supabase = createClient();
-    const { error } = await supabase.rpc(fn, params);
+    const { error } = await portalRpc(fn, params);
     setBusyId(null);
     if (error) {
       setError(error.message);
@@ -377,7 +376,7 @@ export function ClientTable({
     setBusyId(id);
     setError(null);
     try {
-      const { error: saveError } = await createClient().rpc(fn, params);
+      const { error: saveError } = await portalRpc(fn, params);
       if (saveError) setError(saveError.message);
       else router.refresh();
     } catch {

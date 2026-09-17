@@ -4,6 +4,7 @@ import { ArrowLeft } from "lucide-react";
 import { LiveRefresh } from "@/components/live-refresh";
 import { DashboardNavigation } from "@/components/dashboard/dashboard-navigation";
 import { ServerNotifications } from "@/components/dashboard/server-notifications";
+import { storeRpc } from "@/lib/hyn-data";
 import { createClient } from "@/lib/supabase/server";
 import type { ServerNotification } from "@/lib/server-notifications";
 
@@ -14,7 +15,7 @@ export default async function NotificationsPage() {
   const supabase = await createClient();
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) redirect("/signin?next=%2Fnotifications");
-  const { data, error } = await supabase.rpc("hyn_server_notifications", { p_limit: 50 });
+  const { data, error } = await storeRpc("hyn_server_notifications", { p_limit: 50 });
   return <main className="container w-full max-w-6xl space-y-6 px-4 pb-16 pt-36 sm:px-6">
     <LiveRefresh />
     <div className="flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">

@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { FlaskConical, Loader2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { createClient } from "@/lib/supabase/client";
+import { portalRpc } from "@/lib/data-browser";
 
 // Demo data is strictly opt-in and always labelled. It exists so the dashboard
 // can be evaluated without a paired server; it must never be mistaken for
@@ -24,8 +24,7 @@ export function DemoDataButton({
   async function run() {
     setBusy(true);
     setError(null);
-    const supabase = createClient();
-    const { error } = await supabase.rpc(mode === "seed" ? "hyn_demo_seed" : "hyn_demo_clear");
+    const { error } = await portalRpc(mode === "seed" ? "hyn_demo_seed" : "hyn_demo_clear");
     setBusy(false);
     if (error) {
       setError(error.message);

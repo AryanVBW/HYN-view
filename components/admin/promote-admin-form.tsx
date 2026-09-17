@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, UserPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { createClient } from "@/lib/supabase/client";
+import { portalRpc } from "@/lib/data-browser";
 
 // "Add another admin" for someone who already has an account: promoting by
 // role toggle in the client table works once they show up there, but this is
@@ -23,8 +23,7 @@ export function PromoteAdminForm() {
     if (!email.trim()) return;
     setBusy(true);
     setMessage(null);
-    const supabase = createClient();
-    const { data, error } = await supabase.rpc("hyn_admin_promote_by_email", {
+    const { data, error } = await portalRpc<{ status?: string }>("hyn_admin_promote_by_email", {
       p_email: email.trim(),
     });
     setBusy(false);

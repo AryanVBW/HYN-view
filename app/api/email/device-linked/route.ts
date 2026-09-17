@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { buildDeviceLinkedContent, renderHynEmailShell } from "@/lib/cloud-email";
 import { sendManagedEmail as sendResendEmail } from "@/lib/delivery-send";
+import { storeRpc } from "@/lib/hyn-data";
 import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -22,7 +23,7 @@ export async function POST(request: Request) {
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) return NextResponse.json({ message: "not authenticated" }, { status: 401 });
 
-  const { data, error } = await supabase.rpc("hyn_claim_device_linked_email", {
+  const { data, error } = await storeRpc("hyn_claim_device_linked_email", {
     p_node_id: body.nodeId,
   });
   if (error) return NextResponse.json({ message: error.message }, { status: 400 });
@@ -62,10 +63,10 @@ export async function POST(request: Request) {
     idempotencyKey: `device-linked:${body.nodeId}`,
   });
   if (!delivery.ok) {
-    await supabase.rpc("hyn_release_device_linked_email", { p_node_id: body.nodeId });
+    await storeRpc("hyn_release_device_linked_email", { p_node_id: body.nodeId });
     return NextResponse.json({ message: delivery.error }, { status: 502 });
   }
-  await supabase.rpc("hyn_complete_device_linked_email", {
+  await storeRpc("hyn_complete_device_linked_email", {
     p_node_id: body.nodeId,
     p_provider_id: delivery.providerId,
   });

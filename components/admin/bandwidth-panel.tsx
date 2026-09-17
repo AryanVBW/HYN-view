@@ -1,6 +1,6 @@
 "use client";
 import { useState, useTransition } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { portalRpc } from "@/lib/data-browser";
 import { byteCount, formatBytes, type BandwidthReport } from "@/lib/bandwidth";
 import type { Node } from "@/lib/types";
 
@@ -16,8 +16,8 @@ export function BandwidthPanel({ nodes, initialNodeId = "", expanded = false }: 
       setError(null); setReport(null);
       try {
         const result = node
-          ? await createClient().rpc("hyn_bandwidth_report", { p_node: node, p_days: Number(days) })
-          : await createClient().rpc("hyn_fleet_bandwidth_report", { p_days: Number(days) });
+          ? await portalRpc<BandwidthReport>("hyn_bandwidth_report", { p_node: node, p_days: Number(days) })
+          : await portalRpc<BandwidthReport>("hyn_fleet_bandwidth_report", { p_days: Number(days) });
         if (result.error) { setError("Bandwidth reporting is unavailable. Ask a Super admin to check the server reporting setup."); return; }
         setReport(result.data as BandwidthReport);
         setLoadedName(node ? nodes.find(n=>n.id===node)?.name || "Server" : "All accessible servers");

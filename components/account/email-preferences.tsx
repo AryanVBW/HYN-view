@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { BellRing, Check, Clock3, Cpu, Loader2, Mail } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { createClient } from "@/lib/supabase/client";
+import { portalRpc } from "@/lib/data-browser";
 import type { EmailPreference, Node } from "@/lib/types";
 
 type EditablePreference = Pick<
@@ -82,11 +82,15 @@ export function EmailPreferences({
       setMessage({ ok: false, text: "Use an IANA timezone such as Asia/Kolkata, Europe/London, or UTC." });
       return;
     }
-    const supabase = createClient();
-    const { error } = await supabase.from("email_preferences").upsert({
-      node_id: selected,
-      ...draft,
-      updated_at: new Date().toISOString(),
+    const { error } = await portalRpc("hyn_upsert_email_preferences", {
+      p_node_id: selected,
+      p_recipient: draft.recipient,
+      p_timezone: draft.timezone,
+      p_incident_enabled: draft.incident_enabled,
+      p_daily_enabled: draft.daily_enabled,
+      p_daily_at: draft.daily_at,
+      p_system_enabled: draft.system_enabled,
+      p_system_at: draft.system_at,
     });
     setBusy(false);
     if (error) {

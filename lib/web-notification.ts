@@ -10,6 +10,29 @@ import { SUPABASE_URL } from "./supabase/config.ts";
 import { sendManagedEmail as sendResendEmail } from "./delivery-send.ts";
 import type { ManagedDeliveryResult } from "./managed-delivery.ts";
 
+function d1Url() {
+  return (process.env.HYN_DATA_API_URL ?? "").replace(/\/$/, "");
+}
+
+async function d1Rpc<T>(name: string, args: Record<string, unknown> = {}): Promise<{ data: T | null; error: { message: string } | null }> {
+  const base = d1Url();
+  const key = process.env.HYN_DATA_SERVICE_KEY ?? "";
+  if (!base || !key) return { data: null, error: { message: "missing data credentials" } };
+  const res = await fetch(`${base}/rpc/${encodeURIComponent(name)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+    body: JSON.stringify(args),
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    const message = body && typeof body === "object" && "message" in body
+      ? String((body as { message: unknown }).message)
+      : "data request failed";
+    return { data: null, error: { message } };
+  }
+  return { data: body as T, error: null };
+}
+
 export type WebNotificationJob = {
   id: string;
   nodeId: string;
@@ -90,6 +113,68 @@ export async function dispatchWebNotificationJob(
 }
 
 export async function dispatchQueuedWebNotification(jobId: string | null = null) {
+  if (d1Url()) {
+    return dispatchWebNotificationJob(jobId, {
+      claim: async (requestedId) => {
+        const { data, error } = await d1Rpc<Record<string, unknown>>("hyn_claim_web_notification", {
+          p_job_id: requestedId,
+        });
+        if (error) throw new Error(error.message);
+        const claim = data;
+        if (!claim || claim.status !== "send") return null;
+        const id = typeof claim.id === "string" ? claim.id : "";
+        const nodeId = typeof claim.node_id === "string" ? claim.node_id : "";
+        const recipient = typeof claim.recipient === "string" ? claim.recipient : "";
+        if (!id || !nodeId || !recipient) {
+          throw new Error("queued web notification is missing delivery metadata");
+        }
+        const category = claim.category === "report" || claim.category === "test" || claim.category === "other"
+          ? claim.category
+          : "alert";
+        const severity = claim.severity === "crit" || claim.severity === "warn" ? claim.severity : "info";
+        const templateKey = category === "alert" ? "alert" : "report";
+        const templates = await d1Rpc<Array<{ template_key: string; html_template: string }>>("hyn_admin_templates");
+        const template = (templates.data ?? []).find((row) => row.template_key === templateKey);
+        return {
+          id,
+          nodeId,
+          nodeName: typeof claim.node_name === "string" ? claim.node_name : "linked machine",
+          hostname: typeof claim.hostname === "string" ? claim.hostname : null,
+          recipient,
+          fingerprint: typeof claim.fingerprint === "string" ? claim.fingerprint : id,
+          category,
+          severity,
+          subject: typeof claim.subject === "string" ? claim.subject : "HYN-view notification",
+          textBody: typeof claim.text_body === "string" ? claim.text_body : "No details supplied",
+          htmlBody: typeof claim.html_body === "string" ? claim.html_body : null,
+          template: template?.html_template ?? null,
+        };
+      },
+      send: async ({ job, html, idempotencyKey }) => sendResendEmail({
+        delivery: { kind: job.category === "alert" ? "incident" : job.category === "report" ? "daily" : "other", nodeId: job.nodeId },
+        apiKey: process.env.RESEND_API_KEY ?? "",
+        from: process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>",
+        to: job.recipient,
+        subject: job.subject,
+        html,
+        idempotencyKey,
+      }),
+      defer: async (id, reason) => {
+        const { error } = await d1Rpc("hyn_defer_web_delivery", { p_job: id, p_reason: reason });
+        if (error) throw new Error(error.message);
+      },
+      complete: async (id, status, recipient, providerId, errorMessage) => {
+        const { error } = await d1Rpc("hyn_complete_web_notification", {
+          p_job_id: id,
+          p_status: status,
+          p_target: recipient,
+          p_provider_id: providerId,
+          p_error: errorMessage,
+        });
+        if (error) throw new Error(error.message);
+      },
+    });
+  }
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
   const resendKey = process.env.RESEND_API_KEY ?? "";
   const from = process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>";
@@ -164,9 +249,78 @@ export async function dispatchQueuedWebNotification(jobId: string | null = null)
 }
 
 export async function dispatchCommandNotification(commandId: string) {
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
   const resendKey = process.env.RESEND_API_KEY ?? "";
   const from = process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>";
+  if (d1Url()) {
+    const claimed = await d1Rpc<{
+      status?: string;
+      command?: {
+        id: string; node_id: string; command: string; status: string; message: string;
+        target_version: string | null; result_version: string | null; updated_at: string;
+      };
+      node?: { id: string; owner: string; name: string; hostname: string | null; agent_version: string | null };
+      preference?: { recipient: string };
+      template?: string | null;
+    }>("hyn_claim_command_email", { p_id: commandId });
+    if (claimed.error) throw new Error(claimed.error.message);
+    if (claimed.data?.status !== "send" || !claimed.data.command || !claimed.data.node || !claimed.data.preference) {
+      return { status: (claimed.data?.status ?? "pending") as "pending" | "already-sent" | "disabled" };
+    }
+    const command = claimed.data.command;
+    const node = claimed.data.node;
+    const recipient = claimed.data.preference.recipient;
+    const idempotencyKey = `command:${command.id}:${command.status}`;
+    const action = command.command === "sync" ? "Synchronization" : "HYN CLI update";
+    const succeeded = command.status === "succeeded";
+    const subject = `${action} ${succeeded ? "completed" : "failed"} · ${node.name}`;
+    const html = renderManagedHynEmail({
+      template: claimed.data.template ?? "{{content}}",
+      values: {
+        subject,
+        hostname: node.hostname ?? node.name,
+        version: command.result_version ?? node.agent_version ?? "unknown",
+        severity: succeeded ? "info" : "crit",
+        content: buildCommandResultContent({
+          command: command.command === "sync" ? "sync" : "update",
+          status: command.status === "succeeded" ? "succeeded" : command.status === "expired" ? "expired" : "failed",
+          message: command.message,
+          targetVersion: command.target_version,
+          resultVersion: command.result_version ?? node.agent_version,
+          updatedAt: command.updated_at,
+        }),
+      },
+      preview: command.message,
+    });
+    const delivery = await sendResendEmail({
+      delivery: { kind: "command", nodeId: node.id, ownerId: node.owner },
+      apiKey: resendKey,
+      from,
+      to: recipient,
+      subject,
+      html,
+      idempotencyKey,
+    });
+    if (delivery.ok || !delivery.deferred) {
+      await d1Rpc("hyn_log_notification", {
+        p_node_id: node.id,
+        p_owner: node.owner,
+        p_kind: "resend-cloud",
+        p_target: recipient,
+        p_severity: succeeded ? "info" : "crit",
+        p_subject: subject,
+        p_status: delivery.ok ? "sent" : "failed",
+        p_error: delivery.ok ? null : delivery.error,
+        p_category: "other",
+      });
+    }
+    if (!delivery.ok) {
+      await d1Rpc("hyn_complete_command_email", { p_key: idempotencyKey, p_release: true });
+      return { status: "failed" as const, error: delivery.error };
+    }
+    await d1Rpc("hyn_complete_command_email", { p_key: idempotencyKey, p_provider_id: delivery.providerId });
+    return { status: "sent" as const, providerId: delivery.providerId };
+  }
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
   if (!SUPABASE_URL || !serviceKey) throw new Error("Supabase service credentials are not configured");
   const supabase = createClient(SUPABASE_URL, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
@@ -251,6 +405,20 @@ export async function dispatchCommandNotification(commandId: string) {
 }
 
 export async function retryNodeCommandNotification(nodeId: string) {
+  if (d1Url()) {
+    for (const command of ["update", "sync"] as const) {
+      const latest = await d1Rpc<{ id: string; status?: string } | null>("hyn_latest_node_command", {
+        p_node_id: nodeId,
+        p_command: command,
+      });
+      if (latest.error) throw new Error(latest.error.message);
+      if (latest.data?.id && ["succeeded", "failed", "expired"].includes(latest.data.status ?? "")) {
+        const result = await dispatchCommandNotification(latest.data.id);
+        if (result.status !== "already-sent") return result;
+      }
+    }
+    return { status: "idle" as const };
+  }
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
   if (!SUPABASE_URL || !serviceKey) throw new Error("Supabase service credentials are not configured");
   const supabase = createClient(SUPABASE_URL, serviceKey, {
@@ -272,3 +440,4 @@ export async function retryNodeCommandNotification(nodeId: string) {
   }
   return { status: "idle" as const };
 }
+

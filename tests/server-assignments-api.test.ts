@@ -7,11 +7,11 @@ import type { AdminClient, AdminNode } from "../lib/types";
 let failure: string | null = null;
 const calls: { name: string; params: unknown }[] = [];
 mock.module("next/navigation", { namedExports: { useRouter: () => ({ refresh() {} }) } });
-mock.module("../lib/supabase/client.ts", { namedExports: {
-  createClient: () => ({ rpc: async (name: string, params: unknown) => {
+mock.module("../lib/data-browser.ts", { namedExports: {
+  portalRpc: async (name: string, params: unknown) => {
     calls.push({ name, params });
     return { data: null, error: failure ? { message: failure } : null };
-  } }),
+  },
 } });
 const clients = [
   { id: "alice", full_name: "Alice", email: "alice@example.test", status: "active", role: "viewer" },

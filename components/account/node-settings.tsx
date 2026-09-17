@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { createClient } from "@/lib/supabase/client";
+import { portalRpc } from "@/lib/data-browser";
 import type { Node } from "@/lib/types";
 import { mergePortalConfig } from "@/lib/node-config";
 
@@ -120,8 +120,7 @@ export function NodeSettings({ nodes, canWrite = false }: { nodes: Node[]; canWr
     setError(null);
     setSaved(false);
     const merged = mergePortalConfig(node.config ?? {}, draft);
-    const supabase = createClient();
-    const { error } = await supabase.rpc("hyn_admin_set_node_config", {
+    const { error } = await portalRpc("hyn_admin_set_node_config", {
       p_node_id: node.id,
       p_config: merged,
     });

@@ -5,6 +5,7 @@ import { Logo } from "@/components/logo";
 import { LinkForm } from "@/components/link-form";
 import { ParticleField } from "@/components/particle-field";
 import { DashboardMagicRings } from "@/components/dashboard-magic-rings";
+import { isD1Data, userDataRpc } from "@/lib/hyn-data";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
 
@@ -38,14 +39,16 @@ export default async function LinkPage() {
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) redirect("/signin?next=%2Flink");
 
-  const { data: canLink } = await supabase.rpc("hyn_can_link");
+  const { data: canLink } = isD1Data()
+    ? await userDataRpc<boolean>("hyn_can_link")
+    : await supabase.rpc("hyn_can_link");
 
-  // Count only to show a "you already have N nodes" hint. RLS scopes this to
-  // the signed-in user.
-  const { count } = await supabase
-    .from("nodes")
-    .select("id", { count: "exact", head: true })
-    .eq("is_demo", false).eq("owner", auth.user.id);
+  const nodes = isD1Data()
+    ? await userDataRpc<Array<{ id: string; is_demo?: boolean; owner?: string }>>("hyn_list_nodes")
+    : null;
+  const count = isD1Data()
+    ? (nodes.data ?? []).filter((row) => !row.is_demo && row.owner === auth.user.id).length
+    : ((await supabase.from("nodes").select("id", { count: "exact", head: true }).eq("is_demo", false).eq("owner", auth.user.id)).count ?? 0);
 
   return (
     <div className="flex min-h-svh flex-col items-center justify-center px-4 py-16">

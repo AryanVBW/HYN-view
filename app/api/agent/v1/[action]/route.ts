@@ -18,6 +18,7 @@ import {
 } from "@/lib/web-notification";
 import { monitorNodeHeartbeat } from "@/workflows/heartbeat-watchdog";
 import { acceptTransientSnapshot } from "@/lib/transient-snapshot";
+import { dataApiUrl, isD1Data, proxyAgent } from "@/lib/hyn-data";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,6 +34,31 @@ export async function POST(
   const { action } = await context.params;
   const rpc = agentRpcForAction(action);
   if (!rpc) return jsonError(404, "unknown agent action");
+  if (isD1Data()) {
+    if (rpc === "hyn_ingest") {
+      const raw = await request.text();
+      if (new TextEncoder().encode(raw).length > MAX_AGENT_BODY_BYTES) {
+        return jsonError(413, "agent request exceeds 1 MB");
+      }
+      let body: Record<string, unknown>;
+      try { body = JSON.parse(raw || "{}") as Record<string, unknown>; }
+      catch { return jsonError(400, "request body must be valid JSON"); }
+      body = enrichIngestWithPublicIp(
+        body,
+        request.headers.get("x-forwarded-for") ?? request.headers.get("x-real-ip"),
+      );
+      const res = await fetch(`${dataApiUrl()}/api/agent/v1/${encodeURIComponent(rpc)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return new NextResponse(res.body, {
+        status: res.status,
+        headers: { "content-type": res.headers.get("content-type") ?? "application/json", "Cache-Control": "no-store" },
+      });
+    }
+    return proxyAgent(rpc, request);
+  }
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     return jsonError(503, "agent API is not configured");
   }

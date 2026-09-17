@@ -48,9 +48,11 @@ Open the target app's **Settings → Config Vars** and provide:
 
 | Config var | Purpose |
 | --- | --- |
-| `NEXT_PUBLIC_SUPABASE_URL` | The production Supabase project URL |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | The same project's public anon key |
-| `SUPABASE_SERVICE_ROLE_KEY` | Server-side agent and managed email operations |
+| `NEXT_PUBLIC_SUPABASE_URL` | Auth project URL (Google sign-in / JWT only) |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Auth project's public anon key |
+| `HYN_DATA_API_URL` | Cloudflare Worker origin for D1 (pairing, telemetry, dashboard) |
+| `HYN_DATA_SERVICE_KEY` | Same secret as Worker `DATA_SERVICE_KEY` |
+| `SUPABASE_SERVICE_ROLE_KEY` | Only needed if `HYN_DATA_API_URL` is unset (legacy Postgres data) |
 | `RESEND_API_KEY` | Managed email delivery |
 | `EMAIL_FROM` | A sender address verified with the email provider |
 | `CRON_SECRET` | Authentication for scheduled email requests |
@@ -60,19 +62,16 @@ as at runtime. The repository already contains the Procfile, Node 24 requirement
 pinned pnpm version, and `heroku-postbuild` command. Keep a web dyno running in
 the app's **Resources** tab.
 
-Before the first deployment, apply pending migrations from the separate CLI
-repository's `supabase/migrations/` directory to that same Supabase project in
-timestamp order. The [portal roles guide](portal-roles.md) and
-[server access guide](server-access-bandwidth.md) describe the dependencies.
-For an existing database, use pending migrations rather than replacing it with
-the full fresh-install schema.
+When `HYN_DATA_API_URL` is set, apply D1 migrations from `cloudflare/migrations/`
+instead of PostgREST schema. Auth remains on the Supabase project; do not send
+heartbeats or dashboard reads to Postgres.
 
 ## What happens on each push
 
 1. GitHub installs the pinned dependencies, runs tests, TypeScript, lint, and a
    production build.
-2. The deploy job checks for the Heroku secret and verifies that the required
-   database functions exist and reject anonymous access.
+2. The deploy job checks for the Heroku secret and verifies either the D1
+   Worker (`HYN_DATA_API_URL`) or the required Postgres functions.
 3. It pushes the exact validated commit to Heroku using authenticated HTTPS Git.
    Heroku builds and releases the app.
 4. The smoke test expects HTTP 200 from the homepage and HTTP 401 from the
@@ -97,7 +96,7 @@ run's configuration, you can also use **Re-run failed jobs**.
 | --- | --- |
 | `Check deployment configuration` | Add or replace the `production` environment's `HEROKU_API_KEY` secret. |
 | `You do not have access to the app` | Use a token for the app owner or an authorized collaborator; check `HEROKU_APP_NAME`. |
-| `Check production database migrations`, `PGRST202` | Apply the missing database migrations before retrying. This is also the cause of “Dashboard access unavailable” when the roles functions are absent. |
+| `Check production database migrations`, `PGRST202` | Apply the missing database migrations before retrying, or set `HYN_DATA_API_URL` to a deployed D1 Worker. This is also the cause of “Dashboard access unavailable” when the roles functions are absent. |
 | Validation or Heroku build | Fix the reported test or build error and push another commit. |
 | Smoke test | Check the configured app URL, running web dyno, and Heroku runtime logs. |
 

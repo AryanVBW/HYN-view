@@ -7,6 +7,7 @@ import { buildAdminClientReport, type AdminReportMachine } from "@/lib/admin-rep
 import { renderManagedHynEmail } from "@/lib/cloud-email";
 import { sendManagedEmail as sendResendEmail } from "@/lib/delivery-send";
 import { normalizeNodeCommand } from "@/lib/node-command";
+import { isD1Data, storeRpc } from "@/lib/hyn-data";
 import { createClient } from "@/lib/supabase/server";
 import { SUPABASE_URL } from "@/lib/supabase/config";
 import { monitorNodeUpdate } from "@/workflows/node-update";
@@ -30,7 +31,7 @@ async function authenticatedAdmin() {
   const supabase = await createClient();
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) throw new Error("You must sign in again.");
-  const { data: admin, error } = await supabase.rpc("hyn_is_super_admin");
+  const { data: admin, error } = await storeRpc("hyn_is_super_admin");
   if (error || admin !== true) throw new Error("An active administrator account is required.");
   return { supabase, user: auth.user };
 }
@@ -55,8 +56,7 @@ export async function saveNotificationTemplate(
     return { ok: false, error: "Inline event handlers are not allowed in email templates." };
   }
 
-  const supabase = await createClient();
-  const { error } = await supabase.rpc("hyn_admin_save_template", {
+  const { error } = await storeRpc("hyn_admin_save_template", {
     p_template_key: templateKey,
     p_html_template: htmlTemplate,
   });
@@ -71,8 +71,8 @@ export async function sendAdminClientReport(clientId: string): Promise<AdminActi
 
   let reportId: string | null = null;
   try {
-    const { supabase } = await authenticatedAdmin();
-    const { data: claim, error: claimError } = await supabase.rpc("hyn_claim_admin_report", {
+    await authenticatedAdmin();
+    const { data: claim, error: claimError } = await storeRpc("hyn_claim_admin_report", {
       p_target_user: clientId,
     });
     if (claimError) throw claimError;
@@ -80,66 +80,90 @@ export async function sendAdminClientReport(clientId: string): Promise<AdminActi
     reportId = typeof claimed?.id === "string" ? claimed.id : null;
     if (!reportId) throw new Error("The report queue returned an invalid response.");
 
+    const d1 = isD1Data();
     const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
     const resendKey = process.env.RESEND_API_KEY ?? "";
     const from = process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>";
-    if (!SUPABASE_URL || !serviceKey || !resendKey) {
+    if (!resendKey || (!d1 && (!SUPABASE_URL || !serviceKey))) {
       throw new Error("Managed email delivery is not configured on the portal.");
     }
-    const service = createServiceClient(SUPABASE_URL, serviceKey, {
+    const service = d1 ? null : createServiceClient(SUPABASE_URL, serviceKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
-    await supabase.rpc("hyn_complete_admin_report", {
+    await storeRpc("hyn_complete_admin_report", {
       p_report_id: reportId,
       p_status: "sending",
       p_provider_id: null,
       p_error: null,
     });
 
-    const [{ data: profile, error: profileError }, { data: nodeRows, error: nodesError }] = await Promise.all([
-      service.from("profiles").select("id,email,full_name,status").eq("id", clientId).single(),
-      service.from("nodes")
-        .select("id,owner,name,hostname,os,agent_version,last_seen_at,last_heartbeat_at")
-        .eq("owner", clientId)
-        .eq("revoked", false)
-        .eq("is_demo", false)
-        .eq("status", "active")
-        .order("name"),
-    ]);
-    if (profileError || nodesError) throw profileError ?? nodesError;
-    if (!profile || profile.status !== "active" || !profile.email) {
+    let profile: { id: string; email: string; full_name: string | null; status: string };
+    let machines: AdminReportMachine[];
+    let templateHtml: string | null = null;
+
+    if (d1) {
+      const payload = await storeRpc<{
+        profile: { id: string; email: string; full_name: string | null; status: string };
+        machines: AdminReportMachine[];
+        template: string | null;
+      }>("hyn_admin_client_report", { p_target_user: clientId });
+      if (payload.error || !payload.data) throw payload.error ?? new Error("The report payload could not be loaded.");
+      profile = payload.data.profile;
+      machines = payload.data.machines;
+      templateHtml = payload.data.template;
+    } else {
+      const [{ data: profileRow, error: profileError }, { data: nodeRows, error: nodesError }] = await Promise.all([
+        service!.from("profiles").select("id,email,full_name,status").eq("id", clientId).single(),
+        service!.from("nodes")
+          .select("id,owner,name,hostname,os,agent_version,last_seen_at,last_heartbeat_at")
+          .eq("owner", clientId)
+          .eq("revoked", false)
+          .eq("is_demo", false)
+          .eq("status", "active")
+          .order("name"),
+      ]);
+      if (profileError || nodesError) throw profileError ?? nodesError;
+      if (!profileRow || profileRow.status !== "active" || !profileRow.email) {
+        throw new Error("The selected active client does not have an email address.");
+      }
+      if (!nodeRows?.length) throw new Error("The selected client has no active linked machines.");
+      profile = profileRow as typeof profile;
+      machines = await Promise.all(nodeRows.map(async (node) => {
+        const [metricResult, speedResult, alertResult] = await Promise.all([
+          service!.from("metrics")
+            .select("cpu_pct,cpu_temp_c,cpu_model,cpu_cores,mem_pct,mem_total,mem_used,disk_pct,net_iface,net_rx_bps,net_tx_bps,net_link_mbps,sensors,payload")
+            .eq("node_id", node.id).order("ts", { ascending: false }).limit(1).maybeSingle(),
+          service!.from("speedtests")
+            .select("down_bps,up_bps,latency_ms")
+            .eq("node_id", node.id).order("ts", { ascending: false }).limit(1).maybeSingle(),
+          service!.from("alert_events")
+            .select("severity,message")
+            .eq("node_id", node.id).eq("resolved", false).order("ts", { ascending: false }).limit(50),
+        ]);
+        const queryError = metricResult.error ?? speedResult.error ?? alertResult.error;
+        if (queryError) throw queryError;
+        return {
+          id: node.id,
+          name: node.name,
+          hostname: node.hostname,
+          os: node.os,
+          agentVersion: node.agent_version,
+          lastHeartbeatAt: node.last_heartbeat_at,
+          lastSeenAt: node.last_seen_at,
+          alerts: alertResult.data ?? [],
+          metric: metricResult.data,
+          speedtest: speedResult.data,
+        } as AdminReportMachine;
+      }));
+      const { data: template } = await service!.from("notification_templates")
+        .select("html_template").eq("template_key", "report").maybeSingle();
+      templateHtml = template?.html_template ?? null;
+    }
+    if (profile.status !== "active" || !profile.email) {
       throw new Error("The selected active client does not have an email address.");
     }
-    if (!nodeRows?.length) throw new Error("The selected client has no active linked machines.");
-
-    const machines: AdminReportMachine[] = await Promise.all(nodeRows.map(async (node) => {
-      const [metricResult, speedResult, alertResult] = await Promise.all([
-        service.from("metrics")
-          .select("cpu_pct,cpu_temp_c,cpu_model,cpu_cores,mem_pct,mem_total,mem_used,disk_pct,net_iface,net_rx_bps,net_tx_bps,net_link_mbps,sensors,payload")
-          .eq("node_id", node.id).order("ts", { ascending: false }).limit(1).maybeSingle(),
-        service.from("speedtests")
-          .select("down_bps,up_bps,latency_ms")
-          .eq("node_id", node.id).order("ts", { ascending: false }).limit(1).maybeSingle(),
-        service.from("alert_events")
-          .select("severity,message")
-          .eq("node_id", node.id).eq("resolved", false).order("ts", { ascending: false }).limit(50),
-      ]);
-      const queryError = metricResult.error ?? speedResult.error ?? alertResult.error;
-      if (queryError) throw queryError;
-      return {
-        id: node.id,
-        name: node.name,
-        hostname: node.hostname,
-        os: node.os,
-        agentVersion: node.agent_version,
-        lastHeartbeatAt: node.last_heartbeat_at,
-        lastSeenAt: node.last_seen_at,
-        alerts: alertResult.data ?? [],
-        metric: metricResult.data,
-        speedtest: speedResult.data,
-      } as AdminReportMachine;
-    }));
+    if (!machines.length) throw new Error("The selected client has no active linked machines.");
 
     const clientLabel = profile.full_name || profile.email;
     const report = buildAdminClientReport({
@@ -147,10 +171,8 @@ export async function sendAdminClientReport(clientId: string): Promise<AdminActi
       generatedAt: new Date().toISOString(),
       machines,
     });
-    const { data: template } = await service.from("notification_templates")
-      .select("html_template").eq("template_key", "report").maybeSingle();
     const html = renderManagedHynEmail({
-      template: template?.html_template ?? "{{content}}",
+      template: templateHtml ?? "{{content}}",
       values: {
         subject: report.subject,
         hostname: `${machines.length} active HYN machine${machines.length === 1 ? "" : "s"}`,
@@ -169,19 +191,33 @@ export async function sendAdminClientReport(clientId: string): Promise<AdminActi
       html,
       idempotencyKey: `admin-report:${reportId}`,
     });
-    await service.from("notification_log").insert({
-      node_id: machines[0].id,
-      owner: clientId,
-      kind: "resend-cloud",
-      target: profile.email,
-      severity: "info",
-      subject: report.subject,
-      status: delivery.ok ? "sent" : "failed",
-      error: delivery.ok ? null : delivery.error,
-      category: "report",
-    });
+    if (d1) {
+      await storeRpc("hyn_log_notification", {
+        p_node_id: machines[0].id,
+        p_owner: clientId,
+        p_kind: "resend-cloud",
+        p_target: profile.email,
+        p_severity: "info",
+        p_subject: report.subject,
+        p_status: delivery.ok ? "sent" : "failed",
+        p_error: delivery.ok ? null : delivery.error,
+        p_category: "report",
+      });
+    } else {
+      await service!.from("notification_log").insert({
+        node_id: machines[0].id,
+        owner: clientId,
+        kind: "resend-cloud",
+        target: profile.email,
+        severity: "info",
+        subject: report.subject,
+        status: delivery.ok ? "sent" : "failed",
+        error: delivery.ok ? null : delivery.error,
+        category: "report",
+      });
+    }
     if (!delivery.ok) throw new Error(delivery.error);
-    const { error: completeError } = await supabase.rpc("hyn_complete_admin_report", {
+    const { error: completeError } = await storeRpc("hyn_complete_admin_report", {
       p_report_id: reportId,
       p_status: "sent",
       p_provider_id: delivery.providerId,
@@ -195,7 +231,7 @@ export async function sendAdminClientReport(clientId: string): Promise<AdminActi
     if (reportId) {
       try {
         const { supabase } = await authenticatedAdmin();
-        await supabase.rpc("hyn_complete_admin_report", {
+        await storeRpc("hyn_complete_admin_report", {
           p_report_id: reportId,
           p_status: "failed",
           p_provider_id: null,
@@ -214,9 +250,9 @@ export async function requestAdminNodeUpdates(nodeIds: string[]): Promise<BulkUp
   const result: BulkUpdateResult = { ok: true, queued: [], skipped: [], failed: [] };
   if (unique.length === 0) return { ...result, ok: false, failed: [{ nodeId: "", error: "No valid machines were selected." }] };
   try {
-    const { supabase } = await authenticatedAdmin();
+    await authenticatedAdmin();
     for (const nodeId of unique) {
-      const { data, error } = await supabase.rpc("hyn_admin_request_node_command", {
+      const { data, error } = await storeRpc("hyn_admin_request_node_command", {
         p_node_id: nodeId,
         p_command: "update",
       });
@@ -232,10 +268,12 @@ export async function requestAdminNodeUpdates(nodeIds: string[]): Promise<BulkUp
       }
       if (raw?.created === true) {
         result.queued.push(nodeId);
-        try {
-          await start(monitorNodeUpdate, [command.id]);
-        } catch (reason) {
-          console.error("[admin-update] timeout monitor did not start", nodeId, reason);
+        if (process.env.HYN_ENABLE_WORKFLOW_WATCHDOG === "true") {
+          try {
+            await start(monitorNodeUpdate, [command.id]);
+          } catch (reason) {
+            console.error("[admin-update] timeout monitor did not start", nodeId, reason);
+          }
         }
       } else {
         result.skipped.push(nodeId);

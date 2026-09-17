@@ -3,6 +3,7 @@ import { ServerSwitcher } from "@/components/dashboard/server-switcher";
 import { selectDashboard } from "@/lib/dashboard-selection";
 import { DashboardContext } from "@/components/dashboard/dashboard-context";
 import { permissions, type DashboardAccount } from "@/lib/permissions";
+import type { Node } from "@/lib/types";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { cookies } from "next/headers";
@@ -33,9 +34,7 @@ import { DemoDataButton } from "@/components/dashboard/demo-data-button";
 import { LiveRefresh } from "@/components/live-refresh";
 import { AwaitingFirstPushState, NoNodesState } from "@/components/dashboard/empty-states";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
-import { createClient } from "@/lib/supabase/server";
-import type { AlertEvent, Metric, Node, Speedtest } from "@/lib/types";
-import { NODE_COLUMNS } from "@/lib/types";
+import { loadNodeTelemetry, loadPortalState } from "@/lib/portal-data";
 import {
   compareVersions,
   toCpuSeries,
@@ -47,7 +46,7 @@ import {
 import { heartbeatState } from "@/lib/heartbeat";
 import { commandBlockedReason, readAgentRelease } from "@/lib/node-command";
 import { readTransientSnapshot, snapshotMetric } from "@/lib/transient-snapshot";
-import { monitoringRevision, TELEMETRY_HOURS } from "@/lib/monitoring-state";
+import { monitoringRevision } from "@/lib/monitoring-state";
 import { mergeMonitoringHistory } from "@/lib/monitoring-data";
 import { MonitoringLog } from "@/components/dashboard/monitoring-log";
 import { ReadingAge } from "@/components/dashboard/reading-age";
@@ -85,52 +84,21 @@ export default async function DashboardPage({
     );
   }
 
-  const supabase = await createClient();
-  const { data: auth } = await supabase.auth.getUser();
-  if (!auth.user) redirect("/signin?next=%2Fdashboard");
+  const state = await loadPortalState();
+  if ("signedOut" in state) redirect("/signin?next=%2Fdashboard");
 
   const { node: requestedNode, owner: requestedOwner, section: requestedSection, relayer: requestedRelayer, relayScope } = await searchParams;
-  const [profileResult, accountsResult] = await Promise.all([
-    supabase.from("profiles").select("role,status").eq("id", auth.user.id).maybeSingle(),
-    supabase.rpc("hyn_dashboard_accounts"),
-  ]);
-  if (profileResult.error || accountsResult.error || profileResult.data?.status !== "active") {
-    return <Shell email={auth.user.email}><div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">Dashboard access unavailable</h1><p className="mt-4 font-mono text-sm leading-7">{profileResult.data?.status === "suspended" ? "Your account is suspended. Contact a Super admin." : "Ask a Super admin to finish the portal roles setup, then refresh this page."}</p></div></Shell>;
+  if (state.error || state.profile?.status !== "active") {
+    return <Shell email={state.email ?? undefined}><div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">Dashboard access unavailable</h1><p className="mt-4 font-mono text-sm leading-7">{state.profile?.status === "suspended" ? "Your account is suspended. Contact a Super admin." : "Ask a Super admin to finish the portal roles setup, then refresh this page."}</p></div></Shell>;
   }
-  const accounts = (accountsResult.data ?? []) as DashboardAccount[];
-  const access = permissions(profileResult.data.role);
+  const accounts = state.accounts;
+  const access = permissions(state.profile.role);
 
-  // Real nodes first, demo last, so a paired machine is what you land on.
-  const { data: nodeRows, error: nodesError } = await supabase
-    .from("nodes")
-    .select(NODE_COLUMNS)
-    .eq("revoked", false)
-    .order("is_demo", { ascending: true })
-    .order("created_at", { ascending: true });
+  const nodeRows = state.nodes;
 
-  if (nodesError) {
-    return (
-      <Shell>
-        <div className="terminal-panel p-8">
-          <p className="section-kicker">// error</p>
-          <h1 className="mt-2 font-sentient text-2xl text-card-foreground">
-            Could not read your nodes
-          </h1>
-          <p className="mt-4 font-mono text-sm leading-7 text-destructive">
-            {nodesError.message}
-          </p>
-          <p className="mt-4 max-w-xl font-mono text-xs leading-6 text-muted-foreground">
-            If this mentions a missing relation or function, the schema has not been
-            applied yet — run <code>supabase/schema.sql</code> against your project.
-          </p>
-        </div>
-      </Shell>
-    );
-  }
-
-  const selection = selectDashboard({selfId: auth.user.id, canAdmin: access.canAdmin, accounts,
-    nodes: (nodeRows ?? []) as Node[], requestedOwner, requestedNode});
-  if (!selection) return <Shell email={auth.user.email}><div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">This server or dashboard is unavailable</h1><p className="mt-3 text-sm text-muted-foreground">It may have been unlinked or access may have changed.</p><Link href="/dashboard" className="mt-4 inline-block text-primary underline">Return to your dashboards</Link></div></Shell>;
+  const selection = selectDashboard({selfId: state.userId, canAdmin: access.canAdmin, accounts,
+    nodes: nodeRows, requestedOwner, requestedNode});
+  if (!selection) return <Shell email={state.email ?? undefined}><div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">This server or dashboard is unavailable</h1><p className="mt-3 text-sm text-muted-foreground">It may have been unlinked or access may have changed.</p><Link href="/dashboard" className="mt-4 inline-block text-primary underline">Return to your dashboards</Link></div></Shell>;
   const {owner, nodes, node} = selection;
   // User relayers belong to the signed-in account, independently of the owner
   // of the server currently being viewed. Staff retain their fleet relay view.
@@ -138,23 +106,23 @@ export default async function DashboardPage({
   const relayerOwner = access.canAdmin ? "all" : undefined;
   // Preserve old links that selected a relayer before there were separate sections.
   const section = requestedSection === "relayers" || (!requestedSection && requestedRelayer) ? "relayers" : "servers";
-  const context = {role: profileResult.data.role, accounts, owner, section, nodeId: node?.id, canViewRelayers,
-    computers: ((nodeRows ?? []) as Node[]).map(({id, name, hostname, owner: computerOwner}) => ({id, name, hostname, owner: computerOwner}))} as const;
+  const context = {role: state.profile.role, accounts, owner, section, nodeId: node?.id, canViewRelayers,
+    computers: nodeRows.map(({id, name, hostname, owner: computerOwner}) => ({id, name, hostname, owner: computerOwner}))} as const;
 
   if (section === "relayers") {
-    return <Shell email={auth.user.email} context={context}>
+    return <Shell email={state.email ?? undefined} context={context}>
       {relayScope === "server"
         ? node && !node.is_demo
           ? <RelayerDashboard key={node.id} nodeId={node.id} />
           : <p className="py-8 text-sm text-muted-foreground">Select a server to see its linked relayer.</p>
-        : <RelayerDashboard key={relayerOwner ?? auth.user.id} ownerId={relayerOwner} />}
+        : <RelayerDashboard key={relayerOwner ?? state.userId} ownerId={relayerOwner} />}
     </Shell>;
   }
 
   if (!node) {
     return (
-      <Shell email={auth.user.email} context={context}>
-        {access.canLink && owner === auth.user.id ? <NoNodesState canDemo={access.canWrite} /> : <div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">No machines on this dashboard</h1><p className="mt-3 font-mono text-sm leading-7 text-muted-foreground">Devices you link appear in My devices immediately. A Super admin can share other servers with you. Highway relayers are managed separately.</p></div>}
+      <Shell email={state.email ?? undefined} context={context}>
+        {access.canLink && owner === state.userId ? <NoNodesState canDemo={access.canWrite} /> : <div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">No machines on this dashboard</h1><p className="mt-3 font-mono text-sm leading-7 text-muted-foreground">Devices you link appear in My devices immediately. A Super admin can share other servers with you. Highway relayers are managed separately.</p></div>}
       </Shell>
     );
   }
@@ -176,41 +144,16 @@ export default async function DashboardPage({
   const localMode = node.config?.cloud_storage === "local"
     || (node.telemetry_mode === "local" && node.config?.cloud_storage !== "cloud");
   const transient = localMode && node.status === "active" ? readTransientSnapshot(node.id) : null;
-  const since = new Date(Date.now() - TELEMETRY_HOURS * 60 * 60 * 1000).toISOString();
+  const telemetry = await loadNodeTelemetry(node.id, localMode);
 
-  const [metricsRes, historyRes, speedRes, alertRes] = await Promise.all([
-    localMode ? Promise.resolve({ data: [] }) : supabase
-      .from("metrics")
-      .select("*")
-      .eq("node_id", node.id)
-      .gte("ts", since)
-      .order("ts", { ascending: false })
-      .limit(1),
-    localMode ? Promise.resolve({data: [], error: null}) : supabase.rpc("hyn_metric_history", {p_node: node.id}),
-    localMode ? Promise.resolve({ data: [] }) : supabase
-      .from("speedtests")
-      .select("*")
-      .eq("node_id", node.id)
-      .gte("ts", since)
-      .order("ts", { ascending: false })
-      .limit(14),
-    localMode ? Promise.resolve({ data: [] }) : supabase
-      .from("alert_events")
-      .select("*")
-      .eq("node_id", node.id)
-      .gte("ts", since)
-      .order("ts", { ascending: false })
-      .limit(8),
-  ]);
-
-  const metrics = mergeMonitoringHistory((historyRes.data ?? []) as Metric[], (metricsRes.data?.[0] ?? null) as Metric | null);
+  const metrics = mergeMonitoringHistory(telemetry.history, telemetry.latest);
   if (transient) metrics.push(snapshotMetric(node.id, transient));
-  const speedtests = (speedRes.data ?? []) as Speedtest[];
-  const alerts = (alertRes.data ?? []) as AlertEvent[];
+  const speedtests = telemetry.speedtests;
+  const alerts = telemetry.alerts;
 
   if (metrics.length === 0) {
     return (
-      <Shell email={auth.user.email} nodes={nodes} current={node} context={context}>
+      <Shell email={state.email ?? undefined} nodes={nodes} current={node} context={context}>
         {localMode ? (
           <div className="space-y-6">
             <p className="font-mono text-sm text-muted-foreground">Local-only monitoring is enabled for {node.name}. A Super admin can enable cloud history for automatic dashboard readings. You can also refresh a reading below.</p>
@@ -220,9 +163,8 @@ export default async function DashboardPage({
           </div>
         ) : <div className="space-y-6">
           <HeartbeatIndicator nodeId={node.id} heartbeatAt={node.last_heartbeat_at ?? node.last_config_pull_at ?? node.last_seen_at} />
-          {("error" in metricsRes && metricsRes.error) || historyRes.error
-            ? <p className="font-mono text-sm text-muted-foreground">Readings are temporarily unavailable. This page checks again automatically.</p>
-            : <><AwaitingFirstPushState nodeName={node.name} /><p className="font-mono text-xs text-muted-foreground">Cloud history updates automatically after the agent checks in. CLI 1.10 or later applies the current monitoring settings.</p></>}
+          <AwaitingFirstPushState nodeName={node.name} />
+          <p className="font-mono text-xs text-muted-foreground">Cloud history updates automatically after the agent checks in. CLI 1.10 or later applies the current monitoring settings.</p>
           <AgentUpdateControl compact canSync={access.canSync} nodeId={node.id} nodeName={node.name} currentVersion={node.agent_version}
             release={{latest: null, available: false, checkedAt: null}} automatic={node.config?.auto_update === "install"} blocked={commandBlockedReason(node)} />
         </div>}
@@ -248,7 +190,7 @@ export default async function DashboardPage({
   const agentRelease = readAgentRelease(latest.payload);
 
   return (
-    <Shell email={auth.user.email} nodes={nodes} current={node} context={context}>
+    <Shell email={state.email ?? undefined} nodes={nodes} current={node} context={context}>
       <div className="space-y-12">
         <div className="flex flex-col gap-4 border-b border-border pb-8 md:flex-row md:items-end md:justify-between">
           <div>
@@ -280,7 +222,7 @@ export default async function DashboardPage({
             ) : (
               <HeartbeatIndicator nodeId={node.id} heartbeatAt={durableHeartbeat} quietAfterSeconds={quietAfterSeconds} />
             )}
-            {node.is_demo && access.canWrite && owner === auth.user.id ? <DemoDataButton mode="clear" /> : null}
+            {node.is_demo && access.canWrite && owner === state.userId ? <DemoDataButton mode="clear" /> : null}
           </div>
         </div>
 

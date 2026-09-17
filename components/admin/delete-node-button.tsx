@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Trash2 } from "lucide-react";
 import { neverLinked } from "@/lib/admin-data";
-import { createClient } from "@/lib/supabase/client";
+import { portalRpc } from "@/lib/data-browser";
 import type { AdminNode } from "@/lib/types";
 
 // Deleting is the answer for a machine that should not be on the client's
@@ -42,8 +42,7 @@ export function DeleteNodeButton({
 
     setBusy(true);
     setError(null);
-    const supabase = createClient();
-    const { error: failure } = await supabase.rpc("hyn_admin_delete_node", {
+    const { error: failure } = await portalRpc("hyn_admin_delete_node", {
       p_node_id: node.id,
       p_reason: reason,
     });

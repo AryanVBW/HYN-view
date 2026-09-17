@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { ParticleField } from "@/components/particle-field";
 import { DashboardMagicRings } from "@/components/dashboard-magic-rings";
 import { LiveRefresh } from "@/components/live-refresh";
+import { isD1Data, userDataRpc } from "@/lib/hyn-data";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
 import { claimAdminIfAllowed } from "@/lib/admin-claim";
@@ -49,23 +50,58 @@ export default async function AccountPage() {
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) redirect("/signin?next=%2Faccount");
 
-  await claimAdminIfAllowed(supabase, auth.user.email);
+  await claimAdminIfAllowed(auth.user.email);
 
-  const [profileRes, nodesRes, logRes, emailPrefsRes] = await Promise.all([
-    supabase.from("profiles").select("*").eq("id", auth.user.id).maybeSingle(),
-    supabase.from("nodes").select(NODE_COLUMNS).eq("revoked", false).order("created_at"),
-    supabase
-      .from("notification_log")
-      .select("*")
-      .order("ts", { ascending: false })
-      .limit(50),
-    supabase.from("email_preferences").select("*").order("node_id"),
-  ]);
+  let profile: Profile | null;
+  let nodes: Node[];
+  let log: NotificationLogRow[];
+  let emailPreferences: EmailPreference[];
+  let total = 0;
+  let sent = 0;
+  let failed = 0;
 
-  const profile = profileRes.data as Profile | null;
-  const nodes = (nodesRes.data ?? []) as Node[];
-  const log = (logRes.data ?? []) as NotificationLogRow[];
-  const emailPreferences = (emailPrefsRes.data ?? []) as EmailPreference[];
+  if (isD1Data()) {
+    const ws = await userDataRpc<{
+      profile: Profile;
+      nodes: Node[];
+      log: NotificationLogRow[];
+      emailPreferences: EmailPreference[];
+      counts: { total: number; sent: number; failed: number };
+    }>("hyn_account_workspace");
+    profile = ws.data?.profile ?? null;
+    nodes = ws.data?.nodes ?? [];
+    log = ws.data?.log ?? [];
+    emailPreferences = ws.data?.emailPreferences ?? [];
+    total = ws.data?.counts.total ?? 0;
+    sent = ws.data?.counts.sent ?? 0;
+    failed = ws.data?.counts.failed ?? 0;
+  } else {
+    const [profileRes, nodesRes, logRes, emailPrefsRes] = await Promise.all([
+      supabase.from("profiles").select("*").eq("id", auth.user.id).maybeSingle(),
+      supabase.from("nodes").select(NODE_COLUMNS).eq("revoked", false).order("created_at"),
+      supabase
+        .from("notification_log")
+        .select("*")
+        .order("ts", { ascending: false })
+        .limit(50),
+      supabase.from("email_preferences").select("*").order("node_id"),
+    ]);
+
+    profile = profileRes.data as Profile | null;
+    nodes = (nodesRes.data ?? []) as Node[];
+    log = (logRes.data ?? []) as NotificationLogRow[];
+    emailPreferences = (emailPrefsRes.data ?? []) as EmailPreference[];
+
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const [total30, sent30, failed30] = await Promise.all([
+      supabase.from("notification_log").select("id", { count: "exact", head: true }).gte("ts", since),
+      supabase.from("notification_log").select("id", { count: "exact", head: true }).gte("ts", since).eq("status", "sent"),
+      supabase.from("notification_log").select("id", { count: "exact", head: true }).gte("ts", since).eq("status", "failed"),
+    ]);
+    sent = sent30.count ?? 0;
+    failed = failed30.count ?? 0;
+    total = total30.count ?? 0;
+  }
 
   // A client who has cleared their delivery history keeps the records: the cutoff
   // is a cookie this render filters by, so the 30-day counters below and the
@@ -75,24 +111,11 @@ export default async function AccountPage() {
     (await cookies()).get(DELIVERY_CLEARED_COOKIE)?.value
   );
 
-  // Counted over a 30-day window rather than all time: "how many emails have
-  // come" is a question about recent behaviour, and an all-time total only ever
-  // grows, so it stops being informative.
-  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-  const [total30, sent30, failed30] = await Promise.all([
-    supabase.from("notification_log").select("id", { count: "exact", head: true }).gte("ts", since),
-    supabase.from("notification_log").select("id", { count: "exact", head: true }).gte("ts", since).eq("status", "sent"),
-    supabase.from("notification_log").select("id", { count: "exact", head: true }).gte("ts", since).eq("status", "failed"),
-  ]);
-
   const byKind = visibleLog.reduce<Record<string, number>>((acc, row) => {
     acc[row.kind] = (acc[row.kind] ?? 0) + 1;
     return acc;
   }, {});
 
-  const sent = sent30.count ?? 0;
-  const failed = failed30.count ?? 0;
-  const total = total30.count ?? 0;
   const stats = [
     { label: "Sent, 30 days", value: sent, tone: "ok" as const, icon: CheckCircle2 },
     { label: "Failed, 30 days", value: failed, tone: (failed ? "crit" : "idle") as "crit" | "idle", icon: XCircle },

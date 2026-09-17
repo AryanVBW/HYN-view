@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState, useTransition, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowUpRight, Check, Search, Server, Users } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import { portalRpc } from "@/lib/data-browser";
 import type { AdminClient, AdminNode } from "@/lib/types";
 
 export type ServerGrant = { viewer_id: string; node_id: string; allowed: boolean; notifications_allowed?: boolean };
@@ -115,7 +115,7 @@ function UserServerAssignments({ client, nodes, initial, grants, sharedCounts, i
       setMessage(null);
       setFailure(null);
       try {
-        const { error: result } = await createClient().rpc("hyn_admin_set_user_servers", {
+        const { error: result } = await portalRpc("hyn_admin_set_user_servers", {
           p_viewer: client.id, p_nodes: target.filter(id => !owned.includes(id)),
         });
         if (result) { setFailure(result.message); onLockChange(dirty); return; }
@@ -131,7 +131,7 @@ function UserServerAssignments({ client, nodes, initial, grants, sharedCounts, i
     startTransition(async () => {
       setFailure(null);
       try {
-        const { error: result } = await createClient().rpc("hyn_admin_share_server", {
+        const { error: result } = await portalRpc("hyn_admin_share_server", {
           p_viewers: [client.id], p_node: nodeId, p_allow: true, p_notify: allow,
         });
         if (result) setFailure(result.message);

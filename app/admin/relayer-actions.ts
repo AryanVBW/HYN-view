@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { isD1Data, storeRpc } from "@/lib/hyn-data";
 import { createClient } from "@/lib/supabase/server";
 import { fetchFleet } from "@/lib/relayer-provider";
 
@@ -10,7 +11,7 @@ async function adminClient() {
   const supabase = await createClient();
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) throw new Error("Sign in again.");
-  const { data, error } = await supabase.rpc("hyn_is_super_admin");
+  const { data, error } = await storeRpc("hyn_is_super_admin");
   if (error || data !== true)
     throw new Error("An active administrator account is required.");
   return supabase;
@@ -35,7 +36,7 @@ export async function assignRelayer(
         ok: false,
         error: "This ID is not in the current Highway feed. Search again.",
       };
-    const { error } = await supabase.rpc("hyn_admin_assign_relayer", {
+    const { error } = await storeRpc("hyn_admin_assign_relayer", {
       p_owner: owner,
       p_relayer_id: relayerId,
       p_relayer_name: relayer.name.slice(0, 160),
@@ -61,7 +62,7 @@ export async function setNodeRelayer(nodeId: string, assignmentId: string | null
   }
   try {
     const supabase = await adminClient();
-    const { error } = await supabase.rpc("hyn_admin_set_node_relayer", {
+    const { error } = await storeRpc("hyn_admin_set_node_relayer", {
       p_node_id: nodeId,
       p_assignment_id: assignmentId,
     });
@@ -79,7 +80,7 @@ export async function removeRelayer(assignmentId: string): Promise<Result> {
     return { ok: false, error: "Invalid assignment." };
   try {
     const supabase = await adminClient();
-    const { error } = await supabase.rpc("hyn_admin_remove_relayer", {
+    const { error } = await storeRpc("hyn_admin_remove_relayer", {
       p_assignment_id: assignmentId,
     });
     if (error) return { ok: false, error: error.message };
@@ -103,15 +104,21 @@ export async function reviewRelayerRequest(requestId: string, approve: boolean):
     const supabase = await adminClient();
     let name: string | null = null;
     if (approve) {
-      const {data:request,error} = await supabase.from("relayer_requests").select("relayer_id")
-        .eq("id",requestId).eq("status","pending").maybeSingle();
-      if (error || !request) return {ok:false,error:"This request is no longer available. Refresh the page."};
+      const pending = isD1Data()
+        ? await storeRpc<Array<{ id: string; relayer_id: number }>>("hyn_list_pending_relayer_requests")
+        : await supabase.from("relayer_requests").select("relayer_id")
+          .eq("id", requestId).eq("status", "pending").maybeSingle().then((r) => ({
+            data: r.data ? [{ id: requestId, relayer_id: r.data.relayer_id }] : [],
+            error: r.error,
+          }));
+      const request = (pending.data ?? []).find((row) => row.id === requestId) ?? pending.data?.[0];
+      if (pending.error || !request) return {ok:false,error:"This request is no longer available. Refresh the page."};
       const fleet = await fetchFleet();
       const relayer = fleet.relayers.find(r=>r.id === request.relayer_id);
       if (!relayer) return {ok:false,error:"This relayer is no longer in Highway's feed. Check the ID before approving."};
       name = relayer.name.slice(0,160);
     }
-    const {error} = await supabase.rpc("hyn_admin_review_relayer_request",{
+    const {error} = await storeRpc("hyn_admin_review_relayer_request",{
       p_request_id:requestId,p_approve:approve,p_relayer_name:name,
     });
     if (error) return {ok:false,error:error.message};

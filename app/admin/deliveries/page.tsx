@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import { isD1Data, storeRpc } from "@/lib/hyn-data";
 import { createClient } from "@/lib/supabase/server";
 import { permissions } from "@/lib/permissions";
 import { deliveryKinds, type DeliverySnapshot, type DeliveryKind } from "@/lib/delivery-controls";
@@ -12,7 +13,9 @@ export default async function DeliveriesPage({ searchParams }: { searchParams: P
   const supabase = await createClient();
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) redirect("/signin");
-  const { data: profile } = await supabase.from("profiles").select("role,status").eq("id", auth.user.id).single();
+  const { data: profile } = isD1Data()
+    ? await storeRpc<{ role?: string; status?: string }>("hyn_profile")
+    : await supabase.from("profiles").select("role,status").eq("id", auth.user.id).single();
   const access = permissions(profile?.role);
   if (!access.canAdmin || profile?.status !== "active") redirect("/dashboard");
   const params = await searchParams;
@@ -21,9 +24,11 @@ export default async function DeliveriesPage({ searchParams }: { searchParams: P
   const statuses = ["all", "pending", "sending", "sent", "failed", "suppressed", "unknown", "cancelled"];
   const status = typeof params.status === "string" && statuses.includes(params.status) ? params.status : "all";
   const page = Math.min(4001, Math.max(1, Number.parseInt(String(params.page ?? "1"), 10) || 1));
-  const result = await supabase.rpc("hyn_admin_delivery_dashboard", { p_owner: owner, p_kind: kind, p_status: status, p_offset: (page - 1) * 25 });
-  const { data: template } = await supabase.from("notification_templates").select("html").eq("kind", "report").maybeSingle();
-  const previewHtml = renderManagedHynEmail({ template: template?.html, values: {
+  const result = await storeRpc("hyn_admin_delivery_dashboard", { p_owner: owner, p_kind: kind, p_status: status, p_offset: (page - 1) * 25 });
+  const template = isD1Data()
+    ? { data: ((await storeRpc<Array<{ template_key: string; html_template: string }>>("hyn_admin_templates")).data ?? []).find((row) => row.template_key === "report") }
+    : await supabase.from("notification_templates").select("html").eq("kind", "report").maybeSingle();
+  const previewHtml = renderManagedHynEmail({ template: (template.data as { html?: string; html_template?: string } | null)?.html ?? (template.data as { html_template?: string } | null)?.html_template, values: {
     subject: "Your daily server digest - sample", hostname: "2 permitted servers", severity: "info", version: "daily digest",
     content: `<p>This is sample data. One email combines all servers this user is allowed to monitor.</p>${["Mumbai gateway", "Pune worker"].map(nodeName => buildDailyDigestContent({ nodeName, sampleCount: 288, cpuAverage: 24, cpuPeak: 68, memoryAverage: 42, temperaturePeak: 57, downloadAverageBps: 12000, uploadAverageBps: 8000, latencyAverageMs: 19, uptimeSeconds: 86400 })).join("")}`,
   }, preview: "A combined daily overview of your permitted servers." });

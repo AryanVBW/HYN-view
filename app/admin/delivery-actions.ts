@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { storeRpc } from "@/lib/hyn-data";
 import { createClient } from "@/lib/supabase/server";
 import { validRules, type RuleInput } from "@/lib/delivery-controls";
 
@@ -13,9 +14,9 @@ async function mutate(name: string, args: Record<string, unknown>): Promise<Resu
     const supabase = await createClient();
     const { data: auth } = await supabase.auth.getUser();
     if (!auth.user) return { ok: false, error: "Sign in again." };
-    const permission = await supabase.rpc("hyn_is_super_admin");
+    const permission = await storeRpc("hyn_is_super_admin");
     if (permission.error || permission.data !== true) return { ok: false, error: "An active super admin account is required." };
-    const { error } = await supabase.rpc(name, args);
+    const { error } = await storeRpc(name, args);
     if (error) return { ok: false, error: error.message };
     revalidatePath("/admin/deliveries");
     return { ok: true };

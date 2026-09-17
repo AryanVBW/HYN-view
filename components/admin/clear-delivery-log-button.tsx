@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Eraser, Loader2 } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import { portalRpc } from "@/lib/data-browser";
 
 // The delivery log is the one table nothing prunes, and this panel is where it is
 // read, so clearing it belongs here. The scope defaults to a retention purge
@@ -35,8 +35,7 @@ export function ClearDeliveryLogButton({ defaultScope = "30" }: { defaultScope?:
 
     setBusy(true);
     setMessage(null);
-    const supabase = createClient();
-    const { data, error } = await supabase.rpc("hyn_admin_clear_notifications", {
+    const { data, error } = await portalRpc("hyn_admin_clear_notifications", {
       p_before:
         scope === "all"
           ? null

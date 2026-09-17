@@ -5,6 +5,21 @@ const config = JSON.parse(raw);
 const base = config.NEXT_PUBLIC_SUPABASE_URL;
 const key = config.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 if (!base || !key) throw new Error("Supabase public configuration is missing");
+
+const dataApi = typeof config.HYN_DATA_API_URL === "string" ? config.HYN_DATA_API_URL.replace(/\/$/, "") : "";
+if (dataApi) {
+  if (!config.HYN_DATA_SERVICE_KEY) {
+    throw new Error("D1 cutover requires HYN_DATA_SERVICE_KEY on the deployment");
+  }
+  const response = await fetch(`${dataApi}/health`, { signal: AbortSignal.timeout(15000) });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || result.store !== "d1") {
+    throw new Error("Database release gate failed for the D1 worker health check. Deploy cloudflare/ and set HYN_DATA_API_URL to that origin.");
+  }
+  console.log("PASS D1 worker is reachable and serving application data");
+  process.exit(0);
+}
+
 if (!config.SUPABASE_SERVICE_ROLE_KEY) throw new Error("Managed delivery controls require SUPABASE_SERVICE_ROLE_KEY on the deployment");
 const probes = [
   ["hyn_metric_history", {p_node:null}, "not authenticated"],

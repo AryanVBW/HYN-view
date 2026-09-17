@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { start } from "workflow/api";
+import { isD1Data, storeRpc } from "@/lib/hyn-data";
 import { createClient } from "@/lib/supabase/server";
 import {
   type CommandKind,
@@ -30,7 +31,9 @@ export async function GET(request: Request) {
   }
   const { supabase, user } = await authenticatedClient();
   if (!user) return NextResponse.json({ message: "not authenticated" }, { status: 401 });
-  const { data, error } = await supabase
+  const { data, error } = isD1Data()
+    ? await storeRpc("hyn_latest_node_command", { p_node_id: nodeId, p_command: commandKind })
+    : await supabase
     .from("node_commands")
     .select(NODE_COMMAND_COLUMNS)
     .eq("node_id", nodeId)
@@ -56,7 +59,7 @@ export async function POST(request: Request) {
   }
   const { supabase, user } = await authenticatedClient();
   if (!user) return NextResponse.json({ message: "not authenticated" }, { status: 401 });
-  const { data, error } = await supabase.rpc("hyn_admin_request_node_command", {
+  const { data, error } = await storeRpc("hyn_admin_request_node_command", {
     p_node_id: nodeId,
     p_command: commandKind,
   });

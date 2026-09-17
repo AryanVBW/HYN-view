@@ -8,7 +8,7 @@ import { requestAdminNodeUpdates, sendAdminClientReport } from "@/app/admin/acti
 import { compareVersions } from "@/lib/dashboard-data";
 import { commandBlockedReason } from "@/lib/node-command";
 import { mergePortalConfig } from "@/lib/node-config";
-import { createClient } from "@/lib/supabase/client";
+import { portalRpc } from "@/lib/data-browser";
 import type { AdminClient, AdminNode } from "@/lib/types";
 
 function needsUpdate(node: AdminNode) {
@@ -35,8 +35,7 @@ function AdminDashboardViewControl({ node }: { node: AdminNode }) {
     setPending(true);
     setError(null);
     const merged = mergePortalConfig(node.config ?? {}, { dashboard_view: value });
-    const supabase = createClient();
-    const { error } = await supabase.rpc("hyn_admin_set_node_config", {
+    const { error } = await portalRpc("hyn_admin_set_node_config", {
       p_node_id: node.id,
       p_config: merged,
     });

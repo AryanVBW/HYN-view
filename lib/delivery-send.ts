@@ -7,7 +7,11 @@ export const deliveryControlsEnabled = () => process.env.HYN_DELIVERY_CONTROLS_E
 export async function sendManagedEmail(args: Parameters<typeof sendResendEmail>[0] & {
   delivery: { kind: MessageKind; ownerId?: string; nodeId?: string; nodeIds?: string[] };
 }): Promise<ManagedDeliveryResult> {
-  if (!deliveryControlsEnabled()) return sendResendEmail(args);
+  // D1 holds application data. Delivery-budget RPCs live on Postgres, so skip
+  // them when the Worker is the store and send through Resend directly.
+  if (!deliveryControlsEnabled() || (process.env.HYN_DATA_API_URL ?? "").replace(/\/$/, "")) {
+    return sendResendEmail(args);
+  }
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key || !args.idempotencyKey || (!args.delivery.ownerId && !args.delivery.nodeId)) {

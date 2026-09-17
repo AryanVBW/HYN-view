@@ -1,0 +1,19 @@
+{
+  "name": "hyn-data",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "migrate:local": "wrangler d1 migrations apply hyn-view-production --local",
+    "migrate:staging": "wrangler d1 migrations apply hynview --remote --env staging",
+    "migrate:production": "wrangler d1 migrations apply hyn-view-production --remote",
+    "deploy:staging": "wrangler deploy --env staging",
+    "deploy:production": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.40.2"
+  }
+}

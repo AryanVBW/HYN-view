@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { CheckCircle2, Loader2, Server } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { createClient } from "@/lib/supabase/client";
+import { portalRpc } from "@/lib/data-browser";
 
 type Pending = {
   hostname: string | null;
@@ -44,8 +44,7 @@ export function LinkForm({ nodeCount }: { nodeCount: number }) {
     event.preventDefault();
     setError(null);
     setBusy(true);
-    const supabase = createClient();
-    const { data, error } = await supabase.rpc("hyn_device_lookup", {
+    const { data, error } = await portalRpc("hyn_device_lookup", {
       p_user_code: code,
     });
     setBusy(false);
@@ -66,8 +65,7 @@ export function LinkForm({ nodeCount }: { nodeCount: number }) {
   async function approve() {
     setError(null);
     setBusy(true);
-    const supabase = createClient();
-    const { data, error } = await supabase.rpc("hyn_device_approve", {
+    const { data, error } = await portalRpc("hyn_device_approve", {
       p_user_code: code,
       p_node_name: name,
     });

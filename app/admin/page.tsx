@@ -29,6 +29,7 @@ import { ClientTable, NodeTable } from "@/components/admin/tables";
 import { ParticleField } from "@/components/particle-field";
 import { DashboardMagicRings } from "@/components/dashboard-magic-rings";
 import { LiveRefresh } from "@/components/live-refresh";
+import { isD1Data, storeRpc, userDataRpc } from "@/lib/hyn-data";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
 import { claimAdminIfAllowed } from "@/lib/admin-claim";
@@ -75,14 +76,11 @@ export default async function AdminPage({
   if (!auth.user) redirect("/signin?next=%2Fadmin");
   const query = await searchParams;
 
-  await claimAdminIfAllowed(supabase, auth.user.email);
+  await claimAdminIfAllowed(auth.user.email);
 
-  const { data: profileRow } = await supabase
-    .from("profiles")
-    .select("*")
-    .eq("id", auth.user.id)
-    .maybeSingle();
-  const profile = profileRow as Profile | null;
+  const profile = isD1Data()
+    ? (await userDataRpc<Profile>("hyn_profile")).data
+    : ((await supabase.from("profiles").select("*").eq("id", auth.user.id).maybeSingle()).data as Profile | null);
 
   const { canWrite, canAdmin } = permissions(profile?.role);
 
@@ -126,15 +124,13 @@ export default async function AdminPage({
   // eslint-disable-next-line react-hooks/purity
   const renderedAt = Date.now();
   const [overviewRes, nodesRes, clientsRes, notifRes, auditRes, templatesRes, fleetMetricsRes] = await Promise.all([
-    supabase.rpc("hyn_admin_overview"),
-    supabase.rpc("hyn_admin_nodes"),
-    supabase.rpc("hyn_admin_clients"),
-    supabase.rpc("hyn_admin_notifications", { p_limit: 100 }),
-    supabase.rpc("hyn_admin_audit", { p_limit: 50 }),
-    supabase.rpc("hyn_admin_templates"),
-    // Aggregate in the database: a row cap over raw samples drops the newest
-    // readings as soon as a modest fleet starts reporting every minute.
-    supabase.rpc("hyn_fleet_metric_history"),
+    storeRpc("hyn_admin_overview"),
+    storeRpc("hyn_admin_nodes"),
+    storeRpc("hyn_admin_clients"),
+    storeRpc("hyn_admin_notifications", { p_limit: 100 }),
+    storeRpc("hyn_admin_audit", { p_limit: 50 }),
+    storeRpc("hyn_admin_templates"),
+    storeRpc("hyn_fleet_metric_history"),
   ]);
 
   const rpcError =
@@ -165,12 +161,29 @@ export default async function AdminPage({
   const overview = overviewRes.data as AdminOverview;
   const nodes = (nodesRes.data ?? []) as AdminNode[];
   const clients = (clientsRes.data ?? []) as AdminClient[];
-  const serverGrants = canWrite ? await supabase.from("server_access").select("viewer_id,node_id,allowed,notifications_allowed").order("updated_at", { ascending: false }) : null;
-  const accessEvents = canWrite ? await supabase.from("server_access_events").select("id,ts,actor,viewer_id,node_id,allowed").order("ts", { ascending: false }).limit(50) : null;
-  const shareResult = canWrite ? await supabase.from("dashboard_access").select("viewer_id,owner_id").order("created_at", {ascending:false}) : null;
+  const d1 = isD1Data();
+  const serverGrants = canWrite
+    ? d1
+      ? await userDataRpc<ServerGrant[]>("hyn_list_server_access")
+      : await supabase.from("server_access").select("viewer_id,node_id,allowed,notifications_allowed").order("updated_at", { ascending: false })
+    : null;
+  const accessEvents = canWrite
+    ? d1
+      ? await userDataRpc<AccessEvent[]>("hyn_list_access_events")
+      : await supabase.from("server_access_events").select("id,ts,actor,viewer_id,node_id,allowed").order("ts", { ascending: false }).limit(50)
+    : null;
+  const shareResult = canWrite
+    ? d1
+      ? await userDataRpc<DashboardShare[]>("hyn_list_dashboard_access")
+      : await supabase.from("dashboard_access").select("viewer_id,owner_id").order("created_at", {ascending:false})
+    : null;
   const [userRelayersResult, serverRelaysResult] = canWrite ? await Promise.all([
-    supabase.from("relayer_assignments").select("id,owner,relayer_id,relayer_name,created_at").order("created_at"),
-    supabase.from("node_relayer_links").select("node_id,assignment_id"),
+    d1
+      ? userDataRpc<RelayerAssignment[]>("hyn_list_relayer_assignments", { p_all: true })
+      : supabase.from("relayer_assignments").select("id,owner,relayer_id,relayer_name,created_at").order("created_at"),
+    d1
+      ? userDataRpc<NodeRelayerLink[]>("hyn_list_node_relayer_links")
+      : supabase.from("node_relayer_links").select("node_id,assignment_id"),
   ]) : [null, null];
   const userRelayers = (userRelayersResult?.data ?? []) as RelayerAssignment[];
   const serverRelays = (serverRelaysResult?.data ?? []) as NodeRelayerLink[];
@@ -190,9 +203,11 @@ export default async function AdminPage({
         error={userRelayersResult?.error || serverRelaysResult?.error ? "Relay links are unavailable. Finish the server relayer setup, then refresh." : null} />
     </div>];
   }));
-  const pendingRequests = await supabase.from("relayer_requests")
-    .select("id,owner,relayer_id,relayer_name,status,created_at").eq("status","pending")
-    .order("created_at").limit(200);
+  const pendingRequests = d1
+    ? await userDataRpc("hyn_list_pending_relayer_requests")
+    : await supabase.from("relayer_requests")
+      .select("id,owner,relayer_id,relayer_name,status,created_at").eq("status","pending")
+      .order("created_at").limit(200);
   const notifications = (notifRes.data ?? []) as AdminNotification[];
   const audit = (auditRes.data ?? []) as AuditEntry[];
   const templates = (templatesRes.data ?? []) as NotificationTemplate[];
@@ -234,10 +249,18 @@ export default async function AdminPage({
   ];
 
   const selectedClient = clients.find((client) => client.id === query.client) ?? null;
-  const assignmentResult = selectedClient ? await supabase.from("relayer_assignments")
-    .select("id,owner,relayer_id,relayer_name,created_at").eq("owner", selectedClient.id).order("created_at") : null;
-  const nodeRelayerResult = selectedClient ? await supabase.from("node_relayer_links")
-    .select("node_id,assignment_id").eq("owner", selectedClient.id) : null;
+  const assignmentResult = selectedClient
+    ? d1
+      ? await userDataRpc<RelayerAssignment[]>("hyn_list_relayer_assignments", { p_owner: selectedClient.id })
+      : await supabase.from("relayer_assignments")
+        .select("id,owner,relayer_id,relayer_name,created_at").eq("owner", selectedClient.id).order("created_at")
+    : null;
+  const nodeRelayerResult = selectedClient
+    ? d1
+      ? await userDataRpc<NodeRelayerLink[]>("hyn_list_node_relayer_links", { p_owner: selectedClient.id })
+      : await supabase.from("node_relayer_links")
+        .select("node_id,assignment_id").eq("owner", selectedClient.id)
+    : null;
   const nodeRelayerLinks = (nodeRelayerResult?.data ?? []) as NodeRelayerLink[];
   const selectedNodes = selectedClient
     ? nodes.filter((node) => node.owner_id === selectedClient.id)
@@ -246,23 +269,39 @@ export default async function AdminPage({
     selectedNodes.find((node) => node.id === query.node) ?? selectedNodes[0] ?? null;
   let selectedMetrics: Metric[] = [];
   if (selectedNode) {
-    const { data: storageNode, error: storageError } = await supabase.from("nodes")
-      .select("telemetry_mode,status,revoked,config").eq("id", selectedNode.id).maybeSingle();
-    if (storageError) throw new Error(storageError.message);
+    const storage = d1
+      ? await userDataRpc<Pick<AdminNode, "telemetry_mode" | "status" | "revoked" | "config">>("hyn_node_freshness", { p_node: selectedNode.id })
+      : await supabase.from("nodes")
+        .select("telemetry_mode,status,revoked,config").eq("id", selectedNode.id).maybeSingle();
+    if (storage.error) throw new Error(storage.error.message);
+    const storageNode = storage.data as { telemetry_mode?: string; status?: string; revoked?: boolean; config?: Record<string, unknown> } | null;
     const localMode = storageNode?.config?.cloud_storage === "local"
       || (storageNode?.telemetry_mode === "local" && storageNode?.config?.cloud_storage !== "cloud");
     selectedNode.telemetry_mode = localMode ? "local" : "cloud";
-    const transient = localMode && storageNode.status === "active" && !storageNode.revoked
-      && selectedNode.owner_status === "active" ? readTransientSnapshot(selectedNode.id) : null;
-    const { data, error } = localMode ? { data: [], error: null } : await supabase
-      .from("metrics")
-      .select("*")
-      .eq("node_id", selectedNode.id)
-      .gte("ts", new Date(renderedAt - 48 * 60 * 60_000).toISOString())
-      .order("ts", { ascending: false })
-      .limit(1);
-    const history = localMode ? {data: [], error: null} : await supabase.rpc("hyn_metric_history", {p_node: selectedNode.id});
-    const metricError = error ?? history.error;
+    const transient = localMode && storageNode?.status === "active" && !storageNode?.revoked
+      && selectedNode.owner_status === "active"
+      ? (d1
+        ? (await userDataRpc<Record<string, unknown>>("hyn_transient_get", { p_node: selectedNode.id })).data
+        : readTransientSnapshot(selectedNode.id))
+      : null;
+    const latest = localMode
+      ? { data: [] as Metric[], error: null }
+      : d1
+        ? await userDataRpc<Metric>("hyn_latest_metric", { p_node: selectedNode.id }).then((r) => ({
+          data: r.data ? [r.data] : [],
+          error: r.error,
+        }))
+        : await supabase
+          .from("metrics")
+          .select("*")
+          .eq("node_id", selectedNode.id)
+          .gte("ts", new Date(renderedAt - 48 * 60 * 60_000).toISOString())
+          .order("ts", { ascending: false })
+          .limit(1);
+    const history = localMode
+      ? { data: [] as Metric[], error: null }
+      : await storeRpc<Metric[]>("hyn_metric_history", { p_node: selectedNode.id });
+    const metricError = latest.error ?? history.error;
     if (metricError) {
       return (
         <Shell email={auth.user.email}>
@@ -273,7 +312,7 @@ export default async function AdminPage({
       );
     }
     selectedMetrics = transient ? [snapshotMetric(selectedNode.id, transient)]
-      : mergeMonitoringHistory((history.data ?? []) as Metric[], (data?.[0] ?? null) as Metric | null);
+      : mergeMonitoringHistory((history.data ?? []) as Metric[], (latest.data?.[0] ?? null) as Metric | null);
   }
 
   const allowedTabs: AdminTabId[] = ["overview", "clients", "client", "fleet", "templates", "notifications", "audit", "access", "bandwidth", "relayers"];

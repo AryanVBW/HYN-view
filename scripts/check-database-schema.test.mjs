@@ -3,10 +3,10 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { test } from "node:test";
 
-async function runGate(reply) {
+async function runGate(reply, extraConfig = {}) {
   const server = createServer((request, response) => {
     const name = request.url.split("/").at(-1);
-    const result = reply(name);
+    const result = reply(name, request.url);
     response.writeHead(result.status, { "Content-Type": "application/json" });
     response.end(JSON.stringify(result.body));
   });
@@ -16,10 +16,13 @@ async function runGate(reply) {
     let output = "";
     child.stdout.on("data", chunk => { output += chunk; });
     child.stderr.on("data", chunk => { output += chunk; });
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const extra = typeof extraConfig === "function" ? extraConfig(origin) : extraConfig;
     child.stdin.end(JSON.stringify({
-      NEXT_PUBLIC_SUPABASE_URL: `http://127.0.0.1:${server.address().port}`,
+      NEXT_PUBLIC_SUPABASE_URL: origin,
       NEXT_PUBLIC_SUPABASE_ANON_KEY: "release-gate-test-key",
       SUPABASE_SERVICE_ROLE_KEY: "release-gate-service-fixture",
+      ...extra,
     }));
     const code = await new Promise((resolve, reject) => {
       child.on("close", resolve);
@@ -55,4 +58,20 @@ test("release rejects anonymous dashboard access", async () => {
     : denied());
   assert.notEqual(result.code, 0);
   assert.match(result.output, /hyn_dashboard_accounts/);
+});
+
+test("D1 cutover checks the worker health endpoint instead of PostgREST", async () => {
+  const result = await runGate((_name, url) => url === "/health"
+    ? { status: 200, body: { service: "hyn-agent-v1", store: "d1" } }
+    : { status: 500, body: { message: "postgres should not be probed" } },
+  (origin) => ({ HYN_DATA_API_URL: origin, HYN_DATA_SERVICE_KEY: "d1-key" }));
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, /D1 worker/);
+});
+
+test("D1 cutover fails when the worker is not serving D1", async () => {
+  const result = await runGate(() => ({ status: 200, body: { store: "postgres" } }),
+    (origin) => ({ HYN_DATA_API_URL: origin, HYN_DATA_SERVICE_KEY: "d1-key" }));
+  assert.notEqual(result.code, 0);
+  assert.match(result.output, /D1 worker health/);
 });
