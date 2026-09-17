@@ -11,6 +11,19 @@ export function pick(row: Record<string, unknown>, columns: string[]): unknown[]
   return columns.map((column) => row[column] ?? null);
 }
 
-export function insertSql(table: string, columns: string[], row: Record<string, unknown>): string {
-  return `INSERT OR REPLACE INTO ${table} (${columns.join(", ")}) VALUES (${pick(row, columns).map(sqlLiteral).join(", ")})`;
+export function insertSql(
+  table: string,
+  columns: string[],
+  row: Record<string, unknown>,
+  conflict: string[] = ["id"],
+): string {
+  const values = pick(row, columns).map(sqlLiteral).join(", ");
+  const insert = `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${values})`;
+  const updates = columns.filter((column) => !conflict.includes(column));
+  if (!updates.length) {
+    return `${insert} ON CONFLICT(${conflict.join(", ")}) DO NOTHING`;
+  }
+  return `${insert} ON CONFLICT(${conflict.join(", ")}) DO UPDATE SET ${updates
+    .map((column) => `${column} = excluded.${column}`)
+    .join(", ")}`;
 }

@@ -20,6 +20,6 @@ test("insert statements bind selected columns only", () => {
   });
   assert.equal(
     sql,
-    `INSERT OR REPLACE INTO nodes (id, is_demo, config) VALUES ('n1', 0, '{"cloud_storage":"local"}')`,
+    `INSERT INTO nodes (id, is_demo, config) VALUES ('n1', 0, '{"cloud_storage":"local"}') ON CONFLICT(id) DO UPDATE SET is_demo = excluded.is_demo, config = excluded.config`,
   );
 });

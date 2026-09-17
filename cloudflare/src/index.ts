@@ -1,9 +1,7 @@
 import { handleAgentRpc, pruneTelemetry } from "./agent.ts";
-import { ensureProfile } from "./access.ts";
-import { bearer, json, jsonMessage, readJsonObject, RpcError } from "./http.ts";
-import { verifySupabaseJwt } from "./jwt.ts";
+import { json, jsonMessage, readJsonObject, RpcError } from "./http.ts";
 import { handlePortalRpc } from "./portal.ts";
-import type { Session } from "./types.ts";
+import { sessionFromRequest } from "./session.ts";
 
 const AGENT_RPCS = new Set([
   "hyn_device_start",
@@ -26,40 +24,6 @@ const PORTAL_MAX = 262_144;
 
 function pepper(env: Env): string {
   return env.PAIRING_PEPPER || env.SUPABASE_JWT_SECRET || "";
-}
-
-function jwksUrl(env: Env): string | undefined {
-  const base = (env.SUPABASE_URL ?? "").replace(/\/$/, "");
-  return base ? `${base}/auth/v1/.well-known/jwks.json` : undefined;
-}
-
-async function sessionFromRequest(request: Request, env: Env): Promise<Session> {
-  const token = bearer(request);
-  if (!token) throw new RpcError("not authenticated", 401);
-  if (env.DATA_SERVICE_KEY && token === env.DATA_SERVICE_KEY) {
-    return {
-      userId: "service",
-      email: null,
-      service: true,
-      profile: {
-        id: "service",
-        email: null,
-        full_name: null,
-        role: "super_admin",
-        status: "active",
-        suspended_reason: null,
-        created_at: new Date(0).toISOString(),
-        updated_at: new Date(0).toISOString(),
-      },
-    };
-  }
-  const user = await verifySupabaseJwt(token, {
-    secret: env.SUPABASE_JWT_SECRET || undefined,
-    issuer: env.SUPABASE_JWT_ISS || undefined,
-    jwksUrl: jwksUrl(env),
-  });
-  const profile = await ensureProfile(env.DB, user.id, user.email, env.BOOTSTRAP_EMAIL || null);
-  return { userId: user.id, email: user.email, profile, service: false };
 }
 
 export default {

@@ -26,35 +26,43 @@ async function parse(res: Response): Promise<RpcResult<unknown>> {
   return { data: body, error: null };
 }
 
-export async function dataRpc<T>(name: string, args: Record<string, unknown> = {}, token?: string): Promise<RpcResult<T>> {
+export async function dataRpc<T>(
+  name: string,
+  args: Record<string, unknown> = {},
+  token?: string,
+  extraHeaders: Record<string, string> = {},
+): Promise<RpcResult<T>> {
   const base = dataApiUrl();
   if (!base) return { data: null, error: { message: "HYN_DATA_API_URL is not configured" } };
   const auth = token ?? process.env.HYN_DATA_SERVICE_KEY ?? "";
   if (!auth) return { data: null, error: { message: "missing data credentials" } };
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    authorization: `Bearer ${auth}`,
+    "user-agent": "hyn-portal/1.0",
+  };
+  for (const [key, value] of Object.entries(extraHeaders)) {
+    if (value) headers[key] = value;
+  }
   const res = await fetch(`${base}/rpc/${encodeURIComponent(name)}`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${auth}`,
-    },
+    headers,
     body: JSON.stringify(args),
     cache: "no-store",
   });
   return parse(res) as Promise<RpcResult<T>>;
 }
 
-export async function userDataToken(): Promise<{ token: string; userId: string | null }> {
+export async function userDataRpc<T>(name: string, args: Record<string, unknown> = {}): Promise<RpcResult<T>> {
   const supabase = await createClient();
   const { data: auth } = await supabase.auth.getUser();
-  if (!auth.user) return { token: "", userId: null };
-  const { data: session } = await supabase.auth.getSession();
-  return { token: session.session?.access_token ?? "", userId: auth.user.id };
-}
-
-export async function userDataRpc<T>(name: string, args: Record<string, unknown> = {}): Promise<RpcResult<T>> {
-  const { token } = await userDataToken();
-  if (!token) return { data: null, error: { message: "Sign in required" } };
-  return dataRpc<T>(name, args, token);
+  if (!auth.user) return { data: null, error: { message: "Sign in required" } };
+  const key = process.env.HYN_DATA_SERVICE_KEY ?? "";
+  if (!key) return { data: null, error: { message: "missing data credentials" } };
+  return dataRpc<T>(name, args, key, {
+    "x-hyn-user-id": auth.user.id,
+    "x-hyn-user-email": auth.user.email ?? "",
+  });
 }
 
 export async function storeRpc<T>(name: string, args: Record<string, unknown> = {}): Promise<RpcResult<T>> {

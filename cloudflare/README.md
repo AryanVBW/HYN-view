@@ -9,8 +9,9 @@ Staging Worker: `https://hyn-view-data-staging.hynview.workers.dev`
 
 ```
 Ubuntu agent  →  POST /api/agent/v1/<rpc>  →  Worker + D1
-Browser login →  Supabase Auth (ES256 JWT / JWKS)
-Dashboard     →  Worker /rpc/<name> with that JWT  →  D1
+Browser login →  Supabase Auth (session cookies)
+Dashboard     →  Portal verifies the user, then Worker /rpc/<name>
+                 with DATA_SERVICE_KEY + x-hyn-user-id  →  D1
 ```
 
 ## Local
@@ -64,5 +65,6 @@ import the live fleet once:
 heroku config -a hyn-view --json | node --experimental-strip-types scripts/import-from-postgrest.ts
 ```
 
-That upserts profiles, nodes (including token hashes), shares, relayers and
-recent telemetry into D1. Agents keep the same pairing tokens.
+That upserts profiles, nodes (including token hashes), dashboard shares,
+relayers, bandwidth and recent telemetry into D1. Agents keep the same pairing
+tokens. Add `--metrics` only when you also need a full Postgres metric replay.
