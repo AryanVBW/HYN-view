@@ -3,7 +3,7 @@ import { isD1Data, storeRpc } from "@/lib/hyn-data";
 import { createClient } from "@/lib/supabase/server";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { readAssignedRelayers } from "@/lib/relayer-data";
-import type { RelayerAssignment } from "@/lib/relayer";
+import type { RelayerAssignment, RelayerRequest } from "@/lib/relayer";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -67,14 +67,14 @@ export async function GET(request: Request) {
   if (!requestedOwner) {
     const [requests, admin, monitor] = await Promise.all([
       isD1Data()
-        ? storeRpc("hyn_list_relayer_requests", { p_owner: owner })
+        ? storeRpc<RelayerRequest[]>("hyn_list_relayer_requests", { p_owner: owner })
         : supabase.from("relayer_requests").select("id,relayer_id,relayer_name,status,created_at")
           .eq("owner",owner).in("status",["pending","rejected"]).order("created_at",{ascending:false}).limit(50),
       storeRpc("hyn_is_super_admin"),
       storeRpc("hyn_can_monitor"),
     ]);
     dashboard.canRequest = monitor.data === true;
-    dashboard.requests = (requests.data ?? []).filter((row: { status?: string }) => row.status === "pending" || row.status === "rejected");
+    dashboard.requests = ((requests.data ?? []) as RelayerRequest[]).filter((row) => row.status === "pending" || row.status === "rejected");
     dashboard.requestsError = requests.error ? "Relayer requests are not available yet. Ask an administrator to finish portal setup." : null;
     dashboard.manageHref = admin.data === true ? `/admin?tab=client&client=${owner}` : null;
   }

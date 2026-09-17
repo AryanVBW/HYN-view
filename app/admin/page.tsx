@@ -15,7 +15,7 @@ import { AdminClientDashboard } from "@/components/admin/client-dashboard";
 import { RelayerManager } from "@/components/admin/relayer-manager";
 import { NodeRelayerSetting } from "@/components/admin/node-relayer-setting";
 import { RelayerRequestQueue } from "@/components/admin/relayer-request-queue";
-import type { NodeRelayerLink, RelayerAssignment } from "@/lib/relayer";
+import type { NodeRelayerLink, RelayerAssignment, RelayerRequest } from "@/lib/relayer";
 import { ClearDeliveryLogButton } from "@/components/admin/clear-delivery-log-button";
 import { EmailTemplateManager } from "@/components/admin/email-template-manager";
 import {
@@ -204,7 +204,7 @@ export default async function AdminPage({
     </div>];
   }));
   const pendingRequests = d1
-    ? await userDataRpc("hyn_list_pending_relayer_requests")
+    ? await userDataRpc<Array<RelayerRequest & { owner: string }>>("hyn_list_pending_relayer_requests")
     : await supabase.from("relayer_requests")
       .select("id,owner,relayer_id,relayer_name,status,created_at").eq("status","pending")
       .order("created_at").limit(200);
@@ -487,7 +487,7 @@ export default async function AdminPage({
               <div><h2 className="text-2xl font-medium">Relayer access</h2><p className="mt-2 text-sm text-muted-foreground">{canWrite ? "Manage user relayers and Highway Node links together in Assignments." : "View assigned relayers. A Super admin manages assignments and approvals."}</p></div>
               <Link href={canWrite ? "/admin?tab=access" : "/admin?tab=clients"} className="rounded-md border border-border px-4 py-2.5 text-sm text-primary hover:border-primary">{canWrite ? "Manage assignments" : "Choose a client"}</Link>
             </div>
-            <RelayerRequestQueue canWrite={canWrite} requests={(pendingRequests.data ?? []).map(request=>{
+            <RelayerRequestQueue canWrite={canWrite} requests={(pendingRequests.data ?? []).map((request: RelayerRequest & { owner: string })=>{
               const owner = clients.find(c=>c.id === request.owner);
               return {...request,ownerName:owner?.full_name || owner?.email || "Portal account",active:owner?.status === "active"};
             })} error={pendingRequests.error ? "Relayer requests are unavailable. Apply the relayer requests migration to enable this queue." : null} />

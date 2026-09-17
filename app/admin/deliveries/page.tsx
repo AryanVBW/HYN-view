@@ -24,7 +24,7 @@ export default async function DeliveriesPage({ searchParams }: { searchParams: P
   const statuses = ["all", "pending", "sending", "sent", "failed", "suppressed", "unknown", "cancelled"];
   const status = typeof params.status === "string" && statuses.includes(params.status) ? params.status : "all";
   const page = Math.min(4001, Math.max(1, Number.parseInt(String(params.page ?? "1"), 10) || 1));
-  const result = await storeRpc("hyn_admin_delivery_dashboard", { p_owner: owner, p_kind: kind, p_status: status, p_offset: (page - 1) * 25 });
+  const result = await storeRpc<DeliverySnapshot>("hyn_admin_delivery_dashboard", { p_owner: owner, p_kind: kind, p_status: status, p_offset: (page - 1) * 25 });
   const template = isD1Data()
     ? { data: ((await storeRpc<Array<{ template_key: string; html_template: string }>>("hyn_admin_templates")).data ?? []).find((row) => row.template_key === "report") }
     : await supabase.from("notification_templates").select("html").eq("kind", "report").maybeSingle();
@@ -44,7 +44,7 @@ export default async function DeliveriesPage({ searchParams }: { searchParams: P
         <h2 className="font-sentient text-2xl">Delivery controls are unavailable</h2>
         <p className="mt-2 text-sm">The database could not load the delivery dashboard. Check the delivery migration and your administrator access before enabling sending.</p>
         <p className="mt-3 font-mono text-xs text-muted-foreground">{result.error?.message ?? "No dashboard data returned."}</p>
-      </section> : <DeliveryDashboard key={`${owner ?? "global"}:${kind}:${status}:${page}:${result.data.as_of}`} snapshot={result.data as DeliverySnapshot} owner={owner} kind={kind} status={status} page={page} canWrite={access.canWrite}
+      </section> : <DeliveryDashboard key={`${owner ?? "global"}:${kind}:${status}:${page}:${result.data.as_of}`} snapshot={result.data} owner={owner} kind={kind} status={status} page={page} canWrite={access.canWrite}
         enforced={process.env.HYN_DELIVERY_CONTROLS_ENABLED === "true"} providerConfigured={Boolean(process.env.RESEND_API_KEY && process.env.SUPABASE_SERVICE_ROLE_KEY)} previewHtml={previewHtml} />}
     </div>
   </main>;

@@ -43,11 +43,11 @@ export default async function LinkPage() {
     ? await userDataRpc<boolean>("hyn_can_link")
     : await supabase.rpc("hyn_can_link");
 
-  const nodes = isD1Data()
+  const listed = isD1Data()
     ? await userDataRpc<Array<{ id: string; is_demo?: boolean; owner?: string }>>("hyn_list_nodes")
     : null;
-  const count = isD1Data()
-    ? (nodes.data ?? []).filter((row) => !row.is_demo && row.owner === auth.user.id).length
+  const count = listed
+    ? (listed.data ?? []).filter((row) => !row.is_demo && row.owner === auth.user.id).length
     : ((await supabase.from("nodes").select("id", { count: "exact", head: true }).eq("is_demo", false).eq("owner", auth.user.id)).count ?? 0);
 
   return (
