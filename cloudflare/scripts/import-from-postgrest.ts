@@ -269,7 +269,7 @@ if (copyMetrics) {
       "net_tx_bps", "net_retrans_pm", "latency_ms", "net_link_mbps", "psi_cpu",
       "psi_mem", "psi_io", "tcp_estab", "conntrack_pct", "proc_count", "sensors",
       "payload",
-    ], metrics, 80_000, ["node_id", "ts"]);
+    ], metrics, 300_000, ["node_id", "ts"]);
   });
 }
 
