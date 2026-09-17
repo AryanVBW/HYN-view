@@ -10,6 +10,7 @@
     "migrate:local": "wrangler d1 migrations apply hyn-view-production --local",
     "migrate:staging": "wrangler d1 migrations apply hynview --remote --env staging",
     "migrate:production": "wrangler d1 migrations apply hyn-view-production --remote",
+    "import:production": "node --experimental-strip-types scripts/import-from-postgrest.ts",
     "deploy:staging": "wrangler deploy --env staging",
     "deploy:production": "wrangler deploy"
   },

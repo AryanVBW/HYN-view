@@ -58,4 +58,11 @@ is only needed for local HS256 fixtures.
 Add further operators with `hyn_admin_promote_by_email` or `admin_allowlist`.
 
 Existing Postgres rows are not copied automatically. After Auth still works,
-link machines again (or import) so D1 holds the live fleet.
+import the live fleet once:
+
+```bash
+heroku config -a hyn-view --json | node --experimental-strip-types scripts/import-from-postgrest.ts
+```
+
+That upserts profiles, nodes (including token hashes), shares, relayers and
+recent telemetry into D1. Agents keep the same pairing tokens.
