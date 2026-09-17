@@ -4,8 +4,9 @@
 See the [release verification and Ubuntu acceptance notes](docs/cli-release-readiness.md)
 for what has been tested and what still needs verification before publication.
 The website runs on Heroku using
-GitHub Student Developer Pack credits, with Supabase Free for authentication,
-permissions, managed settings and the latest **48 hours** of monitoring history.
+GitHub Student Developer Pack credits, with **Supabase Auth** for sign-in and
+**Cloudflare D1** for pairing, telemetry, settings and the latest **48 hours**
+of monitoring history.
 Cloud records expire automatically; longer local history follows its own age and
 disk budget. Failed uploads enter a bounded local retry queue. HYN operational
 summaries and alerts are included; raw host logs and credentials are never uploaded.
