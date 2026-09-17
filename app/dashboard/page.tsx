@@ -89,8 +89,14 @@ export default async function DashboardPage({
   if ("signedOut" in state) redirect("/signin?next=%2Fdashboard");
 
   const { node: requestedNode, owner: requestedOwner, section: requestedSection, relayer: requestedRelayer, relayScope } = await searchParams;
-  if (state.error || state.profile?.status !== "active") {
-    return <Shell email={state.email ?? undefined}><div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">Dashboard access unavailable</h1><p className="mt-4 font-mono text-sm leading-7">{state.profile?.status === "suspended" ? "Your account is suspended. Contact a Super admin." : "Ask a Super admin to finish the portal roles setup, then refresh this page."}</p></div></Shell>;
+  if (state.profile?.status === "suspended") {
+    return <Shell email={state.email ?? undefined}><div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">Dashboard access unavailable</h1><p className="mt-4 font-mono text-sm leading-7">Your account is suspended. Contact a Super admin.</p></div></Shell>;
+  }
+  if (!state.profile || state.profile.status !== "active") {
+    const detail = state.error
+      ? state.error
+      : "Your account could not be loaded from the live database. Refresh this page.";
+    return <Shell email={state.email ?? undefined}><div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">Dashboard access unavailable</h1><p className="mt-4 font-mono text-sm leading-7">{detail}</p></div></Shell>;
   }
   const accounts = state.accounts;
   const access = permissions(state.profile.role);

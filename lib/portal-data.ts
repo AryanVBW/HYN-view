@@ -24,14 +24,16 @@ export async function loadPortalState(): Promise<{ signedOut: true } | PortalSta
       userDataRpc<DashboardAccount[]>("hyn_dashboard_accounts"),
       userDataRpc<Node[]>("hyn_list_nodes"),
     ]);
-    const error = profile.error?.message || accounts.error?.message || nodes.error?.message || null;
+    if (accounts.error) console.error("[portal-d1] hyn_dashboard_accounts", accounts.error.message);
+    if (nodes.error) console.error("[portal-d1] hyn_list_nodes", nodes.error.message);
+    const profileOk = profile.data?.status === "active";
     return {
       userId: auth.user.id,
       email: auth.user.email ?? null,
       profile: profile.data,
       accounts: accounts.data ?? [],
       nodes: nodes.data ?? [],
-      error,
+      error: profileOk ? null : (profile.error?.message || accounts.error?.message || nodes.error?.message || null),
     };
   }
   const [profileResult, accountsResult] = await Promise.all([

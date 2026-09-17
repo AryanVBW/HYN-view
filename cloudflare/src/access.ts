@@ -1,5 +1,5 @@
 import { nowIso } from "./crypto.ts";
-import { RpcError } from "./http.ts";
+import { isD1WriteLimit, RpcError } from "./http.ts";
 import type { NodeRow, Profile, Role, Session } from "./types.ts";
 
 export function bool(value: number | null | undefined): boolean {
@@ -68,12 +68,17 @@ export async function ensureProfile(
   const existing = await loadProfile(db, userId);
   const now = nowIso();
   if (existing) {
-    if (email && existing.email !== email) {
+    const sameEmail = !email || !existing.email
+      || existing.email.toLowerCase() === email.toLowerCase();
+    if (sameEmail) return existing;
+    try {
       await db.prepare("UPDATE profiles SET email = ?, updated_at = ? WHERE id = ?")
         .bind(email, now, userId).run();
       return { ...existing, email, updated_at: now };
+    } catch (error) {
+      if (isD1WriteLimit(error)) return existing;
+      throw error;
     }
-    return existing;
   }
   const allow = email
     ? await db.prepare("SELECT email FROM admin_allowlist WHERE lower(email) = lower(?)")
@@ -83,10 +88,17 @@ export async function ensureProfile(
   const bootstrap = bootstrapEmail && email
     && email.toLowerCase() === bootstrapEmail.toLowerCase();
   const role: Role = allow || bootstrap || (count?.n ?? 0) === 0 ? "super_admin" : "monitor";
-  await db.prepare(
-    `INSERT INTO profiles (id, email, full_name, role, status, created_at, updated_at)
-     VALUES (?, ?, NULL, ?, 'active', ?, ?)`,
-  ).bind(userId, email, role, now, now).run();
+  try {
+    await db.prepare(
+      `INSERT INTO profiles (id, email, full_name, role, status, created_at, updated_at)
+       VALUES (?, ?, NULL, ?, 'active', ?, ?)`,
+    ).bind(userId, email, role, now, now).run();
+  } catch (error) {
+    if (isD1WriteLimit(error)) {
+      throw new RpcError("this account cannot be created until the live database write limit resets at midnight UTC, or Workers Paid is enabled", 503);
+    }
+    throw error;
+  }
   return {
     id: userId,
     email,

@@ -1,5 +1,5 @@
 import { handleAgentRpc, pruneTelemetry } from "./agent.ts";
-import { json, jsonMessage, readJsonObject, RpcError } from "./http.ts";
+import { json, jsonFromUnknown, jsonMessage, readJsonObject } from "./http.ts";
 import { handlePortalRpc } from "./portal.ts";
 import { sessionFromRequest } from "./session.ts";
 
@@ -51,14 +51,14 @@ export default {
       }
       return jsonMessage("not found", 404);
     } catch (error) {
-      if (error instanceof RpcError) return jsonMessage(error.message, error.status);
-      console.error(JSON.stringify({ err: error instanceof Error ? error.message : "error" }));
-      return jsonMessage("internal error", 500);
+      return jsonFromUnknown(error);
     }
   },
   async scheduled(_event, env, ctx): Promise<void> {
     ctx.waitUntil(pruneTelemetry(env.DB, 5000).then((deleted) => {
       console.log(JSON.stringify({ cron: "telemetry-prune", deleted }));
+    }).catch((error) => {
+      console.error(JSON.stringify({ cron: "telemetry-prune", err: error instanceof Error ? error.message : "error" }));
     }));
   },
 } satisfies ExportedHandler<Env>;

@@ -39,3 +39,20 @@ export function bearer(request: Request): string | null {
   const match = /^Bearer\s+(\S+)/i.exec(header);
   return match?.[1] ?? null;
 }
+
+export function isD1WriteLimit(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /exceeded D1's free tier daily row write limit|D1.*write limit/i.test(message);
+}
+
+export function jsonFromUnknown(error: unknown): Response {
+  if (error instanceof RpcError) return jsonMessage(error.message, error.status);
+  if (isD1WriteLimit(error)) {
+    return jsonMessage(
+      "the live database hit today's write limit; existing dashboards still load, and new readings resume after midnight UTC or on Workers Paid",
+      503,
+    );
+  }
+  console.error(JSON.stringify({ err: error instanceof Error ? error.message : "error" }));
+  return jsonMessage("internal error", 500);
+}
