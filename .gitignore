@@ -9,3 +9,4 @@ supabase/.temp/
 .worktrees/
 
 .pnpm-store/
+migration-artifacts/
