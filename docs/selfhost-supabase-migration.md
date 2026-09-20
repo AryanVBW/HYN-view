@@ -2,7 +2,65 @@
 
 **Date:** 2026-09-20 · **Target:** `server02` (192.168.0.105), public via `data.hyn-view.in`
 
+## CUTOVER COMPLETE — 2026-09-20 07:44 UTC (Heroku v57)
+
+Production now reads and writes the self-hosted Supabase. **No source change was
+needed**: `lib/hyn-data.ts` gates on `HYN_DATA_API_URL`, so unsetting it makes
+`isD1Data()` false and all 23 call sites take their existing Supabase branch.
+
+```sh
+heroku config:set -a hyn-view \
+  NEXT_PUBLIC_SUPABASE_URL=https://data.hyn-view.in \
+  NEXT_PUBLIC_SUPABASE_ANON_KEY=<self-hosted anon> \
+  SUPABASE_SERVICE_ROLE_KEY=<self-hosted service-role> \
+  HYN_DATABASE_PROVIDER=supabase          # v55
+heroku config:unset -a hyn-view HYN_DATA_API_URL HYN_DATA_SERVICE_KEY   # v56 — the real switch
+git push https://git.heroku.com/hyn-view.git HEAD:main                  # v57 — rebuild
+```
+
+The rebuild was required because `NEXT_PUBLIC_*` is inlined into the client bundle
+at build time; a config change alone would have left the old URL in the browser JS.
+The pushed commit is an **empty** commit on top of the deployed `36d43ad`, so all 84
+production commits are preserved.
+
+Verified after cutover:
+
+| Check | Result |
+| --- | --- |
+| Client bundle Supabase URL | only `data.hyn-view.in`, no `*.supabase.co` |
+| `/`, `/signin` | 200 · `/dashboard`, `/account` 307 → signin (correct unauthenticated) |
+| Live agents | `hyn_heartbeat`, `hyn_fetch_config`, `hyn_ingest`, `hyn_record_bandwidth` → 200 |
+| Data arriving | `metrics` 11,366 → 11,387 in 75 s; heartbeat max advancing; **5 nodes active** |
+| Google OAuth | `redirect_uri_mismatch` gone; consent screen reached (app `hyn-view.in`) |
+| Errors | `Invalid API key` stopped 2 s after v57 (old dyno in flight); live tail 144 lines, 0 errors |
+| **D1 writes** | latest D1 `alert_events.ts` = `2026-09-20T04:26:42Z`, **before** cutover → receiving nothing |
+
+`HYN_D1_WORKER_URL` and `HYN_D1_PORTAL_SECRET` are intentionally retained as rollback.
+
+**Rollback:** `heroku config:set -a hyn-view HYN_DATA_API_URL=https://hyn-view-data.hynview.workers.dev HYN_DATA_SERVICE_KEY=<key>` then redeploy to rebuild. One release.
+
+### Note on rolling retention
+
+Row counts fall over time by design: cloud storage keeps a 48-hour window, so the
+merged Sep 15–17 rows are pruned as they age out. `alert_events` 33,053 → 32,851 and
+`metrics` 11,796 → 11,366 is the retention job working, not data loss. Longer history
+lives locally on each agent.
+
+### GitHub
+
+Production code existed **only** on Heroku git. It is now backed up:
+
+| Branch | Contents |
+| --- | --- |
+| `production/heroku-live` | `48827918` — exactly what is deployed (v57) |
+| `chore/selfhost-supabase-migration` | this runbook + the migration tooling |
+
+`main` is **untouched**: it has diverged from production (84 commits deployed but not on
+main; 51 on main but not deployed). Merging them is a separate decision — deploying
+`main` as-is would roll production back.
+
 ## Real architecture (verified, not what the README implies)
+
 
 | Concern | Source of truth |
 | --- | --- |
