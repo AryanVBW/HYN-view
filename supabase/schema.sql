@@ -1237,7 +1237,6 @@ create table if not exists public.email_preferences (
   last_alert_id          bigint not null default 0,
   updated_at             timestamptz not null default now()
 );
-
 alter table public.email_preferences enable row level security;
 drop policy if exists email_preferences_select_own on public.email_preferences;
 create policy email_preferences_select_own on public.email_preferences
@@ -1270,6 +1269,63 @@ insert into public.email_preferences (node_id, recipient)
 select n.id, p.email from public.nodes n join public.profiles p on p.id = n.owner
  where n.is_demo = false and p.email is not null
 on conflict (node_id) do nothing;
+
+-- Added post-cutover (supabase/migrations/20260921120000_upsert_email_preferences_rpc.sql):
+-- the client calls this RPC directly (components/account/email-preferences.tsx),
+-- and it only ever existed as a Cloudflare D1 Worker case
+-- (cloudflare/src/portal-more.ts) before the self-hosted Supabase cutover made
+-- every RPC fall through to Postgres. Mirrors that handler's ownership check.
+create or replace function public.hyn_upsert_email_preferences(
+  p_node_id uuid,
+  p_recipient text,
+  p_timezone text default 'UTC',
+  p_incident_enabled boolean default false,
+  p_daily_enabled boolean default false,
+  p_daily_at time default '08:00',
+  p_system_enabled boolean default false,
+  p_system_at time default '09:00'
+)
+returns json
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_owner uuid;
+begin
+  select owner into v_owner from public.nodes where id = p_node_id and revoked = false;
+  if not found then raise exception 'no such server'; end if;
+  if v_owner <> auth.uid() and not public.hyn_is_super_admin() then
+    raise exception 'server access required';
+  end if;
+  if p_recipient is null or p_recipient !~* '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$' then
+    raise exception 'a valid recipient email is required';
+  end if;
+
+  insert into public.email_preferences (
+    node_id, recipient, timezone, incident_enabled, daily_enabled, daily_at,
+    system_enabled, system_at, updated_at
+  ) values (
+    p_node_id, p_recipient, coalesce(p_timezone, 'UTC'), coalesce(p_incident_enabled, false),
+    coalesce(p_daily_enabled, false), coalesce(p_daily_at, '08:00'),
+    coalesce(p_system_enabled, false), coalesce(p_system_at, '09:00'), now()
+  )
+  on conflict (node_id) do update set
+    recipient = excluded.recipient,
+    timezone = excluded.timezone,
+    incident_enabled = excluded.incident_enabled,
+    daily_enabled = excluded.daily_enabled,
+    daily_at = excluded.daily_at,
+    system_enabled = excluded.system_enabled,
+    system_at = excluded.system_at,
+    updated_at = excluded.updated_at;
+
+  return json_build_object('status', 'ok');
+end;
+$$;
+
+revoke all on function public.hyn_upsert_email_preferences(uuid, text, text, boolean, boolean, time, boolean, time) from public, anon;
+grant execute on function public.hyn_upsert_email_preferences(uuid, text, text, boolean, boolean, time, boolean, time) to authenticated;
 
 -- Prevent overlapping cron invocations from sending a message twice. Browser
 -- sessions cannot access this internal ledger.
@@ -3513,6 +3569,13 @@ grant execute on function public.hyn_admin_clear_notifications(timestamptz, text
 -- discover it during an outage.
 alter table public.email_preferences alter column incident_enabled set default false;
 
+-- daily/system email opt-in (supabase/migrations/20260921130000_daily_system_email_opt_in.sql):
+-- same reasoning as incident alerts above, applied to the other two per-node
+-- digests once the admin-schedulable combined digest (lib/user-digest.ts) existed
+-- to replace them.
+alter table public.email_preferences alter column daily_enabled set default false;
+alter table public.email_preferences alter column system_enabled set default false;
+
 -- Reported rather than assumed: this runs once, against a fleet whose size the
 -- next person reading the log cannot recover, and "how many accounts were mailing
 -- without having asked to" is the whole justification for the change.
@@ -3525,6 +3588,18 @@ begin
    where incident_enabled;
   get diagnostics v_disabled = row_count;
   raise notice 'incident alert email switched off for % existing node preference row(s)', v_disabled;
+end;
+$$;
+
+do $$
+declare v_daily bigint; v_system bigint;
+begin
+  update public.email_preferences set daily_enabled = false, updated_at = now() where daily_enabled;
+  get diagnostics v_daily = row_count;
+  update public.email_preferences set system_enabled = false, updated_at = now() where system_enabled;
+  get diagnostics v_system = row_count;
+  raise notice 'daily health email switched off for % existing node preference row(s)', v_daily;
+  raise notice 'system information email switched off for % existing node preference row(s)', v_system;
 end;
 $$;
 -- An administrator maps a Highway identity to one portal account. Provider
@@ -6291,5 +6366,407 @@ do $$ begin
     raise notice 'pg_cron is unavailable: configure the portal telemetry retention cron every five minutes';
   end if;
 end $$;
+
+-- ===========================================================================
+-- maintainer role (supabase/migrations/20260921140000_maintainer_role.sql)
+-- ===========================================================================
+-- Appended last on purpose: it replaces the fleet-read predicate used by the
+-- policies and helpers defined earlier in this file, so it has to be the
+-- definition that wins on a fresh apply.
+-- ===========================================================================
+-- `maintainer`: a role that watches the whole fleet and administers none of it
+-- ===========================================================================
+-- The requirement is a person on 24/7 duty who sees every server combined in one
+-- view, with per-server "send notification" / "send report" actions. That is a
+-- read-and-notify job, not an administrative one.
+--
+-- The tempting shortcut is to add 'maintainer' to hyn_is_admin(), because every
+-- fleet-wide SELECT policy already calls it. That would be a privilege
+-- escalation: hyn_is_admin() also backs _hyn_require_admin(), which gates role
+-- assignment, machine suspension, node deletion, relayer assignment and template
+-- edits. A monitoring account must not inherit those by being able to read a
+-- temperature.
+--
+-- So fleet *visibility* gets its own predicate. hyn_is_admin() is left exactly as
+-- it was, and only the read paths move to the new one.
+alter table public.profiles drop constraint if exists profiles_role_check;
+alter table public.profiles add constraint profiles_role_check
+  check (role in ('viewer','monitor','maintainer','admin','super_admin'));
+
+create or replace function public.hyn_can_view_fleet()
+returns boolean language sql stable security definer set search_path=public as $$
+  select exists(select 1 from public.profiles
+    where id=auth.uid() and status='active'
+      and role in ('maintainer','admin','super_admin'));
+$$;
+revoke all on function public.hyn_can_view_fleet() from public,anon;
+grant execute on function public.hyn_can_view_fleet() to authenticated;
+
+-- Role assignment must accept the new value, or the admin UI can offer it and the
+-- database will still refuse it.
+create or replace function public.hyn_admin_set_role(p_user_id uuid,p_role text)
+returns json language plpgsql security definer set search_path=public as $$
+declare v_actor uuid; v_old text;
+begin
+  perform pg_advisory_xact_lock(74821901);
+  v_actor:=public._hyn_require_staff();
+  if p_role is null or p_role not in ('viewer','monitor','maintainer','admin','super_admin') then
+    raise exception 'unknown role';
+  end if;
+  select role into v_old from public.profiles where id=p_user_id for update;
+  if not found then raise exception 'no such client'; end if;
+  if v_actor=p_user_id and v_old<>p_role then raise exception 'refusing to change your own role'; end if;
+  -- An Admin may still only create Admins. Maintainer is a fleet-wide read grant,
+  -- so it stays a Super admin decision rather than something an Admin hands out.
+  if not public.hyn_is_super_admin() and (p_role<>'admin' or v_old not in ('viewer','monitor','admin')) then
+    raise exception 'admins can only add other admins';
+  end if;
+  if v_old<>p_role then
+    update public.profiles set role=p_role,updated_at=now() where id=p_user_id;
+    perform public._hyn_audit('client.role.'||p_role,p_user_id,null,jsonb_build_object('previous_role',v_old));
+  end if;
+  return json_build_object('status','ok','role',p_role);
+end $$;
+
+-- Read paths: swap hyn_is_admin() for hyn_can_view_fleet(). Owner-scoped access
+-- is untouched, so nothing a customer could see changes.
+drop policy if exists nodes_select_own on public.nodes;
+create policy nodes_select_own on public.nodes
+  for select using (owner = auth.uid() or public.hyn_can_view_fleet());
+
+drop policy if exists metrics_select_own on public.metrics;
+create policy metrics_select_own on public.metrics
+  for select using (
+    public.hyn_can_view_fleet() or exists (
+      select 1 from public.nodes n where n.id = metrics.node_id and n.owner = auth.uid()
+    )
+  );
+
+drop policy if exists speedtests_select_own on public.speedtests;
+create policy speedtests_select_own on public.speedtests
+  for select using (
+    public.hyn_can_view_fleet() or exists (
+      select 1 from public.nodes n where n.id = speedtests.node_id and n.owner = auth.uid()
+    )
+  );
+
+drop policy if exists alert_events_select_own on public.alert_events;
+create policy alert_events_select_own on public.alert_events
+  for select using (
+    public.hyn_can_view_fleet() or exists (
+      select 1 from public.nodes n where n.id = alert_events.node_id and n.owner = auth.uid()
+    )
+  );
+
+-- Delivery history is how the maintainer sees that a notification actually went
+-- out, which is part of the job.
+drop policy if exists notification_log_select_own on public.notification_log;
+create policy notification_log_select_own on public.notification_log
+  for select using (owner = auth.uid() or public.hyn_can_view_fleet());
+
+-- Per-node visibility (bandwidth_daily and the relayer views hang off this).
+create or replace function public.hyn_can_view_node(p_node uuid)
+returns boolean language sql stable security definer set search_path=public as $$
+  select public.hyn_is_active() and exists(
+    select 1 from public.nodes n join public.profiles p on p.id=n.owner
+    where n.id=p_node and not n.revoked and (public.hyn_can_view_fleet() or (p.status='active' and
+      (n.owner=auth.uid() or coalesce(
+        (select a.allowed from public.server_access a where a.viewer_id=auth.uid() and a.node_id=n.id),
+        public.hyn_can_view_dashboard(n.owner)))))
+  );
+$$;
+
+-- Dashboard account list: a maintainer resolves every account, which is what
+-- makes the combined "all servers" view selectable for them.
+create or replace function public.hyn_can_view_dashboard(p_owner uuid)
+returns boolean language sql stable security definer set search_path=public as $$
+  select public.hyn_is_active() and (
+    public.hyn_can_view_fleet() or
+    exists(select 1 from public.profiles p where p.id=p_owner and p.status='active' and (
+      p.id=auth.uid() or exists(select 1 from public.dashboard_access a where a.viewer_id=auth.uid() and a.owner_id=p_owner)
+    ))
+  );
+$$;
+
+-- ===========================================================================
+-- every email template is editable (migrations/20260921150000_all_email_templates.sql)
+-- ===========================================================================
+-- ===========================================================================
+-- email templates: list every message the portal actually sends
+-- ===========================================================================
+-- The template store admitted three keys -- alert, report, system -- while the
+-- code sent six kinds of mail. The sign-in notice, the device-linked
+-- confirmation and the first system report were rendered straight through
+-- renderHynEmailShell(), so they had no row here, never appeared in the admin
+-- panel's template list, and could not be edited at all. An administrator
+-- looking at that tab saw three entries and no way to reach half the mail their
+-- customers receive.
+--
+-- Widening the constraint and seeding the missing rows is only half of it; the
+-- three senders are switched to renderManagedHynEmail() in the same change, so a
+-- saved wrapper actually reaches them.
+alter table public.notification_templates
+  drop constraint if exists notification_templates_template_key_check;
+alter table public.notification_templates
+  add constraint notification_templates_template_key_check
+  check (template_key in ('alert','report','system','signin','device','first_report'));
+
+insert into public.notification_templates (template_key, name, description, html_template)
+values
+  ('signin', 'Sign-in notice',
+   'Wraps the security notice sent when an account signs in. This is the one message that still sends automatically.',
+   '{{content}}'),
+  ('device', 'Device linked',
+   'Wraps the confirmation sent when a machine finishes pairing.',
+   '{{content}}'),
+  ('first_report', 'First system report',
+   'Wraps the inventory sent after a newly linked machine uploads its first complete reading.',
+   '{{content}}')
+on conflict (template_key) do nothing;
+
+-- Keep the three originals' copy honest about the fact that scheduled sending is
+-- off: these now go out when an administrator or maintainer asks for them.
+update public.notification_templates
+   set description = 'Wraps new, ongoing and resolved alert digests, and the outage watchdog notice. Sent on request.'
+ where template_key = 'alert';
+update public.notification_templates
+   set description = 'Wraps the 24-hour performance digest and any report sent from the admin or fleet panel. Sent on request.'
+ where template_key = 'report';
+update public.notification_templates
+   set description = 'Wraps the hardware, software and service inventory, and command results. Sent on request.'
+ where template_key = 'system';
+
+-- The save RPC validates the key independently of the CHECK constraint (it is the
+-- boundary a browser session actually hits), so widening one without the other
+-- would list six templates in the panel and refuse to save three of them.
+create or replace function public.hyn_admin_save_template(
+  p_template_key text,
+  p_html_template text
+)
+returns json
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare v_actor uuid;
+begin
+  v_actor := public._hyn_require_admin();
+  if p_template_key not in ('alert','report','system','signin','device','first_report') then
+    raise exception 'unknown notification template: %', p_template_key;
+  end if;
+  if position('{{content}}' in coalesce(p_html_template, '')) = 0 then
+    raise exception 'template must include {{content}}';
+  end if;
+  if octet_length(p_html_template) > 100000 then
+    raise exception 'template exceeds 100 KB';
+  end if;
+  if p_html_template ~* '<[[:space:]]*(script|iframe|object|embed|form)([[:space:]>])'
+     or p_html_template ~* '[[:space:]]on[a-z]+[[:space:]]*=' then
+    raise exception 'template contains active HTML that is not allowed in email';
+  end if;
+
+  update public.notification_templates
+     set html_template = p_html_template,
+         updated_at = now(),
+         updated_by = v_actor
+   where template_key = p_template_key;
+  if not found then
+    raise exception 'notification template is not installed: %', p_template_key;
+  end if;
+
+  perform public._hyn_audit('notification_template.update', null, null,
+    jsonb_build_object('template_key', p_template_key, 'bytes', octet_length(p_html_template)));
+  return json_build_object('status', 'ok', 'template_key', p_template_key);
+end;
+$$;
+revoke all on function public.hyn_admin_save_template(text, text) from public, anon;
+grant execute on function public.hyn_admin_save_template(text, text) to authenticated;
+
+-- ===========================================================================
+-- real email template bodies (migrations/20260921160000_seed_real_email_templates.sql)
+-- ===========================================================================
+-- ===========================================================================
+-- seed the templates with the format that is actually in use
+-- ===========================================================================
+-- Every row shipped holding the single string "{{content}}". That is a correct
+-- passthrough wrapper and a useless starting point: an administrator opening the
+-- Email templates tab saw an editor containing one placeholder, with no way to
+-- tell what editing it would change. "Listed but not visible", accurately.
+--
+-- These rows now hold the real current wrapper, generated from
+-- web-portal/lib/email-template-defaults.ts so the database seed and the
+-- "Restore default" button in the panel cannot drift apart.
+--
+-- Only rows still at the untouched default are replaced. A wrapper an
+-- administrator has already edited is left exactly as it is -- this migration
+-- must not silently overwrite somebody's work.
+
+update public.notification_templates
+   set html_template = '<!-- HYN-view email wrapper. {{content}} is replaced by the generated message
+     body; everything around it is yours. Placeholders: {{subject}} {{hostname}}
+     {{severity}} {{version}}. Inline styles only - no <style> block, no scripts. -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse">
+  <tr>
+    <td style="padding:0 0 18px">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;background:#f7f8fa;border:1px solid #e2e6ea;border-radius:6px">
+        <tr>
+          <td style="padding:12px 16px;font:600 11px -apple-system,Segoe UI,Arial,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#0f6dd6">{{severity}}</td>
+          <td align="right" style="padding:12px 16px;font:12px -apple-system,Segoe UI,Arial,sans-serif;color:#6b7684">{{hostname}}</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  <tr>
+    <td>{{content}}</td>
+  </tr>
+  <tr>
+    <td style="padding:22px 0 0;border-top:1px solid #e2e6ea;font:12px -apple-system,Segoe UI,Arial,sans-serif;line-height:1.6;color:#6b7684">
+      Sent from the HYN-view portal when an administrator or maintainer requested it.<br>HYN-view &middot; agent {{version}}
+    </td>
+  </tr>
+</table>',
+       updated_at = now()
+ where template_key = 'alert'
+   and btrim(html_template) in ('{{content}}', '');
+
+update public.notification_templates
+   set html_template = '<!-- HYN-view email wrapper. {{content}} is replaced by the generated message
+     body; everything around it is yours. Placeholders: {{subject}} {{hostname}}
+     {{severity}} {{version}}. Inline styles only - no <style> block, no scripts. -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse">
+  <tr>
+    <td style="padding:0 0 18px">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;background:#f7f8fa;border:1px solid #e2e6ea;border-radius:6px">
+        <tr>
+          <td style="padding:12px 16px;font:600 11px -apple-system,Segoe UI,Arial,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#0f6dd6">{{severity}}</td>
+          <td align="right" style="padding:12px 16px;font:12px -apple-system,Segoe UI,Arial,sans-serif;color:#6b7684">{{hostname}}</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  <tr>
+    <td>{{content}}</td>
+  </tr>
+  <tr>
+    <td style="padding:22px 0 0;border-top:1px solid #e2e6ea;font:12px -apple-system,Segoe UI,Arial,sans-serif;line-height:1.6;color:#6b7684">
+      Sent from the HYN-view portal when an administrator or maintainer requested it.<br>HYN-view &middot; agent {{version}}
+    </td>
+  </tr>
+</table>',
+       updated_at = now()
+ where template_key = 'report'
+   and btrim(html_template) in ('{{content}}', '');
+
+update public.notification_templates
+   set html_template = '<!-- HYN-view email wrapper. {{content}} is replaced by the generated message
+     body; everything around it is yours. Placeholders: {{subject}} {{hostname}}
+     {{severity}} {{version}}. Inline styles only - no <style> block, no scripts. -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse">
+  <tr>
+    <td style="padding:0 0 18px">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;background:#f7f8fa;border:1px solid #e2e6ea;border-radius:6px">
+        <tr>
+          <td style="padding:12px 16px;font:600 11px -apple-system,Segoe UI,Arial,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#0f6dd6">{{severity}}</td>
+          <td align="right" style="padding:12px 16px;font:12px -apple-system,Segoe UI,Arial,sans-serif;color:#6b7684">{{hostname}}</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  <tr>
+    <td>{{content}}</td>
+  </tr>
+  <tr>
+    <td style="padding:22px 0 0;border-top:1px solid #e2e6ea;font:12px -apple-system,Segoe UI,Arial,sans-serif;line-height:1.6;color:#6b7684">
+      Sent from the HYN-view portal when an administrator or maintainer requested it.<br>HYN-view &middot; agent {{version}}
+    </td>
+  </tr>
+</table>',
+       updated_at = now()
+ where template_key = 'system'
+   and btrim(html_template) in ('{{content}}', '');
+
+update public.notification_templates
+   set html_template = '<!-- HYN-view email wrapper. {{content}} is replaced by the generated message
+     body; everything around it is yours. Placeholders: {{subject}} {{hostname}}
+     {{severity}} {{version}}. Inline styles only - no <style> block, no scripts. -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse">
+  <tr>
+    <td style="padding:0 0 18px">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;background:#f7f8fa;border:1px solid #e2e6ea;border-radius:6px">
+        <tr>
+          <td style="padding:12px 16px;font:600 11px -apple-system,Segoe UI,Arial,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#0f6dd6">{{severity}}</td>
+          <td align="right" style="padding:12px 16px;font:12px -apple-system,Segoe UI,Arial,sans-serif;color:#6b7684">{{hostname}}</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  <tr>
+    <td>{{content}}</td>
+  </tr>
+  <tr>
+    <td style="padding:22px 0 0;border-top:1px solid #e2e6ea;font:12px -apple-system,Segoe UI,Arial,sans-serif;line-height:1.6;color:#6b7684">
+      Automatic security notice. If this sign-in was not you, secure the account immediately.<br>HYN-view &middot; agent {{version}}
+    </td>
+  </tr>
+</table>',
+       updated_at = now()
+ where template_key = 'signin'
+   and btrim(html_template) in ('{{content}}', '');
+
+update public.notification_templates
+   set html_template = '<!-- HYN-view email wrapper. {{content}} is replaced by the generated message
+     body; everything around it is yours. Placeholders: {{subject}} {{hostname}}
+     {{severity}} {{version}}. Inline styles only - no <style> block, no scripts. -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse">
+  <tr>
+    <td style="padding:0 0 18px">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;background:#f7f8fa;border:1px solid #e2e6ea;border-radius:6px">
+        <tr>
+          <td style="padding:12px 16px;font:600 11px -apple-system,Segoe UI,Arial,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#0f6dd6">{{severity}}</td>
+          <td align="right" style="padding:12px 16px;font:12px -apple-system,Segoe UI,Arial,sans-serif;color:#6b7684">{{hostname}}</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  <tr>
+    <td>{{content}}</td>
+  </tr>
+  <tr>
+    <td style="padding:22px 0 0;border-top:1px solid #e2e6ea;font:12px -apple-system,Segoe UI,Arial,sans-serif;line-height:1.6;color:#6b7684">
+      Sent once when a machine finishes pairing with your account.<br>HYN-view &middot; agent {{version}}
+    </td>
+  </tr>
+</table>',
+       updated_at = now()
+ where template_key = 'device'
+   and btrim(html_template) in ('{{content}}', '');
+
+update public.notification_templates
+   set html_template = '<!-- HYN-view email wrapper. {{content}} is replaced by the generated message
+     body; everything around it is yours. Placeholders: {{subject}} {{hostname}}
+     {{severity}} {{version}}. Inline styles only - no <style> block, no scripts. -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse">
+  <tr>
+    <td style="padding:0 0 18px">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;background:#f7f8fa;border:1px solid #e2e6ea;border-radius:6px">
+        <tr>
+          <td style="padding:12px 16px;font:600 11px -apple-system,Segoe UI,Arial,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#0f6dd6">{{severity}}</td>
+          <td align="right" style="padding:12px 16px;font:12px -apple-system,Segoe UI,Arial,sans-serif;color:#6b7684">{{hostname}}</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  <tr>
+    <td>{{content}}</td>
+  </tr>
+  <tr>
+    <td style="padding:22px 0 0;border-top:1px solid #e2e6ea;font:12px -apple-system,Segoe UI,Arial,sans-serif;line-height:1.6;color:#6b7684">
+      Sent once, after a newly linked machine uploads its first complete reading.<br>HYN-view &middot; agent {{version}}
+    </td>
+  </tr>
+</table>',
+       updated_at = now()
+ where template_key = 'first_report'
+   and btrim(html_template) in ('{{content}}', '');
 notify pgrst,'reload schema';
 commit;

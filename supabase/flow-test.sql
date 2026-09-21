@@ -910,16 +910,19 @@ declare n integer; pref public.email_preferences;
 begin
   select count(*) into n from public.email_preferences;
   if n <> 1 then raise exception 'pairing should create one default email schedule, saw %', n; end if;
-  -- Incident mail is opt-in; the two digests are not. A machine that pairs itself
-  -- must not start mailing an account that never asked to be mailed -- and this is
-  -- the assertion, because the flood that prompted it (4501 failed attempts in a
-  -- day) came from a column default, not from anybody's choice.
+  -- All three streams are opt-in. A machine that pairs itself must not start
+  -- mailing an account that never asked to be mailed -- and this is the
+  -- assertion, because the flood that prompted the incident-alert change (4501
+  -- failed attempts in a day) came from a column default, not from anybody's
+  -- choice, and the same reasoning was later applied to the two digests once
+  -- the admin-schedulable combined per-user digest existed to replace them
+  -- (supabase/migrations/20260921130000_daily_system_email_opt_in.sql).
   select * into pref from public.email_preferences;
   if pref.incident_enabled then
     raise exception 'a newly paired machine defaults to sending incident alert email';
   end if;
-  if not pref.daily_enabled or not pref.system_enabled then
-    raise exception 'the daily digests lost their default with the incident change';
+  if pref.daily_enabled or pref.system_enabled then
+    raise exception 'a newly paired machine defaults to sending daily or system digest email';
   end if;
   update public.email_preferences set timezone = 'Asia/Kolkata', daily_at = '08:30';
   if not found then raise exception 'the node owner could not update their email schedule'; end if;
