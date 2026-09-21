@@ -142,8 +142,27 @@ export type AdminTrendPoint = {
   up: number;
 };
 
+// Every email the portal can wrap in an editable template.
+//
+// This is the single source of truth: the database CHECK constraint, the seeded
+// rows, the save allowlist in app/admin/actions.ts and the admin panel's list all
+// derive from it. It used to be three keys while the code actually sent six
+// kinds of mail, so the sign-in notice, the device-linked confirmation and the
+// first system report were rendered with the built-in shell and could not be
+// edited from the panel at all -- they were mail we send that the template list
+// did not admit existed.
+export const notificationTemplateKeys = [
+  "alert",
+  "report",
+  "system",
+  "signin",
+  "device",
+  "first_report",
+] as const;
+export type NotificationTemplateKey = (typeof notificationTemplateKeys)[number];
+
 export type NotificationTemplate = {
-  template_key: "alert" | "report" | "system";
+  template_key: NotificationTemplateKey;
   name: string;
   description: string;
   html_template: string;

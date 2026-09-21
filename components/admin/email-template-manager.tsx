@@ -1,28 +1,36 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { Check, Code2, Eye, Loader2, Save } from "lucide-react";
+import { Check, Code2, Eye, Loader2, RotateCcw, Save } from "lucide-react";
 import { saveNotificationTemplate } from "@/app/admin/actions";
-import type { NotificationTemplate } from "@/lib/types";
+import { renderManagedHynEmail } from "@/lib/cloud-email";
+import { defaultTemplateHtml, sampleContentFor } from "@/lib/email-template-defaults";
+import type { NotificationTemplate, NotificationTemplateKey } from "@/lib/types";
 
-const PREVIEW_CONTENT = `
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-family:Arial,sans-serif;background:#ffffff;color:#0f172a;border:1px solid #e2e8f0">
-  <tr><td style="height:4px;background:#FFC700"></td></tr>
-  <tr><td style="padding:24px">
-    <div style="font-size:11px;letter-spacing:.12em;color:#64748b;text-transform:uppercase">HYN-view preview</div>
-    <h1 style="font-size:24px;margin:6px 0 16px">Example notification content</h1>
-    <p style="font-size:14px;line-height:1.6;margin:0">The generated alert or daily report is inserted here on the monitored server.</p>
-  </td></tr>
-</table>`;
-
-function previewDocument(template: string): string {
-  const rendered = template
-    .replaceAll("{{content}}", PREVIEW_CONTENT)
-    .replaceAll("{{hostname}}", "edge-node-01")
-    .replaceAll("{{version}}", "1.5.0")
-    .replaceAll("{{severity}}", "warning")
-    .replaceAll("{{subject}}", "[WARNING] edge-node-01: CPU pressure");
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data: cid:"><style>html,body{margin:0;padding:0;background:#eef2f7}</style></head><body>${rendered}</body></html>`;
+// The preview is the real email: the same shell, the same wrapper application and
+// the same content builders the senders use, with sample data. It used to render a
+// hand-written placeholder rectangle inside a made-up document, so the panel could
+// not answer the only question it exists to answer -- "what will this look like
+// when it goes out". Anything that renders differently here than in the inbox is a
+// preview that costs more trust than it earns.
+function previewDocument(template: string, key: NotificationTemplateKey): string {
+  return renderManagedHynEmail({
+    template,
+    preview: "Sample HYN-view message. No email is sent by opening this preview.",
+    values: {
+      subject:
+        key === "signin" ? "Welcome, you signed in"
+        : key === "device" ? "HYN device linked · pune-worker-02"
+        : key === "first_report" ? "Your first HYN system report · mumbai-relay-01"
+        : key === "alert" ? "[HYN CRIT] mumbai-relay-01: 2 incident updates"
+        : key === "report" ? "Daily HYN health · mumbai-relay-01"
+        : "System information · mumbai-relay-01",
+      hostname: key === "signin" ? "operator@example.com" : "mumbai-relay-01",
+      version: "1.10.0",
+      severity: key === "alert" ? "crit" : "info",
+      content: sampleContentFor(key),
+    },
+  });
 }
 
 function formatSavedAt(value: string): string {
@@ -45,7 +53,13 @@ export function EmailTemplateManager({ templates, canWrite = false }: { template
   const [message, setMessage] = useState<{ tone: "ok" | "bad"; text: string } | null>(null);
   const [pending, startTransition] = useTransition();
   const draft = drafts[activeKey] ?? active?.html_template ?? "{{content}}";
-  const preview = previewDocument(draft);
+  const preview = previewDocument(draft, activeKey);
+  const isDefault = draft.trim() === defaultTemplateHtml(activeKey).trim();
+
+  function restoreDefault() {
+    setDrafts((current) => ({ ...current, [activeKey]: defaultTemplateHtml(activeKey) }));
+    setMessage(null);
+  }
 
   function save() {
     setMessage(null);
@@ -151,18 +165,32 @@ export function EmailTemplateManager({ templates, canWrite = false }: { template
 
           <div className="mt-4 flex flex-col gap-4 border-t border-border pt-4 md:flex-row md:items-end md:justify-between">
             <div className="font-mono text-[0.65rem] leading-5 text-muted-foreground">
-              <p>Required: <code className="text-primary">{"{{content}}"}</code></p>
+              <p>Required: <code className="text-primary">{"{{content}}"}</code> — the generated message body.</p>
               <p>Optional: {"{{hostname}} · {{version}} · {{severity}} · {{subject}}"}</p>
+              <p className="mt-1">Preview uses sample data and the real sender, so it matches the inbox. Nothing is sent.</p>
             </div>
-            {canWrite ? <button
-              type="button"
-              disabled={pending}
-              onClick={save}
-              className="flex min-w-40 items-center justify-center gap-2 rounded-md border border-primary bg-primary/10 px-4 py-2.5 font-mono text-xs uppercase text-primary transition-colors hover:bg-primary/20 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-wait disabled:opacity-60"
-            >
-              {pending ? <Loader2 className="size-4 animate-spin" aria-hidden /> : message?.tone === "ok" ? <Check className="size-4" aria-hidden /> : <Save className="size-4" aria-hidden />}
-              {pending ? "Saving" : "Save template"}
-            </button> : <p className="font-mono text-xs text-muted-foreground">Only Super admins can edit templates.</p>}
+            <div className="flex flex-wrap items-center gap-2">
+              {canWrite ? (
+                <button
+                  type="button"
+                  disabled={pending || isDefault}
+                  onClick={restoreDefault}
+                  title="Replace the editor contents with the current shipped format"
+                  className="flex items-center justify-center gap-2 rounded-md border border-border px-3 py-2.5 font-mono text-xs uppercase text-muted-foreground transition-colors hover:border-primary/60 hover:text-primary disabled:opacity-40"
+                >
+                  <RotateCcw className="size-3.5" aria-hidden /> {isDefault ? "Is default" : "Restore default"}
+                </button>
+              ) : null}
+              {canWrite ? <button
+                type="button"
+                disabled={pending}
+                onClick={save}
+                className="flex min-w-40 items-center justify-center gap-2 rounded-md border border-primary bg-primary/10 px-4 py-2.5 font-mono text-xs uppercase text-primary transition-colors hover:bg-primary/20 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-wait disabled:opacity-60"
+              >
+                {pending ? <Loader2 className="size-4 animate-spin" aria-hidden /> : message?.tone === "ok" ? <Check className="size-4" aria-hidden /> : <Save className="size-4" aria-hidden />}
+                {pending ? "Saving" : "Save template"}
+              </button> : <p className="font-mono text-xs text-muted-foreground">Only Super admins can edit templates.</p>}
+            </div>
           </div>
 
           {message ? (

@@ -7,6 +7,7 @@ import { buildAdminClientReport, type AdminReportMachine } from "@/lib/admin-rep
 import { renderManagedHynEmail } from "@/lib/cloud-email";
 import { sendManagedEmail as sendResendEmail } from "@/lib/delivery-send";
 import { normalizeNodeCommand } from "@/lib/node-command";
+import { notificationTemplateKeys, type NotificationTemplateKey } from "@/lib/types";
 import { isD1Data, storeRpc } from "@/lib/hyn-data";
 import { createClient } from "@/lib/supabase/server";
 import { SUPABASE_URL } from "@/lib/supabase/config";
@@ -40,7 +41,7 @@ export async function saveNotificationTemplate(
   templateKey: string,
   htmlTemplate: string
 ): Promise<SaveTemplateResult> {
-  if (!['alert', 'report', 'system'].includes(templateKey)) {
+  if (!notificationTemplateKeys.includes(templateKey as NotificationTemplateKey)) {
     return { ok: false, error: "Unknown notification template." };
   }
   if (!htmlTemplate.includes("{{content}}")) {
@@ -183,7 +184,7 @@ export async function sendAdminClientReport(clientId: string): Promise<AdminActi
       preview: report.preview,
     });
     const delivery = await sendResendEmail({
-      delivery: { kind: "admin_report", ownerId: clientId },
+      delivery: { kind: "admin_report", ownerId: clientId, manual: true },
       apiKey: resendKey,
       from,
       to: profile.email,

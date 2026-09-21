@@ -3,7 +3,7 @@ import test from "node:test";
 import { selectDashboard } from "./dashboard-selection.ts";
 const accounts = [{id:"me",name:"Me",own:true},{id:"shared",name:"Team",own:false}];
 const nodes = [{id:"older",owner:"me"},{id:"new",owner:"me"},{id:"team",owner:"shared"}];
-const base = {selfId:"me",canAdmin:false,accounts,nodes};
+const base = {selfId:"me",canViewFleet:false,accounts,nodes};
 test("users without owned devices land on their assigned server", () => {
   const selected = selectDashboard({...base,nodes:[nodes[2]]});
   assert.equal(selected?.owner,"shared");
@@ -29,7 +29,7 @@ test("invalid or mismatched links never silently show a different device", () =>
   assert.equal(selectDashboard({...base,requestedOwner:"all"}),null);
 });
 test("admins see all accessible servers and can switch to an account with no devices", () => {
-  assert.deepEqual(selectDashboard({...base,canAdmin:true})?.nodes,nodes);
-  assert.equal(selectDashboard({...base,canAdmin:true})?.owner,"all");
+  assert.deepEqual(selectDashboard({...base,canViewFleet:true})?.nodes,nodes);
+  assert.equal(selectDashboard({...base,canViewFleet:true})?.owner,"all");
   assert.equal(selectDashboard({...base,nodes:[],requestedOwner:"me"})?.node,undefined);
 });

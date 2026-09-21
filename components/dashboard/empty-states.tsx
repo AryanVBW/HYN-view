@@ -1,6 +1,7 @@
 import Link from "next/link";
-import { Radio, ServerOff, Terminal } from "lucide-react";
+import { Radio, ServerOff, ShieldAlert, Terminal } from "lucide-react";
 import { DemoDataButton } from "./demo-data-button";
+import { RefreshButton } from "./refresh-button";
 
 function CommandBlock({ lines }: { lines: string[] }) {
   return (
@@ -73,6 +74,63 @@ export function NoNodesState({ canDemo = false }: { canDemo?: boolean }) {
         </p>
         <DemoDataButton mode="seed" />
       </div> : null}
+    </div>
+  );
+}
+
+// Shown when the signed-in account's profile row isn't in the state the
+// dashboard needs yet. Three distinct causes share this screen, so the copy
+// and the action both change with the cause rather than dead-ending everyone
+// on the same unfixable sentence.
+export function DashboardAccessUnavailable({
+  suspended,
+  transient,
+  detail,
+}: {
+  suspended: boolean;
+  // True right after signup, before the profile row created by the auth
+  // trigger has become visible to this request — a timing gap, not a fault.
+  transient: boolean;
+  // The store's own error, when there was one. Shown verbatim: "could not be
+  // loaded" tells an operator nothing, and the underlying message is usually
+  // the whole diagnosis.
+  detail?: string | null;
+}) {
+  const heading = suspended
+    ? "Your account is suspended"
+    : transient
+      ? "Setting up your account"
+      : "Dashboard access unavailable";
+  const body = suspended
+    ? "A Super admin suspended this account, which pauses every server it owns along with it. Contact a Super admin to have it reinstated."
+    : transient
+      ? "Your account was just created and is still being provisioned. This usually clears in a few seconds — try refreshing."
+      : "Ask a Super admin to finish the portal roles setup for this account, then refresh this page.";
+
+  return (
+    <div className="terminal-panel animate-in fade-in slide-in-from-bottom-2 p-8 duration-500 md:p-12">
+      <div className="mx-auto max-w-xl text-center">
+        <ShieldAlert
+          className={`mx-auto size-10 ${suspended ? "text-destructive" : "text-muted-foreground"}`}
+          aria-hidden
+        />
+        <h1 className="mt-6 font-sentient text-2xl text-card-foreground md:text-3xl">
+          {heading}
+        </h1>
+        <p className="mt-3 font-mono text-sm leading-7 text-muted-foreground">
+          {body}
+        </p>
+        {detail ? (
+          <p className="mx-auto mt-4 max-w-md rounded-md border border-border/60 bg-card/60 p-3 font-mono text-xs leading-5 break-words text-muted-foreground">
+            {detail}
+          </p>
+        ) : null}
+        {!suspended ? (
+          <div className="mt-8">
+            <RefreshButton />
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }

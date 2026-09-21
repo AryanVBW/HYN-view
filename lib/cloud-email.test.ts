@@ -13,7 +13,7 @@ import {
   sendResendEmail,
 } from "./cloud-email.ts";
 
-test("every managed lifecycle message uses the immutable HYN terminal shell", () => {
+test("every managed lifecycle message uses the shared HYN email shell", () => {
   const contents = [
     buildSignInContent({
       email: "owner@example.com",
@@ -44,7 +44,7 @@ test("every managed lifecycle message uses the immutable HYN terminal shell", ()
       severity: "warn",
       content,
     });
-    assert.match(rendered, /data-hyn-email="terminal"/);
+    assert.match(rendered, /data-hyn-email="light"/);
     assert.match(rendered, /HYN-view/);
     assert.match(rendered, /Status &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
     assert.match(rendered, /relay&lt;&amp;&gt;/);

@@ -88,12 +88,15 @@ test("Viewer dashboard selector contains only supplied accessible dashboards", (
   assert.doesNotMatch(html, /Admin dashboard|Link another server/);
 });
 
-test("Monitors can link devices and staff get all-server navigation", () => {
-  for (const role of ["viewer","monitor","admin","super_admin"]) {
+test("Monitors can link devices and fleet roles get all-server navigation", () => {
+  for (const role of ["viewer","monitor","maintainer","admin","super_admin"]) {
     const html=render(<DashboardContext role={role} owner="me" accounts={[{id:"me",name:"Owner",own:true}]}/>);
     assert.equal(html.includes("+ Link server"),permissions(role).canLink,role);
-    assert.equal(html.includes("All servers"),permissions(role).canAdmin,role);
-    assert.equal(html.includes("My devices"), permissions(role).canAdmin, role);
+    // "All servers" follows fleet visibility, not administrative power, so a
+    // Maintainer gets the combined view without the admin panel.
+    assert.equal(html.includes("All servers"),permissions(role).canViewFleet,role);
+    assert.equal(html.includes("My devices"), permissions(role).canViewFleet, role);
+    assert.equal(html.includes("Admin dashboard"), permissions(role).canAdmin, role);
     assert.match(html,/aria-current="page"/);
   }
 });

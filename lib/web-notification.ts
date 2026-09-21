@@ -2,6 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import {
   applyEmailTemplate,
   buildCommandResultContent,
+  emailPalette,
   escapeHtml,
   renderHynEmailShell,
   renderManagedHynEmail,
@@ -76,7 +77,7 @@ export async function dispatchWebNotificationJob(
 
   // A monitored machine is untrusted email input. Use its plain body and
   // escape it here rather than accepting agent-supplied active HTML.
-  const generated = `<pre style="white-space:pre-wrap;word-break:break-word;margin:0;border:1px solid #17333d;background:#05090c;padding:16px;color:#dcecf2">${escapeHtml(job.textBody)}</pre>`;
+  const generated = `<pre style="white-space:pre-wrap;word-break:break-word;margin:0;border:1px solid ${emailPalette.border};background:${emailPalette.codeBg};padding:16px;color:${emailPalette.text};border-radius:6px">${escapeHtml(job.textBody)}</pre>`;
   const content = applyEmailTemplate(job.template ?? "{{content}}", {
     subject: job.subject,
     hostname: job.hostname ?? job.nodeName,

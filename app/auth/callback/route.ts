@@ -4,7 +4,7 @@ import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { normalizeInternalPath } from "@/lib/legal-consent";
 import { observedPublicIp } from "@/lib/agent-api";
 import { portalOrigin } from "@/lib/portal-origin";
-import { buildSignInContent, renderHynEmailShell } from "@/lib/cloud-email";
+import { buildSignInContent, renderManagedHynEmail } from "@/lib/cloud-email";
 import { sendManagedEmail as sendResendEmail } from "@/lib/delivery-send";
 
 // Where Google (and the email confirmation link) come back to. Exchanges the
@@ -53,6 +53,15 @@ export async function GET(request: NextRequest) {
     const userAgent = request.headers.get("user-agent")?.slice(0, 300) ?? null;
     after(async () => {
       const subject = "Welcome, you signed in";
+      // The administrator-editable wrapper is applied here too. Without this the
+      // sign-in notice was rendered with the built-in shell only, so a template
+      // saved in the admin panel had no effect on the one message that still
+      // sends automatically.
+      const { data: template } = await supabase
+        .from("notification_templates")
+        .select("html_template")
+        .eq("template_key", "signin")
+        .maybeSingle();
       // Every other sender in this codebase captures the delivery result and
       // records it. This one discarded it, which is why "email is not sending"
       // had no error anywhere to find: the send runs inside after(), so a failure
@@ -66,12 +75,16 @@ export async function GET(request: NextRequest) {
         from: process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>",
         to: email,
         subject,
-        html: renderHynEmailShell({
-          subject,
+        html: renderManagedHynEmail({
+          template: template?.html_template ?? "{{content}}",
           preview: "A successful sign-in to your HYN-view account was recorded.",
-          hostname: email,
-          severity: "info",
-          content: buildSignInContent({ email, signedInAt, ip, userAgent }),
+          values: {
+            subject,
+            hostname: email,
+            version: "",
+            severity: "info",
+            content: buildSignInContent({ email, signedInAt, ip, userAgent }),
+          },
         }),
         idempotencyKey: `sign-in:${auth.user.id}:${signedInAt}`,
       });

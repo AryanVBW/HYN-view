@@ -27,7 +27,7 @@ export default async function DeliveriesPage({ searchParams }: { searchParams: P
   const result = await storeRpc<DeliverySnapshot>("hyn_admin_delivery_dashboard", { p_owner: owner, p_kind: kind, p_status: status, p_offset: (page - 1) * 25 });
   const template = isD1Data()
     ? { data: ((await storeRpc<Array<{ template_key: string; html_template: string }>>("hyn_admin_templates")).data ?? []).find((row) => row.template_key === "report") }
-    : await supabase.from("notification_templates").select("html").eq("kind", "report").maybeSingle();
+    : await supabase.from("notification_templates").select("html_template").eq("template_key", "report").maybeSingle();
   const previewHtml = renderManagedHynEmail({ template: (template.data as { html?: string; html_template?: string } | null)?.html ?? (template.data as { html_template?: string } | null)?.html_template, values: {
     subject: "Your daily server digest - sample", hostname: "2 permitted servers", severity: "info", version: "daily digest",
     content: `<p>This is sample data. One email combines all servers this user is allowed to monitor.</p>${["Mumbai gateway", "Pune worker"].map(nodeName => buildDailyDigestContent({ nodeName, sampleCount: 288, cpuAverage: 24, cpuPeak: 68, memoryAverage: 42, temperaturePeak: 57, downloadAverageBps: 12000, uploadAverageBps: 8000, latencyAverageMs: 19, uptimeSeconds: 86400 })).join("")}`,

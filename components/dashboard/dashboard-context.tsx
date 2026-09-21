@@ -17,7 +17,7 @@ export function DashboardContext({ role, accounts, owner, section = "servers", n
   const serverHref = `/dashboard?${query}`;
   const sectionQuery = section === "relayers" ? "&section=relayers" : "";
   const options = accounts.map(account => ({id: account.id, name: account.own ? "My devices" : account.name, href: `/dashboard?owner=${encodeURIComponent(account.id)}${sectionQuery}`}));
-  if (access.canAdmin) options.unshift({id: "all",name: "All servers",href: `/dashboard?owner=all${sectionQuery}`});
+  if (access.canViewFleet) options.unshift({id: "all",name: "All servers",href: `/dashboard?owner=all${sectionQuery}`});
   const computerOptions = computers?.map(computer => {
     const hostname = computer.hostname?.trim();
     const savedName = computer.name.trim();
@@ -35,6 +35,7 @@ export function DashboardContext({ role, accounts, owner, section = "servers", n
       <DashboardNavigation section={section} serverHref={serverHref} canViewRelayers={canViewRelayers} />
       <div className="flex flex-wrap items-center gap-4">
         {access.canAdmin ? <Link href="/admin" className="text-muted-foreground hover:text-foreground">Admin dashboard</Link> : null}
+        {access.isMaintainer ? <Link href="/maintainer" className="text-muted-foreground hover:text-foreground">Fleet monitor</Link> : null}
         {access.canLink ? <Link href="/link" className="rounded-full border border-primary/50 px-4 py-2.5 text-primary hover:bg-primary/10">+ Link server</Link> : null}
       </div>
     </div>

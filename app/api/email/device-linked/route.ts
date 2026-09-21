@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { buildDeviceLinkedContent, renderHynEmailShell } from "@/lib/cloud-email";
+import { buildDeviceLinkedContent, renderManagedHynEmail } from "@/lib/cloud-email";
 import { sendManagedEmail as sendResendEmail } from "@/lib/delivery-send";
 import { storeRpc } from "@/lib/hyn-data";
 import { createClient } from "@/lib/supabase/server";
@@ -41,16 +41,25 @@ export async function POST(request: Request) {
   }
 
   const subject = `HYN device linked · ${claim.node_name ?? "new machine"}`;
+  // Apply the administrator-editable wrapper, same as every other message.
+  const { data: deviceTemplate } = await supabase
+    .from("notification_templates")
+    .select("html_template")
+    .eq("template_key", "device")
+    .maybeSingle();
   const delivery = await sendResendEmail({
     delivery: { kind: "device", ownerId: auth.user.id, nodeId: body.nodeId },
     apiKey: resendKey,
     from,
     to: claim.recipient,
     subject,
-    html: renderHynEmailShell({
-      subject,
+    html: renderManagedHynEmail({
+      template: deviceTemplate?.html_template ?? "{{content}}",
       preview: "Your machine is linked and its first complete report is being collected.",
+      values: {
+      subject,
       hostname: claim.hostname ?? claim.node_name ?? "new machine",
+      version: claim.agent_version ?? "unknown",
       severity: "info",
       content: buildDeviceLinkedContent({
         nodeName: claim.node_name ?? "new machine",
@@ -59,6 +68,7 @@ export async function POST(request: Request) {
         agentVersion: claim.agent_version ?? null,
         linkedAt: claim.linked_at ?? new Date().toISOString(),
       }),
+      },
     }),
     idempotencyKey: `device-linked:${body.nodeId}`,
   });

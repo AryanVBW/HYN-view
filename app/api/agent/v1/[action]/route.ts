@@ -7,7 +7,7 @@ import {
   MAX_AGENT_BODY_BYTES,
   observedPublicIp,
 } from "@/lib/agent-api";
-import { buildSystemSummaryContent, renderHynEmailShell } from "@/lib/cloud-email";
+import { buildSystemSummaryContent, renderManagedHynEmail } from "@/lib/cloud-email";
 import { sendManagedEmail as sendResendEmail } from "@/lib/delivery-send";
 import { dispatchScheduledEmails } from "@/lib/scheduled-email";
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from "@/lib/supabase/config";
@@ -240,16 +240,25 @@ export async function POST(
         };
         if (email?.status === "send" && email.recipient) {
           const subject = `Your first HYN system report · ${email.node_name ?? "linked machine"}`;
+          // Apply the administrator-editable wrapper.
+          const { data: firstReportTemplate } = await supabase
+            .from("notification_templates")
+            .select("html_template")
+            .eq("template_key", "first_report")
+            .maybeSingle();
           const delivery = await sendResendEmail({
             delivery: { kind: "first_report", nodeId: email.node_id },
             apiKey: process.env.RESEND_API_KEY ?? "",
             from: process.env.EMAIL_FROM ?? "HYN-view <reports@hyn-view.info>",
             to: email.recipient,
             subject,
-            html: renderHynEmailShell({
-              subject,
+            html: renderManagedHynEmail({
+              template: firstReportTemplate?.html_template ?? "{{content}}",
               preview: "Your first complete HYN-view system report is ready.",
+              values: {
+              subject,
               hostname: email.hostname ?? email.node_name ?? "linked machine",
+              version: email.agent_version ?? "unknown",
               severity: "info",
               content: buildSystemSummaryContent({
                 nodeName: email.node_name ?? email.hostname ?? "linked machine",
@@ -258,6 +267,7 @@ export async function POST(
                 lastSeenAt: email.last_seen_at ?? null,
                 payload: email.payload ?? null,
               }),
+              },
             }),
             idempotencyKey: `first-system:${email.node_id ?? nodeToken.slice(0, 12)}`,
           });

@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import { buildDailyDigestContent, escapeHtml, renderManagedHynEmail } from "./cloud-email.ts";
+import { buildDailyDigestContent, emailPalette, escapeHtml, renderManagedHynEmail } from "./cloud-email.ts";
 import { deliveryControlsEnabled, sendManagedEmail } from "./delivery-send.ts";
 
 type DigestNode = {
@@ -10,8 +10,8 @@ type DigestNode = {
   latency_average: number | null; uptime: number | null;
 };
 export function renderUserDigest(name: string, date: string, nodes: DigestNode[]) {
-  return `<p style="color:#dcecf2">Daily health summary for ${escapeHtml(name)} on ${escapeHtml(date)}. ${nodes.length} permitted server${nodes.length === 1 ? "" : "s"}.</p>`
-    + nodes.map(node => `<section style="margin:24px 0;border-top:1px solid #17333d;padding-top:16px"><p style="color:#78929c">${escapeHtml(node.hostname ?? node.name)} / ${escapeHtml(node.status)}${node.telemetry_mode === "local" ? " / Local-only telemetry: cloud history is unavailable" : ""}</p>`
+  return `<p style="color:${emailPalette.muted}">Daily health summary for ${escapeHtml(name)} on ${escapeHtml(date)}. ${nodes.length} permitted server${nodes.length === 1 ? "" : "s"}.</p>`
+    + nodes.map(node => `<section style="margin:24px 0;border-top:1px solid ${emailPalette.border};padding-top:16px"><p style="color:${emailPalette.muted}">${escapeHtml(node.hostname ?? node.name)} / ${escapeHtml(node.status)}${node.telemetry_mode === "local" ? " / Local-only telemetry: cloud history is unavailable" : ""}</p>`
       + buildDailyDigestContent({ nodeName: node.name, sampleCount: Number(node.sample_count),
         cpuAverage: node.cpu_average, cpuPeak: node.cpu_peak, memoryAverage: node.memory_average,
         temperaturePeak: node.temperature_peak, downloadAverageBps: node.download_average,

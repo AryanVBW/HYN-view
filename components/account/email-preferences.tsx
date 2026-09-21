@@ -31,9 +31,9 @@ function defaults(email: string): EditablePreference {
     recipient: email,
     timezone,
     incident_enabled: false,
-    daily_enabled: true,
+    daily_enabled: false,
     daily_at: "08:00",
-    system_enabled: true,
+    system_enabled: false,
     system_at: "09:00",
   };
 }

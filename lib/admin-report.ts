@@ -1,4 +1,4 @@
-import { buildSystemSummaryContent, escapeHtml } from "./cloud-email.ts";
+import { buildSystemSummaryContent, emailPalette, escapeHtml } from "./cloud-email.ts";
 import type { Metric, Speedtest } from "./types.ts";
 
 export type AdminReportMachine = {
@@ -43,7 +43,7 @@ function value(value: number | null | undefined, suffix = "") {
 }
 
 function row(label: string, content: string) {
-  return `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="width:100%;border-bottom:1px solid #17333d"><tr><td style="padding:10px 0;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#78929c">${escapeHtml(label)}</td><td align="right" style="padding:10px 0;font:700 13px ui-monospace,SFMono-Regular,Menlo,monospace;color:#f4fbfd">${escapeHtml(content)}</td></tr></table>`;
+  return `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="width:100%;border-bottom:1px solid ${emailPalette.border}"><tr><td style="padding:10px 0;font:13px -apple-system,Segoe UI,Arial,sans-serif;color:${emailPalette.muted}">${escapeHtml(label)}</td><td align="right" style="padding:10px 0;font:600 13px -apple-system,Segoe UI,Arial,sans-serif;color:${emailPalette.heading}">${escapeHtml(content)}</td></tr></table>`;
 }
 
 function completePayload(machine: AdminReportMachine): Record<string, unknown> | null {
@@ -88,20 +88,20 @@ export function buildAdminClientReport(args: {
   machines: AdminReportMachine[];
 }) {
   const subject = `Current HYN fleet report · ${args.clientLabel}`;
-  const heading = `<section><h2 style="margin:0 0 8px;color:#f4fbfd">Current fleet status</h2><p style="margin:0 0 20px;color:#78929c">${args.machines.length} active machine${args.machines.length === 1 ? "" : "s"} · generated ${escapeHtml(args.generatedAt)}</p></section>`;
+  const heading = `<section><h2 style="margin:0 0 8px;color:${emailPalette.heading}">Current fleet status</h2><p style="margin:0 0 20px;color:${emailPalette.muted}">${args.machines.length} active machine${args.machines.length === 1 ? "" : "s"} · generated ${escapeHtml(args.generatedAt)}</p></section>`;
   if (args.machines.length === 0) {
     return {
       subject,
       preview: "No active HYN machines were available for this report.",
-      content: `${heading}<p style="color:#78929c">No active linked machines were available when this report was generated.</p>`,
+      content: `${heading}<p style="color:${emailPalette.muted}">No active linked machines were available when this report was generated.</p>`,
     };
   }
 
   const machines = args.machines.map((machine) => {
     const alerts = machine.alerts.length === 0
-      ? `<p style="margin:12px 0;color:#20d9e8">No open alerts.</p>`
+      ? `<p style="margin:12px 0;color:${emailPalette.info}">No open alerts.</p>`
       : `<ul style="margin:12px 0;padding-left:20px;color:#ff8b8b">${machine.alerts.map((alert) => `<li><strong>${escapeHtml(alert.severity.toUpperCase())}</strong> · ${escapeHtml(alert.message)}</li>`).join("")}</ul>`;
-    return `<section style="margin-top:28px;border-top:1px solid #28505d;padding-top:22px"><h2 style="margin:0 0 12px;color:#f4fbfd">${escapeHtml(machine.name)}</h2>${row("Heartbeat", machine.lastHeartbeatAt ?? "Unavailable")}${row("Telemetry", machine.lastSeenAt ?? "Unavailable")}${row("Open alerts", String(machine.alerts.length))}${row("Disk usage", value(machine.metric?.disk_pct, "%"))}${alerts}${buildSystemSummaryContent({
+    return `<section style="margin-top:28px;border-top:1px solid ${emailPalette.border};padding-top:22px"><h2 style="margin:0 0 12px;color:${emailPalette.heading}">${escapeHtml(machine.name)}</h2>${row("Heartbeat", machine.lastHeartbeatAt ?? "Unavailable")}${row("Telemetry", machine.lastSeenAt ?? "Unavailable")}${row("Open alerts", String(machine.alerts.length))}${row("Disk usage", value(machine.metric?.disk_pct, "%"))}${alerts}${buildSystemSummaryContent({
       nodeName: machine.name,
       os: machine.os,
       agentVersion: machine.agentVersion,

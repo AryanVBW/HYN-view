@@ -32,7 +32,7 @@ import { AgentUpdateControl } from "@/components/dashboard/agent-update-control"
 import { HeartbeatIndicator } from "@/components/dashboard/heartbeat-indicator";
 import { DemoDataButton } from "@/components/dashboard/demo-data-button";
 import { LiveRefresh } from "@/components/live-refresh";
-import { AwaitingFirstPushState, NoNodesState } from "@/components/dashboard/empty-states";
+import { AwaitingFirstPushState, DashboardAccessUnavailable, NoNodesState } from "@/components/dashboard/empty-states";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { loadNodeTelemetry, loadPortalState } from "@/lib/portal-data";
 import {
@@ -90,20 +90,28 @@ export default async function DashboardPage({
 
   const { node: requestedNode, owner: requestedOwner, section: requestedSection, relayer: requestedRelayer, relayScope } = await searchParams;
   if (state.profile?.status === "suspended") {
-    return <Shell email={state.email ?? undefined}><div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">Dashboard access unavailable</h1><p className="mt-4 font-mono text-sm leading-7">Your account is suspended. Contact a Super admin.</p></div></Shell>;
+    return <Shell email={state.email ?? undefined}><DashboardAccessUnavailable suspended transient={false} /></Shell>;
   }
   if (!state.profile || state.profile.status !== "active") {
-    const detail = state.error
-      ? state.error
-      : "Your account could not be loaded from the live database. Refresh this page.";
-    return <Shell email={state.email ?? undefined}><div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">Dashboard access unavailable</h1><p className="mt-4 font-mono text-sm leading-7">{detail}</p></div></Shell>;
+    // No profile and no error is the just-signed-up case: the auth trigger's row
+    // has not become visible to this request yet, which clears by itself. A real
+    // store error is a different situation and is shown verbatim.
+    return <Shell email={state.email ?? undefined}><DashboardAccessUnavailable suspended={false} transient={!state.error && !state.profile} detail={state.error ?? null} /></Shell>;
   }
   const accounts = state.accounts;
   const access = permissions(state.profile.role);
 
+  // A Maintainer's default view is the combined fleet monitor -- that is the
+  // point of the role. An explicit ?node= / ?owner= / ?section= link still opens
+  // the per-server dashboard, so the fleet monitor's own links into a single
+  // machine keep working rather than bouncing back here.
+  if (access.isMaintainer && !requestedNode && !requestedOwner && !requestedSection) {
+    redirect("/maintainer");
+  }
+
   const nodeRows = state.nodes;
 
-  const selection = selectDashboard({selfId: state.userId, canAdmin: access.canAdmin, accounts,
+  const selection = selectDashboard({selfId: state.userId, canViewFleet: access.canViewFleet, accounts,
     nodes: nodeRows, requestedOwner, requestedNode});
   if (!selection) return <Shell email={state.email ?? undefined}><div className="terminal-panel p-8"><h1 className="font-sentient text-2xl">This server or dashboard is unavailable</h1><p className="mt-3 text-sm text-muted-foreground">It may have been unlinked or access may have changed.</p><Link href="/dashboard" className="mt-4 inline-block text-primary underline">Return to your dashboards</Link></div></Shell>;
   const {owner, nodes, node} = selection;

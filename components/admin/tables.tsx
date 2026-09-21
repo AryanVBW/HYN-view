@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Loader2, Pause, Play, ShieldOff, Unplug } from "lucide-react";
 import { DeleteNodeButton } from "@/components/admin/delete-node-button";
+import { NodeSendControls } from "@/components/maintainer/node-send-controls";
 import { portalRpc } from "@/lib/data-browser";
 import {
   compareVersions,
@@ -169,7 +170,7 @@ export function NodeTable({
       ) : null}
 
       <div className="mt-6 overflow-x-auto rounded-lg border border-border/60">
-        <table className="w-full min-w-[1040px] border-collapse font-mono text-xs">
+        <table className="w-full min-w-[1240px] border-collapse font-mono text-xs">
           <thead>
             <tr className="border-b border-border bg-card/60 text-left uppercase text-muted-foreground">
               <th className="py-3 pr-4 pl-4 font-normal">machine</th>
@@ -181,6 +182,7 @@ export function NodeTable({
               <th className="py-3 pr-4 font-normal">disk</th>
               <th className="py-3 pr-4 font-normal">alerts</th>
               <th className="py-3 pr-4 font-normal">notifs 24h</th>
+              <th className="py-3 pr-4 font-normal">send</th>
               <th className="py-3 pr-4 font-normal">control</th>
             </tr>
           </thead>
@@ -288,6 +290,11 @@ export function NodeTable({
                         {node.notifications_failed_24h} failed
                       </span>
                     ) : null}
+                  </td>
+                  <td className="py-3 pr-4">
+                    {/* Scheduled email is off fleet-wide (lib/email-automation.ts),
+                        so this is how a report or notice actually goes out now. */}
+                    <NodeSendControls nodeId={node.id} nodeName={node.name} />
                   </td>
                   <td className="py-3 pr-4">
                     <div className="flex flex-wrap items-center gap-1.5">
@@ -399,7 +406,7 @@ export function ClientTable({
           ? "Manage account roles, dashboard access, and account status."
           : "Browse every account or promote a Viewer or Monitor to Admin."}
       </p>
-      <div className="mt-5 grid gap-3 sm:grid-cols-4">
+      <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         {portalRoles.map((role) => (
           <button
             key={role}
