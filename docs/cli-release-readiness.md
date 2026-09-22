@@ -1,4 +1,48 @@
-# HYN CLI 1.10.0 release verification
+# HYN CLI 2.0.0 release verification
+
+## September 22 release bump
+
+CLI **2.0.0** is the chosen next release. npm dist-tag `latest` was rechecked on
+September 22 and is **1.10.0**, published 2026-09-12; the registry holds
+1.0.0 through 1.10.0 with no 1.11.0 or 1.12.0, so the `hyn-view-1.12.0.tgz`
+artifact in the working tree was never published and the checkout it came from
+was rolled back to 1.10.0. A major bump rather than 1.11.0 records the cutover
+from Cloudflare D1 to self-hosted Supabase as the storage and portal backend.
+
+Both version sources were moved together — `package.json` and `HYN_VERSION` in
+`lib/core.sh` — and `test/selfcheck.sh` now fails if they ever disagree. Nothing
+enforced that before, and they are read by different consumers: npm publishes the
+first, while `hyn --version`, the `agent_version` the portal stores, the
+installed-versus-published comparison and `agent_disk_version_v` all read the
+second. A one-sided bump is silent in both directions — an upgrade offered
+forever because it is already installed, or a machine reported current when it is
+a release behind.
+
+The same suite also now pins the comparator behaviour a major bump depends on:
+`ver_gt 2.0.0 1.10.0` must be true and the reverse false. Length-then-lexical
+segment comparison gets this right, but it is the one case where a naive
+comparator strands every installed 1.x agent on a version it will never leave.
+
+Verified locally on macOS with bash 5.3, `HYN_NO_POSTINSTALL` not required:
+
+| Gate | Result |
+| --- | --- |
+| `npm test` (nine suites) | pass — 1,013 selfcheck, 150 cloud integration, 83 updater, 119 local storage, 38 unattended, 7 bandwidth, 27 release, 29 report, 46 platform |
+| `bash bin/hyn --version` | `hyn-view 2.0.0` |
+| `npm pack --dry-run` | `hyn-view-2.0.0.tgz`, 45 files, 318.5 kB packed / 987.2 kB unpacked, no stray tarball included |
+| Portal `pnpm test`, `pnpm run test:ui`, `npx tsc --noEmit` | pass — 32 route/lib, 40 UI, clean typecheck |
+
+Not verified, and required before this is called published: no Ubuntu host was
+available, so there is no new-install, boot, resident-agent or paired round-trip
+observation for 2.0.0; `npm publish` has not been run; the portal production
+build and deployment for the accompanying dashboard fix have not been run; and
+`pnpm run lint` still reports one pre-existing error in the untracked
+`app/maintainer/page.tsx` (`Date.now()` during render) plus one image warning.
+
+The portal change shipped alongside this bump makes the dashboard's outage banner
+live rather than server-rendered once, so it can no longer contradict the
+heartbeat pill beside it, and a failed freshness poll now reads as "cannot
+confirm" instead of as a silent machine.
 
 ## September 12 monitoring update
 

@@ -3292,6 +3292,35 @@ falsy 'the agent does not restart itself from inside' '[[ -s $_heal_log ]]'
 rm -f "$_astamp"
 
 # ---------------------------------------------------------------------------
+# release identity
+#
+# The version exists twice: npm publishes package.json, and everything on the
+# box reads HYN_VERSION from lib/core.sh -- `hyn --version`, the payload the
+# portal stores as agent_version, the "installed vs published" comparison, and
+# agent_disk_version_v, which exits the resident loop when the two differ.
+#
+# Nothing enforced that the two agree. Bumping one and forgetting the other
+# publishes a package whose contents disagree with its own registry entry: the
+# update check then compares the new package against a stale HYN_VERSION and
+# either offers an upgrade that is already installed, forever, or reports a
+# machine as current when it is a release behind. Both fail silently, which is
+# why this is a test rather than a note in a release checklist.
+printf '\nrelease identity\n'
+_pkg_version=''
+while IFS= read -r _line; do
+  [[ $_line == *'"version"'* ]] || continue
+  _pkg_version=${_line#*:}
+  _pkg_version=${_pkg_version//[[:space:]\",]/}
+  break
+done <"$ROOT/package.json"
+eq 'package.json and lib/core.sh publish one version' "$HYN_VERSION" "$_pkg_version"
+truthy 'the shipped version is a version' "ver_valid '$HYN_VERSION'"
+# A major bump is the case where a comparator bug strands every installed agent:
+# "2.0.0" must beat "1.10.0" even though 10 > 0 segment by segment.
+truthy 'a major bump reads as newer than a two-digit minor' "ver_gt '2.0.0' '1.10.0'"
+falsy  'and the reverse is not newer'                      "ver_gt '1.10.0' '2.0.0'"
+
+# ---------------------------------------------------------------------------
 printf '\n'
 if ((FAIL == 0)); then
   printf '%d checks passed\n' "$PASS"

@@ -1,6 +1,6 @@
 # hyn-view
 
-**CLI 1.10 uploads monitoring every minute and keeps a continuous local backup.**
+**CLI 2.0 uploads monitoring every minute and keeps a continuous local backup.**
 See the [release verification and Ubuntu acceptance notes](docs/cli-release-readiness.md)
 for what has been tested and what still needs verification before publication.
 The website runs on Heroku using
