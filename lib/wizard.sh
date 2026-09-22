@@ -333,7 +333,7 @@ onboard_run() {
   _ob_step 8 'Outage detection' 'Nothing to answer here either.'
   printf '  %sIf this machine goes offline, hyn goes with it and cannot email you.%s\n' "${C[warn]}" "${C[reset]}"
   _w_note 'So the check that matters is made from outside the machine. Once this box'
-  _w_note 'is paired, the portal watches for its one-minute heartbeat and mails the'
+  _w_note 'is paired, the portal watches for its five-minute heartbeat and mails the'
   _w_note 'owner when three are missed, then again when they resume.'
   _w_note 'That used to be a ping URL for a third-party dead-man service, entered'
   _w_note 'on every machine. It is not any more: one less account to hold, and one'

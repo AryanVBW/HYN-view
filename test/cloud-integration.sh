@@ -437,8 +437,7 @@ contains 'the beat outcome is recorded locally' $'\tok\t' "$hb_line"
 eq 'the beat learns the node status' 'active' "$CLOUD_HEARTBEAT_STATUS"
 hb_req=$(grep 'hyn_heartbeat' "$REQLOG" | tail -1)
 # The whole point of a separate RPC: it must NOT be the settings pull. A beat
-# that fetched the config would be 2.5x the portal work of the check-in it sits
-# beside, every 24 seconds, on every node.
+# that fetched the config would do unnecessary work on every five-minute beat.
 contains 'the beat calls its own RPC'  '/hyn_heartbeat' "$hb_req"
 contains 'the beat carries the version' 'p_agent_version' "$hb_req"
 missing  'the beat asks for no config'  'alert_template_b64' "$hb_req"

@@ -170,12 +170,12 @@ psql -f "$HERE/migrations/20260909120000_portal_roles.sql" >"$WORK/roles.log" 2>
 for migration in "$HERE"/migrations/*.sql; do
   [[ ${migration##*/} > 20260909120000_portal_roles.sql ]] || continue
   if [[ ${migration##*/} == 20260912190000_rolling_cloud_telemetry.sql ]]; then
-    psql -c "insert into public.nodes(owner,name,config) values ('90000000-0000-4000-8000-000000000001','retention-upgrade-default','{\"cloud_push_min\":\"10\"}'),('90000000-0000-4000-8000-000000000001','retention-upgrade-custom','{\"cloud_push_min\":\"5\"}')" || exit 1
+    psql -c "insert into public.nodes(owner,name,config) values ('90000000-0000-4000-8000-000000000001','retention-upgrade-default','{\"cloud_push_min\":\"10\"}'),('90000000-0000-4000-8000-000000000001','retention-upgrade-custom','{\"cloud_push_min\":\"5\",\"cloud_storage\":\"local\"}')" || exit 1
   fi
   psql -f "$migration" >"$WORK/upgrade.log" 2>&1 || { cat "$WORK/upgrade.log"; exit 1; }
 done
-psql -c "do \$\$ begin if (select config->>'cloud_storage' from public.nodes where name='retention-upgrade-default')<>'cloud' or (select config->>'cloud_push_min' from public.nodes where name='retention-upgrade-default')<>'1' or (select config->>'cloud_push_min' from public.nodes where name='retention-upgrade-custom')<>'5' then raise exception 'fleet cloud defaults did not migrate'; end if; end \$\$; update public.nodes set config=config || '{\"cloud_storage\":\"local\"}' where name='retention-upgrade-custom'" || exit 1
-printf 'PASS  existing fleet receives cloud defaults while custom intervals survive\n'
+psql -c "do \$\$ begin if (select config->>'cloud_storage' from public.nodes where name='retention-upgrade-default')<>'cloud' or (select config->>'cloud_push_min' from public.nodes where name='retention-upgrade-default')<>'5' or (select config->>'cloud_checkin_min' from public.nodes where name='retention-upgrade-default')<>'5' or (select config->>'heartbeat_sec' from public.nodes where name='retention-upgrade-custom')<>'300' or (select config->>'record_interval_min' from public.nodes where name='retention-upgrade-custom')<>'1' or (select config->>'cloud_storage' from public.nodes where name='retention-upgrade-custom')<>'local' then raise exception 'fleet cadence defaults did not migrate'; end if; end \$\$" || exit 1
+printf 'PASS  existing fleet receives managed cadence while explicit local-only storage survives\n'
 psql -f "$HERE/owner-linking-test.sql" >"$WORK/owner-test.log" 2>&1 || { cat "$WORK/owner-test.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/owner-test.log"
 psql -f "$HERE/shared-observability-test.sql" >"$WORK/upgrade-test.log" 2>&1 || { cat "$WORK/upgrade-test.log"; exit 1; }

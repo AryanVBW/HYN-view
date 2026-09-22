@@ -333,11 +333,11 @@ local_logs() {
 }
 
 cloud_usage() {
-  local nodes=${1:-1} beat=${CFG[heartbeat_sec]:-24} checkin=${CFG[cloud_checkin_min]:-1} push=${CFG[cloud_push_min]:-1} monthly snapshots=0
+  local nodes=${1:-1} beat=${CFG[heartbeat_sec]:-300} checkin=${CFG[cloud_checkin_min]:-5} push=${CFG[cloud_push_min]:-5} monthly snapshots=0
   [[ $nodes =~ ^[1-9][0-9]{0,4}$ ]] || { warn 'usage: hyn cloud usage [1..99999 nodes]'; return 1; }
-  [[ $beat =~ ^[1-9][0-9]{0,3}$ ]] && ((beat >= 5 && beat <= 3600)) || beat=24
-  [[ $checkin =~ ^[1-9][0-9]{0,2}$ ]] && ((checkin <= 60)) || checkin=1
-  [[ $push =~ ^[1-9][0-9]{0,3}$ ]] && ((push <= 1440)) || push=1
+  [[ $beat =~ ^[1-9][0-9]{0,3}$ ]] && ((beat >= 5 && beat <= 3600)) || beat=300
+  [[ $checkin =~ ^[1-9][0-9]{0,2}$ ]] && ((checkin <= 60)) || checkin=5
+  [[ $push =~ ^[1-9][0-9]{0,3}$ ]] && ((push <= 1440)) || push=5
   if [[ ${CFG[cloud_storage]:-cloud} == cloud ]]; then
     ((checkin <= push)) || checkin=$push
     snapshots=$((43200 / push))

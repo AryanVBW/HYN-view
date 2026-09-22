@@ -1072,6 +1072,12 @@ begin
       when e.key = 'cloud_push_min' then
         if v !~ '^[1-9][0-9]{0,3}$' then return false; end if;
         if v::integer > 1440 then return false; end if;
+      when e.key = 'cloud_checkin_min' then
+        if v !~ '^[1-9][0-9]{0,2}$' then return false; end if;
+        if v::integer > 60 then return false; end if;
+      when e.key = 'heartbeat_sec' then
+        if v !~ '^[1-9][0-9]{0,3}$' then return false; end if;
+        if v::integer < 5 or v::integer > 3600 then return false; end if;
       when e.key = 'alert_min_severity' then
         if v not in ('crit', 'warn', 'info') then return false; end if;
       when e.key = 'auto_update' then
@@ -2561,7 +2567,7 @@ begin
       where n.is_demo = false and n.revoked = false and n.status = 'active'
         and case
           when coalesce(n.agent_version, '') ~ '^(1\.([7-9]|[1-9][0-9]+)\.|([2-9]|[1-9][0-9]+)\.)'
-            then n.last_heartbeat_at is null or n.last_heartbeat_at <= now() - interval '3 minutes'
+            then n.last_heartbeat_at is null or n.last_heartbeat_at <= now() - interval '15 minutes'
           else n.last_seen_at is null or n.last_seen_at < now() - make_interval(
             mins => greatest(15, 3 * case
               when n.config->>'cloud_push_min' ~ '^[1-9][0-9]{0,3}$'
@@ -3760,6 +3766,12 @@ begin
       when e.key = 'cloud_push_min' then
         if v !~ '^[1-9][0-9]{0,3}$' then return false; end if;
         if v::integer > 1440 then return false; end if;
+      when e.key = 'cloud_checkin_min' then
+        if v !~ '^[1-9][0-9]{0,2}$' then return false; end if;
+        if v::integer > 60 then return false; end if;
+      when e.key = 'heartbeat_sec' then
+        if v !~ '^[1-9][0-9]{0,3}$' then return false; end if;
+        if v::integer < 5 or v::integer > 3600 then return false; end if;
       when e.key = 'alert_min_severity' then
         if v not in ('crit', 'warn', 'info') then return false; end if;
       when e.key = 'auto_update' then
@@ -4015,7 +4027,7 @@ begin
       where n.is_demo = false and n.revoked = false and n.status = 'active'
         and case
           when coalesce(n.agent_version, '') ~ '^(1\.([7-9]|[1-9][0-9]+)\.|([2-9]|[1-9][0-9]+)\.)'
-            then n.last_heartbeat_at is null or n.last_heartbeat_at <= now() - interval '3 minutes'
+            then n.last_heartbeat_at is null or n.last_heartbeat_at <= now() - interval '15 minutes'
           else n.last_seen_at is null or n.last_seen_at < now() - make_interval(
             mins => greatest(15, 3 * case
               when n.config->>'cloud_push_min' ~ '^[1-9][0-9]{0,3}$'
@@ -4995,7 +5007,7 @@ begin
       case when coalesce(n.agent_version,'') ~ '^1\.[0-6]\.' or n.agent_version is null
         then greatest(900,case when n.config->>'cloud_push_min' ~ '^[1-9][0-9]{0,3}$'
           then least((n.config->>'cloud_push_min')::integer,1440)*180 else 1800 end)
-        else 180 end)
+        else 900 end)
   )
   select coalesce(json_agg(e order by ts desc,id),'[]'::json) into result
     from (select * from events order by ts desc,id limit p_limit) e;
@@ -5229,7 +5241,7 @@ begin
       case when coalesce(n.agent_version,'') ~ '^1\.[0-6]\.' or n.agent_version is null
         then greatest(900,case when n.config->>'cloud_push_min' ~ '^[1-9][0-9]{0,3}$'
           then least((n.config->>'cloud_push_min')::integer,1440)*180 else 1800 end)
-        else 180 end)
+        else 900 end)
   )
   select coalesce(json_agg(e order by ts desc,id),'[]'::json) into result
     from (select * from events order by ts desc,id limit p_limit) e;
@@ -6294,6 +6306,12 @@ begin
       when e.key = 'cloud_push_min' then
         if v !~ '^[1-9][0-9]{0,3}$' then return false; end if;
         if v::integer > 1440 then return false; end if;
+      when e.key = 'cloud_checkin_min' then
+        if v !~ '^[1-9][0-9]{0,2}$' then return false; end if;
+        if v::integer > 60 then return false; end if;
+      when e.key = 'heartbeat_sec' then
+        if v !~ '^[1-9][0-9]{0,3}$' then return false; end if;
+        if v::integer < 5 or v::integer > 3600 then return false; end if;
       when e.key = 'alert_min_severity' then
         if v not in ('crit', 'warn', 'info') then return false; end if;
       when e.key = 'auto_update' then
@@ -6310,13 +6328,17 @@ end;
 
 $$;
 alter table public.nodes add column if not exists telemetry_policy_version integer not null default 0;
+-- Schema reapplication is an upgrade path as well as fresh-install setup.
+-- Apply cadence v2 to both the original policy and v1, while leaving an
+-- explicit local-only storage choice untouched.
 update public.nodes set
- config = config || jsonb_build_object('cloud_storage','cloud',
-   'cloud_push_min',case when coalesce(config->>'cloud_push_min','10')='10' then '1' else config->>'cloud_push_min' end),
- telemetry_policy_version=1
-where telemetry_policy_version=0 and not is_demo;
-alter table public.nodes alter column telemetry_policy_version set default 1;
-alter table public.nodes alter column config set default '{"auto_update":"install","cloud_storage":"cloud","cloud_push_min":"1"}'::jsonb;
+ config = config || jsonb_build_object(
+   'cloud_storage',coalesce(config->>'cloud_storage','cloud'),
+   'cloud_push_min','5','cloud_checkin_min','5','heartbeat_sec','300','record_interval_min','1'),
+ telemetry_policy_version=2
+where telemetry_policy_version<2 and not is_demo;
+alter table public.nodes alter column telemetry_policy_version set default 2;
+alter table public.nodes alter column config set default '{"auto_update":"install","cloud_storage":"cloud","cloud_push_min":"5","cloud_checkin_min":"5","heartbeat_sec":"300","record_interval_min":"1"}'::jsonb;
 
 -- Fetch at most one scalar reading per five-minute bucket; the page fetches the
 -- latest full snapshot separately. RLS is evaluated with the requesting user.

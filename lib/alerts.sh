@@ -763,7 +763,7 @@ alerts_run() {
   # No local dead man's switch to ping any more. Nothing running on this box can
   # report that this box is off, so the check that matters is the one made from
   # outside: the portal starts a watchdog per node and mails the owner when three
-  # one-minute heartbeats are missed, then again when they resume. That is the
+  # expected heartbeats are missed, then again when they resume. That is the
   # same guarantee the healthchecks.io ping URL used to buy, without a second
   # third-party account configured per machine.
   ((quiet)) && return 0

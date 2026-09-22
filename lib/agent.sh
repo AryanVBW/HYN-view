@@ -41,7 +41,7 @@ AGENT_SLEEP_PID=0
 AGENT_BEATS=0
 AGENT_BEAT_OK=0
 AGENT_BEAT_FAIL=0
-AGENT_INTERVAL=24
+AGENT_INTERVAL=300
 AGENT_RETRY_AT=0
 # Set only by `hyn agent --interval=N`, and re-applied after every config reload
 # so a debugging override is not thrown away by the first maintenance pass.
@@ -81,8 +81,8 @@ agent_stamp_stale() {
 # heartbeat_sec, clamped. A 1-second beat would be a denial of service against
 # our own API and a 0 would spin; anything past an hour is not a heartbeat.
 agent_interval_v() {
-  AGENT_INTERVAL=${CFG[heartbeat_sec]:-24}
-  [[ $AGENT_INTERVAL =~ ^[1-9][0-9]{0,4}$ ]] || AGENT_INTERVAL=24
+  AGENT_INTERVAL=${CFG[heartbeat_sec]:-300}
+  [[ $AGENT_INTERVAL =~ ^[1-9][0-9]{0,4}$ ]] || AGENT_INTERVAL=300
   ((AGENT_INTERVAL < 5)) && AGENT_INTERVAL=5
   ((AGENT_INTERVAL > 3600)) && AGENT_INTERVAL=3600
   return 0
@@ -159,7 +159,7 @@ agent_beat() {
   delay=$((AGENT_INTERVAL * (1 << exponent)))
   ((delay > 900)) && delay=900
   AGENT_RETRY_AT=$((${EPOCHSECONDS:-0} + delay))
-  # Once, on the transition. Repeating an unreachable endpoint every 24 seconds
+  # Once, on the transition. Repeating an unreachable endpoint on every beat
   # for a week is how a journal becomes useless.
   ((AGENT_BEAT_FAIL == 1)) && warn "heartbeat failed: ${CLOUD_LAST_ERR:-unknown error}"
   return 1
@@ -204,7 +204,7 @@ agent_run() {
       --interval=*) AGENT_INTERVAL_ARG=${a#*=}; CFG[heartbeat_sec]=$AGENT_INTERVAL_ARG ;;
       -h | --help)
         printf 'usage: hyn agent [--once] [--interval=SECONDS]\n'
-        printf '  Resident loop: beats every heartbeat_sec (default 60), keeps the\n'
+        printf '  Resident loop: beats every heartbeat_sec (default 300), keeps the\n'
         printf '  package updated and re-arms drifted timers. Installed and\n'
         printf '  supervised as hyn-agent.service; run by hand only to debug.\n'
         return 0 ;;
@@ -281,7 +281,7 @@ agent_run() {
     fi
 
     # Sleep the remainder of the interval rather than a flat interval, so a beat
-    # that took 8 seconds does not turn a 24s heartbeat into 32s. Drift there is
+    # that took 8 seconds does not turn a 300s heartbeat into 308s. Drift there is
     # cumulative and it is what eventually trips the portal's quiet threshold on
     # a machine that is perfectly healthy.
     spent=$((${EPOCHSECONDS:-0} - beat_at))
