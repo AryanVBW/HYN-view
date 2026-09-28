@@ -351,11 +351,8 @@ cloud_monitoring_logs_v() {
   _cloud_monitoring_add "$ts" crit service_failed "${HW_FAILED:-0}"
   _cloud_monitoring_add "$ts" warn service_warning "${HW_JOURNAL_WARN:-0}"
   _cloud_monitoring_add "$ts" crit service_error "${HW_JOURNAL_ERR:-0}"
-  local active=0 i
-  for ((i = 0; i < ${#AL_ID[@]}; i++)); do
-    [[ ${AL_RESOLVED[i]:-0} == 1 ]] || active=$((active + 1))
-  done
-  _cloud_monitoring_add "$ts" warn alerts_active "$active"
+  # AL_ID holds exactly the rules firing now.
+  _cloud_monitoring_add "$ts" warn alerts_active "${#AL_ID[@]}"
   CLOUD_MONITORING_LOGS+=']'
 }
 
@@ -611,18 +608,41 @@ cloud_payload_v() {
   # monitoring without copying arbitrary log content off the server.
   p+='}'
 
-  # Currently firing alerts, so the portal's event log is the same truth the
-  # email alerts are built from rather than a second, drifting judgement.
+  # Every rule firing now, plus the ones the alert timer last recorded as firing
+  # that are clear now, so the portal's event log is the same truth the email
+  # alerts are built from rather than a second, drifting judgement. The list of
+  # firing rules is complete: a rule missing from it is not firing.
+  #
+  # `since` is the incident's start as the alert timer persisted it (epoch
+  # seconds). It is stable across pushes, which is what lets the portal keep one
+  # row per incident instead of one per upload. A rule the timer has not seen
+  # firing yet has no since; the portal opens the incident at the reading time.
   p+=', "alerts": ['
   first=1
-  local i
+  local i id since
   for ((i = 0; i < ${#AL_ID[@]}; i++)); do
     ((first)) || p+=', '
     first=0
-    p+="{\"rule\": \"$(_jstr "${AL_ID[i]}")\""
+    id=${AL_ID[i]}
+    p+="{\"rule\": \"$(_jstr "$id")\""
     p+=", \"severity\": \"$(_jstr "${AL_SEV[i]}")\""
     p+=", \"message\": \"$(_jstr "${AL_MSG[i]}")\""
-    p+=", \"resolved\": $([[ ${AL_RESOLVED[i]:-0} == 1 ]] && printf true || printf false)}"
+    p+=', "resolved": false'
+    since=${_AL_PREV_SINCE[$id]:-}
+    [[ ${_AL_PREV_STATE[$id]:-} == firing && $since =~ ^[1-9][0-9]{0,11}$ ]] && p+=", \"since\": $since"
+    p+='}'
+  done
+  for ((i = 0; i < ${#AL_CLEARED_ID[@]}; i++)); do
+    ((first)) || p+=', '
+    first=0
+    id=${AL_CLEARED_ID[i]}
+    p+="{\"rule\": \"$(_jstr "$id")\""
+    p+=", \"severity\": \"$(_jstr "${AL_CLEARED_SEV[i]}")\""
+    p+=", \"message\": \"$(_jstr "${AL_CLEARED_MSG[i]}")\""
+    p+=', "resolved": true'
+    since=${_AL_PREV_SINCE[$id]:-}
+    [[ $since =~ ^[1-9][0-9]{0,11}$ ]] && p+=", \"since\": $since"
+    p+='}'
   done
   p+=']}'
 
@@ -812,6 +832,10 @@ cloud_web_notify() {
 # dashboard sync button from returning a reduced snapshot.
 cloud_collect_full() {
   alerts_collect
+  # Read-only: the alert timer owns this state (it saves it after notifying).
+  # Loading it here gives the upload the same hysteresis and incident start
+  # times; without it every firing rule looked new on every push.
+  alerts_state_load
   alerts_evaluate
   net_link "${NET_WAN:-}" 2>/dev/null || true
   net_identity 1 2>/dev/null || true

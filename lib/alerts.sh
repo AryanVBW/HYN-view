@@ -21,6 +21,10 @@
 
 declare -a AL_ID=() AL_SEV=() AL_MSG=() AL_NEW=() AL_VAL=()
 declare -a AL_RESOLVED=()
+# Rules the persisted state had firing that are clear now, whether or not anyone
+# was notified -- AL_RESOLVED is only the notified subset, for the email digest.
+# The cloud payload reports these as resolved so the portal can close incidents.
+declare -a AL_CLEARED_ID=() AL_CLEARED_SEV=() AL_CLEARED_MSG=()
 declare -A _AL_PREV_STATE=() _AL_PREV_SINCE=() _AL_PREV_NOTIFIED=()
 declare -A _AL_SEEN=()
 AL_CRIT=0 AL_WARN=0 AL_INFO=0 AL_FIRING=0 AL_NOTIFY=0
@@ -122,6 +126,7 @@ _record() {
     ((isnew)) && _AL_PREV_SINCE[$id]=$now
     AL_ID+=("$id") AL_SEV+=("$sev") AL_MSG+=("$msg") AL_NEW+=("$isnew") AL_VAL+=("$value")
   else
+    [[ $was == firing ]] && AL_CLEARED_ID+=("$id") AL_CLEARED_SEV+=("$sev") AL_CLEARED_MSG+=("$msg")
     # firing -> ok is a recovery worth reporting, but only if we told them about
     # it in the first place.
     if [[ $was == firing ]] && ((${_AL_PREV_NOTIFIED[$id]:-0} > 0)); then
@@ -226,6 +231,7 @@ check_oom() {
 alerts_evaluate() {
   local t c
   AL_ID=() AL_SEV=() AL_MSG=() AL_NEW=() AL_VAL=() AL_RESOLVED=()
+  AL_CLEARED_ID=() AL_CLEARED_SEV=() AL_CLEARED_MSG=()
   AL_CRIT=0 AL_WARN=0 AL_INFO=0 AL_FIRING=0
   _AL_SEEN=()
 

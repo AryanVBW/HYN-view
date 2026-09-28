@@ -1862,6 +1862,32 @@ contains 'payload carries the agent version' "\"agent_version\": \"$HYN_VERSION\
 contains 'payload carries cpu percent'   '"cpu": {"pct":' "$CLOUD_PAYLOAD"
 contains 'payload carries an alerts array' '"alerts": ['   "$CLOUD_PAYLOAD"
 
+# Incident lifecycle in the payload. The persisted state (what the alert timer
+# saved) says disk and memory were firing; now disk still is, memory cleared and
+# load started. Before this, every firing rule was sent as resolved:false with no
+# start time, and a cleared rule was never sent at all, so the portal could not
+# close an incident and stored one new row per upload instead.
+(
+  _AL_PREV_STATE=([t_disk]=firing [t_mem]=firing) _AL_PREV_SINCE=([t_disk]=1790000000 [t_mem]=1790000100)
+  _AL_PREV_NOTIFIED=()
+  AL_ID=() AL_SEV=() AL_MSG=() AL_NEW=() AL_VAL=() AL_RESOLVED=()
+  AL_CLEARED_ID=() AL_CLEARED_SEV=() AL_CLEARED_MSG=() AL_CRIT=0 AL_WARN=0 AL_INFO=0 AL_FIRING=0 _AL_SEEN=()
+  _check_num t_disk warn 90 85 80 'Disk / at 90%'
+  _check_num t_mem crit 50 90 82 'Memory at 50%'
+  _check_num t_load warn 9 4 3 'Load 9 per core'
+  cloud_payload_v
+  printf '%s' "$CLOUD_PAYLOAD" | python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+a = {x["rule"]: x for x in p["alerts"]}
+assert a["t_disk"]["resolved"] is False and a["t_disk"]["since"] == 1790000000, a
+assert a["t_mem"]["resolved"] is True and a["t_mem"]["since"] == 1790000100 and a["t_mem"]["severity"] == "crit", a
+assert a["t_load"]["resolved"] is False and "since" not in a["t_load"], a
+active = [x["count"] for x in p["monitoring_logs"] if x["code"] == "alerts_active"]
+assert active == [2], active
+'
+) && ok || bad 'the payload does not report cleared alerts and stable incident start times'
+
 # A first-link report must identify the actual connection without requiring a
 # second agent version. These values are collected locally; the gateway adds
 # the public address it observes on the HTTPS request.
