@@ -1419,8 +1419,15 @@ cloud_push() {
     local prior_stamp
     prior_stamp=$(_cloud_push_stamp)
     [[ -r $prior_stamp ]] && IFS=$'\t' read -r prior_ts prior_status prior_error <"$prior_stamp"
+    # The stamp is written when the previous upload *finished*, a few seconds
+    # into its run, while the timer wakes on a fixed one-minute grid. A strict
+    # `elapsed < interval` therefore failed on every other wake-up: 55 seconds
+    # after a one-minute upload looked "not due", so cloud_push_min=1 uploaded
+    # every two minutes (and 5 every six). Half a grid step of slack keeps each
+    # wake-up that lands on the interval due, and still never uploads twice
+    # within one wake-up.
     if [[ $prior_ts =~ ^[0-9]+$ && $prior_status == ok ]] &&
-       ((${EPOCHSECONDS:-0} - prior_ts < interval * 60)); then
+       ((${EPOCHSECONDS:-0} - prior_ts < interval * 60 - 30)); then
       ((quiet)) || printf 'hyn: configuration checked; next reading is not due yet\n'
       return 0
     fi

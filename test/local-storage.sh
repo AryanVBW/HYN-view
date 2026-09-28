@@ -354,6 +354,25 @@ cloud_command_poll() { CLOUD_COMMAND_CLAIMED=0; CLOUD_COMMAND_UPDATED=0; return 
 cloud_collect_full() { CLOUD_PAYLOAD='{"sample":"scheduled-current"}'; }
 check 'legacy check-in cadence cannot block one-minute cloud sampling' 'cloud_push 1 1 && [[ $(tail -1 "$WORK/replay-requests") == *scheduled-current* ]]'
 
+# The production pattern: the stamp is written when an upload finishes, a few
+# seconds after its one-minute wake-up, so the next wake-up sees ~55 seconds.
+# That must be due, or cloud_push_min=1 uploads every two minutes.
+_due_at() {
+  local elapsed=$1 before
+  printf '%s\n' "$((EPOCHSECONDS - elapsed))" >"$HYN_VAR/cloud-checkin"
+  printf '%s\tok\n' "$((EPOCHSECONDS - elapsed))" >"$HYN_VAR/cloud-last-push"
+  before=$(wc -l <"$WORK/replay-requests")
+  cloud_push 1 1 >/dev/null
+  (($(wc -l <"$WORK/replay-requests") > before))
+}
+CFG[cloud_checkin_min]=1 CFG[cloud_push_min]=1
+check 'a one-minute interval uploads on the very next wake-up' '_due_at 55'
+check 'a one-minute interval still never uploads twice in one wake-up' '! _due_at 10'
+CFG[cloud_push_min]=5
+check 'a five-minute interval uploads on its fifth wake-up' '_due_at 295'
+check 'a five-minute interval waits through the fourth wake-up' '! _due_at 235'
+CFG[cloud_push_min]=1
+
 # Managed policy can intentionally transition legacy local-mode installations;
 # clearing the managed key restores the explicitly configured local choice.
 HYN_ETC="$WORK/migrate-etc"; HYN_CONFIG=''; XDG_CONFIG_HOME="$WORK/migrate-config"
