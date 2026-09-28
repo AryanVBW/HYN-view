@@ -2439,6 +2439,47 @@ section 'a timer is on, or there is a reason'
   setup_self_heal
   ((CALLED == 0))
 ) && ok || bad 'a healthy timer was touched when nothing had drifted'
+# The production failure: active, but elapsed with no next run. is-active says
+# active and enable --now is a no-op, so only an explicit SubState check sees it.
+(
+  source "$HYN_LIB/setup.sh"
+  is_root() { return 0; }
+  setup_reconcile() { return 0; }
+  setup_heal_agent() { return 0; }
+  CFG[alert_enabled]=on CFG[report_enabled]=on CFG[cloud_enabled]=on
+  cloud_linked() { return 0; }
+  CALLS=''
+  systemctl() {
+    case "$1 $2" in
+      'cat hyn-push.timer') return 0 ;;
+      'is-active hyn-push.timer') printf 'active\n'; return 0 ;;
+      'show -p') [[ $5 == hyn-push.timer ]] && printf 'elapsed\n'; return 0 ;;
+      cat*) return 1 ;;
+    esac
+    CALLS+="$*;"
+    return 0
+  }
+  setup_self_heal
+  [[ $CALLS == *'restart hyn-push.timer;'* && $CALLS == *'start --no-block hyn-push.service;'* ]]
+) && ok || bad 'an elapsed push timer with no next run was left alone'
+(
+  source "$HYN_LIB/setup.sh"
+  CALLS=''
+  systemctl() {
+    case "$1" in
+      show) printf 'elapsed\n'; return 0 ;;
+    esac
+    CALLS+="$*;"
+    return 0
+  }
+  _toggle_timer hyn-record.timer 1 >/dev/null
+  [[ $CALLS == *'restart hyn-record.timer;'* ]]
+) && ok || bad 'hyn setup / doctor --fix cannot repair an elapsed timer'
+(
+  source "$HYN_LIB/setup.sh"
+  systemctl() { [[ $1 == show ]] && printf 'waiting\n'; return 0; }
+  ! setup_timer_elapsed hyn-push.timer && ! setup_timer_elapsed hyn-awake.service
+) && ok || bad 'a waiting timer or a service was mistaken for an elapsed timer'
 (
   source "$HYN_LIB/setup.sh"
   is_root() { return 1; }

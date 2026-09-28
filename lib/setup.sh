@@ -865,6 +865,8 @@ setup_self_heal() {
     if [[ $st == active ]]; then
       # An active-but-disabled unit disappears at the next reboot.
       systemctl is-enabled --quiet "$u" >/dev/null 2>&1 || systemctl enable "$u" >/dev/null 2>&1 || true
+      # Active is not the same as scheduled: see setup_rearm_elapsed.
+      setup_rearm_elapsed "$u" >/dev/null || true
       continue
     fi
     systemctl reset-failed "$u" >/dev/null 2>&1 || true
@@ -872,6 +874,28 @@ setup_self_heal() {
   done
   setup_heal_agent
   return 0
+}
+
+# A timer can be active and never fire again. SubState=elapsed means systemd
+# found no next run, yet `systemctl is-active` still says "active" and `enable
+# --now` leaves it alone, so neither the healer nor `doctor --fix` used to touch
+# it -- which is how a production node went a week without uploading while every
+# check read its push timer as healthy. Restarting re-arms it; running the job
+# once gives a monotonic OnUnitActiveSec= an activation to count from even under
+# unit files written by an older release. Our timers are never one-shot, so
+# elapsed is always a fault here, never a finished schedule.
+setup_timer_elapsed() {
+  [[ $1 == hyn-*.timer ]] || return 1
+  [[ $(systemctl show -p SubState --value "$1" 2>/dev/null) == elapsed ]]
+}
+
+setup_rearm_elapsed() {
+  local u=$1 unit
+  setup_timer_elapsed "$u" || return 0
+  unit=${u%.timer}.service
+  systemctl restart "$u" >/dev/null 2>&1 || return 1
+  systemctl start --no-block "$unit" >/dev/null 2>&1 || true
+  printf '  %-34s re-armed (it was elapsed with no next run)\n' "$u"
 }
 
 # The resident agent needs a different check from a timer, and it is the reason
@@ -952,6 +976,9 @@ _toggle_timer() {
   if [[ $want == 1 ]]; then
     if systemctl enable --now "$unit" >/dev/null 2>&1; then
       printf '  %-34s enabled\n' "$unit"
+      # `enable --now` does not restart an already-active timer, so this is
+      # what lets `hyn setup` and `hyn doctor --fix` repair an elapsed one.
+      setup_rearm_elapsed "$unit" || return 1
     else
       printf '  %-34s could not enable (systemctl status %s)\n' "$unit" "$unit"
       return 1

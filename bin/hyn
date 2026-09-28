@@ -893,6 +893,11 @@ cmd_doctor() {
       fi
       st=$(systemctl is-active "$u" 2>/dev/null)
       if [[ $st == active ]]; then
+        # is-active calls an elapsed timer active; it will still never fire.
+        if declare -F setup_timer_elapsed >/dev/null && setup_timer_elapsed "$u"; then
+          _chk warn "$u" 'active but elapsed -- no next run is scheduled: sudo hyn doctor --fix'
+          continue
+        fi
         nxt=$(systemctl show -p NextElapseUSecRealtime --value "$u" 2>/dev/null)
         _chk ok "$u" "active${nxt:+, next $nxt}"
         continue
