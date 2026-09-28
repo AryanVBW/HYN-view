@@ -164,16 +164,36 @@ check 'second timer tick sends no control requests' 'cloud_push 1 1 && [[ $(wc -
 
 # Discovery does not use any credentials or follow redirects, caches success,
 # and never extends the trusted host list to a lookalike or a custom endpoint.
+# Only www.hyn-view.in is the agent API: the apex serves an unrelated site, so it
+# must never be probed, even when www is down.
 curl() {
   printf '%s\n' "$*" >>"$WORK/probes"
   [[ $* != *'--location'* && $* != *'test-private-node-token'* ]] || return 3
-  [[ ${*: -1} == https://hyn-view.in/api/agent/v1/health ]] || return 7
+  [[ ${*: -1} == https://www.hyn-view.in/api/agent/v1/health ]] || return 22
   printf '{"service":"hyn-agent-v1"}'
 }
 CFG[cloud_api_url]='https://www.hyn-view.in/api/agent/v1'
 CLOUD_RESOLVED_URL=''
-check 'apex is selected when www is down' 'cloud_resolve_portal && [[ $(cloud_url) == https://hyn-view.in/api/agent/v1 ]]'
-check 'successful discovery is cached across calls' 'cloud_resolve_portal && [[ $(wc -l <"$WORK/probes") -eq 2 ]]'
+rm -f "$HYN_VAR/portal-endpoint" "$WORK/probes"
+check 'discovery verifies www' 'cloud_resolve_portal && [[ $(cloud_url) == https://www.hyn-view.in/api/agent/v1 ]]'
+check 'successful discovery is cached across calls' 'CLOUD_RESOLVED_URL=""; cloud_resolve_portal && [[ $(wc -l <"$WORK/probes") -eq 1 ]]'
+# A config written for the apex, and an apex endpoint cached by an older release,
+# both end up on www.
+printf '%s https://hyn-view.in/api/agent/v1\n' "$EPOCHSECONDS" >"$HYN_VAR/portal-endpoint"
+CFG[cloud_api_url]='https://hyn-view.in/api/agent/v1'
+CLOUD_RESOLVED_URL=''
+check 'an apex config and a cached apex endpoint are sent to www' 'cloud_resolve_portal && [[ $(cloud_url) == https://www.hyn-view.in/api/agent/v1 && $(tail -1 "$WORK/probes") == *https://www.hyn-view.in/api/agent/v1/health && $(cat "$HYN_VAR/portal-endpoint") == *" https://www.hyn-view.in/api/agent/v1" ]]'
+curl() { printf '%s\n' "$*" >>"$WORK/probes"; return 7; }
+rm -f "$HYN_VAR/portal-endpoint" "$WORK/probes"
+CLOUD_RESOLVED_URL=''
+check 'a www outage keeps history local and never tries the apex' '! cloud_resolve_portal && [[ $CLOUD_LAST_ERR == *"www.hyn-view.in did not pass"* && $(wc -l <"$WORK/probes") -eq 1 ]] && ! grep -q "//hyn-view.in" "$WORK/probes"'
+curl() {
+  printf '%s\n' "$*" >>"$WORK/probes"
+  [[ ${*: -1} == https://www.hyn-view.in/api/agent/v1/health ]] || return 22
+  printf '{"service":"hyn-agent-v1"}'
+}
+CFG[cloud_api_url]='https://www.hyn-view.in/api/agent/v1'
+cloud_resolve_portal
 CFG[cloud_api_url]='https://private.example/api/agent/v1'
 check 'explicit custom endpoint overrides a cached official domain' 'cloud_resolve_portal && [[ $(cloud_url) == https://private.example/api/agent/v1 ]]'
 CFG[cloud_api_url]='https://www.hyn-view.in.attacker.example/api/agent/v1'
@@ -181,7 +201,7 @@ check 'a lookalike is not an official domain' '! cloud_official_url'
 CFG[cloud_api_url]='https://www.hyn-view.in/api/agent/v1'
 _cloud_rpc_once() { printf 'POST\n' >>"$WORK/posts"; CLOUD_LAST_CODE=503; CLOUD_LAST_BODY='temporarily unavailable'; return 1; }
 check 'an ambiguous POST failure is not replayed on another host' '! _cloud_rpc hyn_claim_node_command "{}" && [[ $(wc -l <"$WORK/posts") -eq 1 ]]'
-check 'failed host is invalidated for the next operation' '[[ $(cat "$HYN_VAR/portal-endpoint") == "0 https://hyn-view.in/api/agent/v1" ]]'
+check 'failed host is invalidated for the next operation' '[[ $(cat "$HYN_VAR/portal-endpoint") == "0 https://www.hyn-view.in/api/agent/v1" ]]'
 
 # Keep the established resident loop alive while backing network failures off.
 source "$HYN_LIB/agent.sh"
@@ -407,8 +427,8 @@ cloud_record_bandwidth test-private-node-token
 check 'WAN recovery retries next beat with cumulative counters and no local byte loss' '[[ $(wc -l <"$WORK/replay-requests") -eq 3 && $(tail -1 "$WORK/replay-requests") == *"\"p_rx\":25,\"p_tx\":38"* && $(tail -1 "$HYN_VAR/local/bandwidth-state") == *"\"observed_total_bytes\":\"33\""* ]]'
 
 # Drive the real resolver/transport with an injected monotonic clock and curl
-# fixture. Discovery and upload must spend the same15-second budget, including
-# a failed first hostname; tests make no real network call or blocking sleep.
+# fixture. Discovery and upload must spend the same 15-second budget; tests make
+# no real network call or blocking sleep.
 check 'discovery and upload share the remaining replay time budget' '(
   source "$HYN_LIB/cloud.sh"
   HYN_VAR="$WORK/deadline-shared"; STATE_DIR=""; mkdir -p "$HYN_VAR"
@@ -430,7 +450,7 @@ check 'discovery and upload share the remaining replay time budget' '(
   }
   _cloud_rpc hyn_ingest "{}" && [[ $(<"$HYN_VAR/timeouts") == $'"'"'health:15.000\nupload:3.000'"'"' ]]
 )'
-check 'exhausted discovery cannot begin a second hostname or upload' '(
+check 'exhausted discovery cannot begin an upload' '(
   source "$HYN_LIB/cloud.sh"
   HYN_VAR="$WORK/deadline-exhausted"; STATE_DIR=""; mkdir -p "$HYN_VAR"
   CFG[cloud_api_url]="https://www.hyn-view.in/api/agent/v1"; CFG[cloud_url]=""; CFG[cloud_anon_key]=""
@@ -438,7 +458,7 @@ check 'exhausted discovery cannot begin a second hostname or upload' '(
   printf "1000\n" >"$HYN_VAR/clock"
   sample_clock_ms_v() { read -r SAMPLE_CLOCK_MS <"$HYN_VAR/clock"; }
   curl() { printf "request\n" >>"$HYN_VAR/requests"; printf "16000\n" >"$HYN_VAR/clock"; return 7; }
-  ! _cloud_rpc hyn_ingest "{}" && [[ $(wc -l <"$HYN_VAR/requests") -eq 1 && $CLOUD_LAST_CODE == 0 && $CLOUD_LAST_ERR == *"time budget exhausted"* ]]
+  ! _cloud_rpc hyn_ingest "{}" && [[ $(wc -l <"$HYN_VAR/requests") -eq 1 && $CLOUD_LAST_CODE == 0 && $CLOUD_LAST_ERR == *"did not pass the HTTPS agent health check"* ]]
 )'
 check 'failed discovery cannot reuse an earlier payload rejection status' '(
   source "$HYN_LIB/cloud.sh"

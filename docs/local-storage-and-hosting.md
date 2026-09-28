@@ -232,11 +232,13 @@ to the one.com account owning this domain is still required.
    and run `sudo hyn cloud optimize` on existing machines. Deploy the portal
    **before** upgrading agents: older portals do not support transient readings.
 
-The CLI prefers `www`, tries the apex if the health probe fails, and caches a
-verified host for six hours. A transport/5xx failure invalidates that selection
-and gives the other host priority on the next operation. It never replays an
-ambiguous POST and never sends secrets in a probe or follows a cross-host
-redirect. Explicit custom endpoints retain their own configuration.
+The CLI uses only `https://www.hyn-view.in/api/agent/v1`. The apex
+`hyn-view.in` currently serves an unrelated site, so the CLI never probes it; a
+config that names the apex is sent to `www`. A verified health probe is cached
+for six hours, and a transport/5xx failure invalidates it so the next operation
+re-probes first. It never replays an ambiguous POST and never sends secrets in a
+probe or follows a cross-host redirect. Explicit custom endpoints retain their
+own configuration.
 
 The previous Vercel Workflow watchdog is disabled unless
 `HYN_ENABLE_WORKFLOW_WATCHDOG=true` and a compatible durable runtime is separately

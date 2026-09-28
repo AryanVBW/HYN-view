@@ -105,6 +105,12 @@ source "${HYN_LIB:-${BASH_SOURCE[0]%/*}}/local-store.sh"
 source "${HYN_LIB:-${BASH_SOURCE[0]%/*}}/cloud-platform.sh"
 
 CLOUD_RESOLVED_URL=''
+# The hosted agent API lives on www.hyn-view.in only. The apex hyn-view.in is
+# not the portal -- it serves an unrelated site that answers /api/agent/v1/health
+# with a 404 -- so it is never probed or used. A config that names the apex
+# (older installs could be pointed at either host) is still the official
+# endpoint, and goes to www.
+CLOUD_OFFICIAL_API='https://www.hyn-view.in/api/agent/v1'
 cloud_official_url() {
   case ${CFG[cloud_api_url]:-} in
     https://www.hyn-view.in/api/agent/v1 | https://hyn-view.in/api/agent/v1) [[ -z ${CFG[cloud_url]:-} ]] ;;
@@ -112,34 +118,27 @@ cloud_official_url() {
   esac
 }
 
-# Probe only the two trusted HTTPS hosts, without secrets or redirects. Cache
-# discovery on disk so independent timer processes do not double every request.
+# One unauthenticated health probe, no secrets and no redirects. A verified
+# result is cached on disk for six hours so independent timer processes do not
+# double every request; a failed request (see _cloud_rpc) invalidates it, and an
+# endpoint cached by an older release (possibly the apex) is simply ignored.
 cloud_resolve_portal() {
   cloud_official_url || return 0
   state_dir_v
-  local f="$STATE_DIR/portal-endpoint" ts='' cached='' u response preferred
-  preferred=${CFG[cloud_api_url]}
+  local f="$STATE_DIR/portal-endpoint" ts='' cached='' response u=$CLOUD_OFFICIAL_API
   [[ -r $f ]] && read -r ts cached <"$f"
-  if [[ $ts =~ ^[0-9]+$ ]] && ((${EPOCHSECONDS:-0} >= ts && ${EPOCHSECONDS:-0} - ts < 21600)); then
-    case $cached in
-      https://www.hyn-view.in/api/agent/v1 | https://hyn-view.in/api/agent/v1) CLOUD_RESOLVED_URL=$cached; return 0 ;;
-    esac
+  if [[ $ts =~ ^[0-9]+$ && $cached == "$u" ]] && ((ts > 0 && ${EPOCHSECONDS:-0} >= ts && ${EPOCHSECONDS:-0} - ts < 21600)); then
+    CLOUD_RESOLVED_URL=$u
+    return 0
   fi
-  local other='https://hyn-view.in/api/agent/v1'
-  [[ $preferred == "$other" ]] && other='https://www.hyn-view.in/api/agent/v1'
-  if [[ $ts == 0 && $cached == "$preferred" ]]; then
-    u=$preferred; preferred=$other; other=$u
-  fi
-  for u in "$preferred" "$other"; do
-    _cloud_request_timeout_v 20 || return 1
-    response=$(curl -fsS --connect-timeout 5 --max-time "$CLOUD_REQUEST_TIMEOUT" "$u/health" 2>/dev/null) || continue
-    json_field_v "$response" service || continue
-    [[ $JSON_FIELD == hyn-agent-v1 ]] || continue
+  _cloud_request_timeout_v 20 || return 1
+  if response=$(curl -fsS --connect-timeout 5 --max-time "$CLOUD_REQUEST_TIMEOUT" "$u/health" 2>/dev/null) &&
+     json_field_v "$response" service && [[ $JSON_FIELD == hyn-agent-v1 ]]; then
     CLOUD_RESOLVED_URL=$u
     (umask 077; mkdir -p "$STATE_DIR"; printf '%s %s\n' "${EPOCHSECONDS:-0}" "$u" >"$f") || return 1
     return 0
-  done
-  CLOUD_LAST_ERR='neither www.hyn-view.in nor hyn-view.in passed the HTTPS agent health check; history remains local'
+  fi
+  CLOUD_LAST_ERR='www.hyn-view.in did not pass the HTTPS agent health check; history remains local'
   return 1
 }
 
@@ -147,19 +146,10 @@ cloud_url() {
   local u
   if [[ -n ${CFG[cloud_url]} && -n ${CFG[cloud_anon_key]} ]]; then
     u=${CFG[cloud_url]}
+  elif cloud_official_url; then
+    u=$CLOUD_OFFICIAL_API
   else
     u=${CFG[cloud_api_url]:-}
-    if cloud_official_url && [[ -z $CLOUD_RESOLVED_URL ]]; then
-      state_dir_v
-      local ts='' cached=''
-      [[ -r $STATE_DIR/portal-endpoint ]] && read -r ts cached <"$STATE_DIR/portal-endpoint"
-      if [[ $ts =~ ^[0-9]+$ ]] && ((${EPOCHSECONDS:-0} >= ts && ${EPOCHSECONDS:-0} - ts < 21600)); then
-        case $cached in
-          https://www.hyn-view.in/api/agent/v1 | https://hyn-view.in/api/agent/v1) CLOUD_RESOLVED_URL=$cached ;;
-        esac
-      fi
-    fi
-    if cloud_official_url && [[ -n $CLOUD_RESOLVED_URL ]]; then u=$CLOUD_RESOLVED_URL; fi
   fi
   u=${u%/}
   printf '%s' "$u"
