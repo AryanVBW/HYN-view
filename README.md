@@ -16,7 +16,7 @@ VPS/container reporting, and the database → portal → CLI rollout order.
 ```sh
 sudo hyn autostart enable # one-time boot, recovery and keep-awake setup
 hyn autostart status      # verify automatic operation
-sudo hyn cloud optimize  # apply the low-consumption profile to an existing install
+sudo hyn cloud optimize  # restore the recommended cloud profile on an existing install
 sudo hyn cloud usage     # local request/byte totals and hosting budget references
 sudo hyn history --local 12      # recent private local snapshots, as JSONL
 sudo hyn logs 100        # local diagnostics

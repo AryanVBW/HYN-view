@@ -61,7 +61,7 @@ reading; five minutes is the server's retention, not remote erasure of a screen.
 ```sh
 sudo hyn autostart enable       # install/repair startup and recovery services once
 hyn autostart status            # show boot enablement, sleep prevention and update policy
-sudo hyn cloud optimize        # local archive, email sharing off, 60s beats, 5min checks
+sudo hyn cloud optimize        # recommended cloud profile: 48h history, local backup, default cadence
 sudo hyn cloud usage            # actual local POST accounting and reference quotas
 sudo hyn cloud usage 20         # configured request baseline for 20 identical nodes
 sudo hyn history --local 12    # JSONL for the last 12 local readings

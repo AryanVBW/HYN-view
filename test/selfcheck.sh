@@ -2614,6 +2614,22 @@ contains 'a paired machine reports the queue budget' 'daily budget' "$_doc_paire
 contains 'a paired machine is watched from outside' 'flags this machine after 3m 00s without a beat' "$_doc_paired"
 
 # ---------------------------------------------------------------------------
+# `hyn cloud optimize` restores the recommended profile, which is exactly the
+# shipped defaults. It used to hard-code its own numbers, and the docs called
+# the fastest cadence there is a "low-consumption" profile.
+_opt_out=$(
+  export HYN_ETC=$TMP/optimize-etc HYN_VAR=$TMP/optimize-var XDG_CONFIG_HOME=$TMP/optimize-xdg TERM=dumb
+  mkdir -p "$HYN_ETC" "$HYN_VAR" "$XDG_CONFIG_HOME/hyn-view"
+  printf 'cloud_storage=local\ncloud_push_min=30\nheartbeat_sec=600\ncloud_checkin_min=15\n' >"$XDG_CONFIG_HOME/hyn-view/config"
+  bash "$ROOT/bin/hyn" cloud optimize 2>&1
+  printf '\n--config--\n'; cat "$XDG_CONFIG_HOME/hyn-view/config"
+)
+_opt_cfg=${_opt_out##*--config--}
+truthy 'cloud optimize writes the shipped cadence and cloud history' \
+  "[[ \$_opt_cfg == *cloud_storage=cloud* && \$_opt_cfg == *cloud_push_min=$(_default_of cloud_push_min)* && \$_opt_cfg == *heartbeat_sec=$(_default_of heartbeat_sec)* && \$_opt_cfg == *cloud_checkin_min=$(_default_of cloud_checkin_min)* ]]"
+contains 'cloud optimize says what it applied' 'recommended cloud profile applied' "$_opt_out"
+falsy 'cloud optimize no longer claims to cut consumption' '[[ $_opt_out == *low-consumption* ]]'
+
 section 'config migration'
 # ---------------------------------------------------------------------------
 # Changing a default in core.sh does nothing for a box whose config file already
