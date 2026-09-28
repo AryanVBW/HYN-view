@@ -249,5 +249,23 @@ for pid in "${race_pids[@]}"; do wait "$pid" || race_failed=1; done
 if ((race_failed)); then cat "$WORK"/relay-race-*.log; exit 1; fi
 psql -c "do \$\$ begin if (select count(*) from public.relayer_assignments where relayer_id=2147000000)<>8 or (select count(*) from public.relayer_assignments where relayer_id=2147000000 and assignment_role='primary')<>1 or (select count(*) from public.relayer_assignments where relayer_id=2147000000 and assignment_role='view')<>7 then raise exception 'concurrent assignments lost a grant or priority'; end if; raise notice 'PASS shared relay: eight concurrent assignments retain one priority and seven view grants'; end \$\$;" || exit 1
 psql -c "delete from auth.users where email like '%@relay-race.test';" >/dev/null || exit 1
+# The privilege floor holds on the final schema, a schema-only restore that
+# re-grants everything (what the 2026-09-20 self-hosted cutover did) is caught,
+# and the repair migration returns it to the floor without breaking the
+# authorized paths the earlier suites exercised.
+psql -f "$HERE/privilege-check.sql" >"$WORK/privilege-check.log" 2>&1 || { cat "$WORK/privilege-check.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/privilege-check.log"
+psql -c "grant all on all tables in schema public to anon, authenticated; grant all on all sequences in schema public to anon, authenticated; grant execute on all functions in schema public to anon, authenticated, public" >/dev/null || exit 1
+if psql -f "$HERE/privilege-check.sql" >"$WORK/privilege-drift.log" 2>&1; then
+  printf 'run-tests: privilege check did not detect a restore that re-granted everything\n' >&2; exit 1
+fi
+printf 'PASS  privilege check detects a restore that re-grants every object\n'
+psql -f "$HERE/migrations/20260928110000_reassert_role_privileges.sql" >"$WORK/privilege-repair.log" 2>&1 || { cat "$WORK/privilege-repair.log"; exit 1; }
+psql -f "$HERE/privilege-check.sql" >"$WORK/privilege-check.log" 2>&1 || { cat "$WORK/privilege-check.log"; exit 1; }
+printf 'PASS  the privilege repair migration restores the floor\n'
+for suite in roles-test owner-linking-test maintainer-visibility-test server-access-bandwidth-test delivery-controls-test; do
+  psql -f "$HERE/$suite.sql" >"$WORK/repaired-$suite.log" 2>&1 || { cat "$WORK/repaired-$suite.log"; exit 1; }
+done
+printf 'PASS  authorized access paths still work after the privilege repair\n'
 printf 'run-tests: final role and server authorization checks passed\n'
 exit 0

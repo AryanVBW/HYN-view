@@ -6833,5 +6833,43 @@ end $$;
 revoke all on function public.hyn_maintainer_resolve_alert(bigint, text) from public,anon;
 grant execute on function public.hyn_maintainer_resolve_alert(bigint, text) to authenticated;
 
+-- ===========================================================================
+-- role privilege floor (supabase/migrations/20260928110000_reassert_role_privileges.sql)
+-- ===========================================================================
+-- Rules rather than a list, so an object added later cannot slip past them.
+-- Supabase's default privileges grant every new table, sequence and function to
+-- anon and authenticated by name; a restore that drops the REVOKEs above (the
+-- 2026-09-20 self-hosted cutover did exactly that) makes the whole schema
+-- reachable with the public anon key. supabase/privilege-check.sql asserts
+-- these rules and can be run read-only against a live database.
+do $$
+declare r record;
+begin
+  -- The anon role is the agent's transport and the signed-out browser. It works
+  -- only through SECURITY DEFINER RPCs and never needs table or sequence access.
+  execute 'revoke all on all tables in schema public from anon';
+  execute 'revoke all on all sequences in schema public from anon';
+  -- TRUNCATE ignores row level security; REFERENCES and TRIGGER are DDL-level.
+  execute 'revoke truncate, references, trigger on all tables in schema public from authenticated';
+  -- Internal helpers stay internal. _hyn_portal_config_valid backs a CHECK
+  -- constraint on nodes, which is evaluated as the writing role.
+  for r in
+    select p.oid::regprocedure as sig from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public' and p.proname like '\_hyn\_%' and p.proname <> '_hyn_portal_config_valid'
+  loop
+    execute format('revoke all on function %s from public, anon, authenticated', r.sig);
+  end loop;
+  -- Service-only entry points used by the portal's server-side key.
+  for r in
+    select p.oid::regprocedure as sig from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public' and p.proname in (
+       'hyn_claim_web_notification', 'hyn_complete_web_notification', 'hyn_defer_web_delivery',
+       'hyn_reserve_delivery', 'hyn_complete_delivery', 'hyn_due_user_digests',
+       'hyn_user_digest_content', 'hyn_prune_telemetry')
+  loop
+    execute format('revoke all on function %s from public, anon, authenticated', r.sig);
+  end loop;
+end $$;
+
 notify pgrst,'reload schema';
 commit;
