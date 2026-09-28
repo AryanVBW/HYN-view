@@ -2480,6 +2480,52 @@ section 'a timer is on, or there is a reason'
   systemctl() { [[ $1 == show ]] && printf 'waiting\n'; return 0; }
   ! setup_timer_elapsed hyn-push.timer && ! setup_timer_elapsed hyn-awake.service
 ) && ok || bad 'a waiting timer or a service was mistaken for an elapsed timer'
+
+# One lock serializes every writer of units and timers. On 2026-09-21 a
+# self-update's service refresh and the still-running old agent each did their
+# own daemon-reload/stop/start pass, and one of them left hyn-push.timer stopped.
+(
+  source "$ROOT/test/flock-fixture.sh"
+  export HYN_VAR=$TMP/schedule-lock
+  mkdir -p "$HYN_VAR"
+  STATE_DIR=''
+  inner=''
+  with_schedule_lock 0 eval 'inner=${HYN_SCHEDULE_LOCKED:-}'
+  [[ $inner == 1 && -z ${HYN_SCHEDULE_LOCKED:-} ]] || exit 1
+  # Held elsewhere: a background pass skips, a waiting one gives up in time,
+  # and neither runs its command.
+  exec {held}>>"$HYN_VAR/schedule.lock"
+  flock -n "$held" || exit 1
+  ran=0
+  with_schedule_lock 0 eval 'ran=1'; rc0=$?
+  start=$SECONDS
+  with_schedule_lock 1 eval 'ran=1'; rc1=$?
+  ((rc0 == 75 && rc1 == 75 && ran == 0 && SECONDS - start <= 3)) || exit 1
+  exec {held}>&-
+  # A child of the holder (the updater runs `hyn setup`) must not wait on the
+  # lock its own parent holds.
+  with_schedule_lock 0 bash -c '[[ ${HYN_SCHEDULE_LOCKED:-} == 1 ]]'
+) && ok || bad 'the schedule lock does not serialize writers or deadlocks a child of its holder'
+(
+  source "$HYN_LIB/setup.sh"
+  source "$HYN_LIB/update.sh"
+  is_root() { return 0; }
+  have() { return 0; }
+  export HYN_UNIT_DIR=$TMP/lock-units
+  mkdir -p "$HYN_UNIT_DIR"
+  : >"$HYN_UNIT_DIR/hyn-agent.service"
+  CALLS=''
+  with_schedule_lock() { CALLS+="$1:$2;"; return 75; }
+  setup_self_heal; setup_reconcile; setup_run --no-wizard 2>/dev/null
+  [[ $CALLS == *'0:_setup_self_heal;'* && $CALLS == *'0:_setup_reconcile;'* && $CALLS == *'120:_setup_run;'* ]]
+) && ok || bad 'a unit writer runs without the schedule lock'
+# The updater's refresh is the writer that raced; it must go through the lock,
+# and nothing else in update.sh may rewrite units on its own.
+_updsrc=$(code_only "$HYN_LIB/update.sh")
+eq 'the update refreshes services only under the schedule lock' 2 \
+  "$(grep -c 'with_schedule_lock 300 _update_refresh_all' <<<"$_updsrc")"
+eq 'only the locked refresh rewrites units during an update' 1 \
+  "$(grep -c 'bin/hyn" setup --no-wizard' <<<"$_updsrc")"
 (
   source "$HYN_LIB/setup.sh"
   is_root() { return 1; }

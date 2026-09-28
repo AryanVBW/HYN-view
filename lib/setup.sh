@@ -511,7 +511,16 @@ setup_migrate_config() {
   return 0
 }
 
+# Unit and timer changes are serialized with every other writer; see
+# with_schedule_lock in core.sh.
 setup_run() {
+  with_schedule_lock 120 _setup_run "$@"
+  local rc=$?
+  ((rc == 75)) && warn 'another hyn process is changing the systemd schedule; try again in a minute'
+  return "$rc"
+}
+
+_setup_run() {
   local no_timer=0 wizard=1 integration_ok=1 a
   for a in "$@"; do
     case $a in
@@ -746,16 +755,13 @@ setup_apply_schedule() {
 # edits. The fingerprint is written only after the units restart successfully,
 # so the next maintenance pass retries a failed application.
 setup_reconcile() {
-  local lock_fd='' rc
+  local rc
   is_root && have systemctl || return 0
   [[ -f $HYN_UNIT_DIR/hyn-agent.service || -f $HYN_VAR/installed ]] || return 0
-  state_dir_v
-  if have flock; then
-    exec {lock_fd}>"$STATE_DIR/schedule.lock" || return 1
-    flock -n "$lock_fd" || { exec {lock_fd}>&-; return 0; }
-  fi
-  _setup_reconcile; rc=$?
-  [[ -z $lock_fd ]] || exec {lock_fd}>&-
+  # Busy means another writer is applying the schedule right now; the next
+  # maintenance pass re-checks the fingerprint.
+  with_schedule_lock 0 _setup_reconcile; rc=$?
+  ((rc == 75)) && return 0
   return "$rc"
 }
 
@@ -849,6 +855,12 @@ setup_timer_reason() {
 setup_self_heal() {
   have systemctl || return 0
   is_root || return 0
+  with_schedule_lock 0 _setup_self_heal
+  (($? == 75)) && return 0
+  return 0
+}
+
+_setup_self_heal() {
   setup_reconcile || warn 'settings could not be applied; the next maintenance pass will retry'
   local u want st
   for u in hyn-record.timer hyn-alerts.timer hyn-report.timer hyn-push.timer hyn-speedtest.timer hyn-update.timer hyn-awake.service; do
@@ -1006,23 +1018,31 @@ setup_uninstall() {
 
   printf 'hyn: removing system integration\n'
   if have systemctl; then
-    local u
-    for u in "$SVC_NAME.timer" hyn-alerts.timer hyn-record.timer hyn-report.timer hyn-push.timer \
-             hyn-agent.service hyn-update.timer hyn-awake.service; do
-      systemctl disable --now "$u" >/dev/null 2>&1 && printf '  %-24s disabled\n' "$u"
-    done
-    rm -f "$SVC_PATH" "$TMR_PATH" \
-      "$HYN_UNIT_DIR/hyn-alerts.service" "$HYN_UNIT_DIR/hyn-alerts.timer" \
-      "$HYN_UNIT_DIR/hyn-record.service" "$HYN_UNIT_DIR/hyn-record.timer" \
-      "$HYN_UNIT_DIR/hyn-report.service" "$HYN_UNIT_DIR/hyn-report.timer" \
-      "$HYN_UNIT_DIR/hyn-push.service" "$HYN_UNIT_DIR/hyn-push.timer" \
-      "$HYN_UNIT_DIR/hyn-agent.service" \
-      "$HYN_UNIT_DIR/hyn-update.service" "$HYN_UNIT_DIR/hyn-update.timer" "$HYN_UNIT_DIR/hyn-awake.service"
-    systemctl daemon-reload
-    printf '  units removed\n'
+    with_schedule_lock 120 _setup_remove_units || { warn 'another hyn process is changing the systemd schedule; try again in a minute'; return 1; }
   fi
   [[ -L /usr/local/bin/hyn ]] && rm -f /usr/local/bin/hyn && printf '  /usr/local/bin/hyn unlinked\n'
+  _setup_uninstall_tail "$purge"
+}
 
+_setup_remove_units() {
+  local u
+  for u in "$SVC_NAME.timer" hyn-alerts.timer hyn-record.timer hyn-report.timer hyn-push.timer \
+           hyn-agent.service hyn-update.timer hyn-awake.service; do
+    systemctl disable --now "$u" >/dev/null 2>&1 && printf '  %-24s disabled\n' "$u"
+  done
+  rm -f "$SVC_PATH" "$TMR_PATH" \
+    "$HYN_UNIT_DIR/hyn-alerts.service" "$HYN_UNIT_DIR/hyn-alerts.timer" \
+    "$HYN_UNIT_DIR/hyn-record.service" "$HYN_UNIT_DIR/hyn-record.timer" \
+    "$HYN_UNIT_DIR/hyn-report.service" "$HYN_UNIT_DIR/hyn-report.timer" \
+    "$HYN_UNIT_DIR/hyn-push.service" "$HYN_UNIT_DIR/hyn-push.timer" \
+    "$HYN_UNIT_DIR/hyn-agent.service" \
+    "$HYN_UNIT_DIR/hyn-update.service" "$HYN_UNIT_DIR/hyn-update.timer" "$HYN_UNIT_DIR/hyn-awake.service"
+  systemctl daemon-reload
+  printf '  units removed\n'
+}
+
+_setup_uninstall_tail() {
+  local purge=$1
   if ((purge)); then
     # Only with --purge, and only these two paths: config, credentials and
     # recorded history are the user's data, not ours to delete by default.

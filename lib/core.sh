@@ -847,6 +847,47 @@ state_dir() { state_dir_v; printf '%s' "$STATE_DIR"; }
 die() { printf 'hyn: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'hyn: %s\n' "$*" >&2; }
 
+# with_schedule_lock <wait-seconds> <command...>
+#
+# Every writer of hyn's units and timers -- `hyn setup`, `hyn link`, `doctor
+# --fix`, the self-update's service refresh, the resident agent's reconcile and
+# self-heal, uninstall -- runs its changes under one lock. They used to overlap:
+# on 2026-09-21 a self-update's refresh and the still-running old agent each did
+# their own daemon-reload/stop/start pass over the same timers, and one of them
+# left hyn-push.timer stopped.
+#
+# wait=0 skips when the lock is busy (background repair: whoever holds it is
+# already doing the work) and returns 75. A positive wait blocks up to that many
+# seconds. The holder exports HYN_SCHEDULE_LOCKED=1 so a child it runs for the
+# same job (the updater runs `hyn setup`) proceeds instead of deadlocking on the
+# lock its own parent holds.
+with_schedule_lock() {
+  local wait=$1 fd rc
+  shift
+  if [[ ${HYN_SCHEDULE_LOCKED:-0} == 1 ]] || ! have flock; then
+    "$@"
+    return
+  fi
+  state_dir_v
+  mkdir -p "$STATE_DIR" 2>/dev/null
+  exec {fd}>>"$STATE_DIR/schedule.lock" || { "$@"; return; }
+  local got=0
+  if ((wait > 0)); then flock -w "$wait" "$fd"; else flock -n "$fd"; fi
+  got=$?
+  # 1 is util-linux flock's "busy" (or timed out). Anything else means locking
+  # itself is unavailable here, and the change proceeds unserialized, as before.
+  if ((got == 1)); then
+    exec {fd}>&-
+    return 75
+  fi
+  export HYN_SCHEDULE_LOCKED=1
+  "$@"
+  rc=$?
+  unset HYN_SCHEDULE_LOCKED
+  exec {fd}>&-
+  return "$rc"
+}
+
 # ---------------------------------------------------------------------------
 # first run
 # ---------------------------------------------------------------------------
