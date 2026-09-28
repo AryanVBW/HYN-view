@@ -879,7 +879,9 @@ cmd_doctor() {
   # matters is the one made from outside it. That is the portal's watchdog now, not
   # a ping URL configured per machine.
   if notify_configured; then
-    _chk ok 'outage detection' "the portal alerts the owner after 3 minutes without a beat (${CFG[heartbeat_sec]}s cadence)"
+    local quiet_s=$((3 * ${CFG[heartbeat_sec]:-24}))
+    ((quiet_s < 180)) && quiet_s=180
+    _chk ok 'outage detection' "the portal flags this machine after $(fmt_dur "$quiet_s") without a beat (${CFG[heartbeat_sec]}s cadence)"
   else
     _chk warn 'outage detection' 'nothing will report this host going offline until it is paired: sudo hyn link'
   fi
@@ -926,7 +928,7 @@ cmd_doctor() {
       # Read straight out of the config, so validate before it reaches bash
       # arithmetic below. The resident loop clamps the same value for the same
       # reason; doctor must not be the one place a typo produces an error.
-      hbi=${CFG[heartbeat_sec]:-60}
+      hbi=${CFG[heartbeat_sec]:-24}
       [[ $hbi =~ ^[1-9][0-9]{0,4}$ ]] || hbi=24
       ast=$(systemctl is-active hyn-agent.service 2>/dev/null)
       if [[ $ast == active ]]; then

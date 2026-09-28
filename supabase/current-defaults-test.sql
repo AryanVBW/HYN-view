@@ -46,4 +46,36 @@ begin
   end if;
   raise notice 'PASS  every email stream of a new node is opt-in';
 end $$;
+
+-- "Quiet" follows the node's heartbeat interval: three missed beats, never less
+-- than three minutes. A fixed fifteen minutes hid a dead 24-second agent for 12.
+do $$ begin
+  if public._hyn_quiet_after_seconds('{}') <> 180
+     or public._hyn_quiet_after_seconds('{"heartbeat_sec":"24"}') <> 180
+     or public._hyn_quiet_after_seconds('{"heartbeat_sec":"300"}') <> 900
+     or public._hyn_quiet_after_seconds('{"heartbeat_sec":"junk"}') <> 180 then
+    raise exception 'the quiet threshold does not follow the heartbeat interval';
+  end if;
+end $$;
+update public.profiles set role = 'super_admin' where id = 'c0c0c0c0-0000-4000-8000-000000000001';
+update public.nodes set agent_version = '2.0.1', config = '{}', last_heartbeat_at = now() - interval '4 minutes'
+ where id = 'c0c0c0c0-0000-4000-8000-0000000000aa';
+set local role authenticated;
+set local "test.uid" = 'c0c0c0c0-0000-4000-8000-000000000001';
+do $$ declare fast_quiet integer; slow_quiet integer; offline integer; begin
+  fast_quiet := (public.hyn_admin_overview()->>'nodes_stale')::integer;
+  select count(*) into offline from json_array_elements(public.hyn_server_notifications(100)) e
+   where e->>'kind' = 'offline' and e->>'node_id' = 'c0c0c0c0-0000-4000-8000-0000000000aa';
+  if offline <> 1 then raise exception 'a default-cadence node silent for 4 minutes is not reported offline'; end if;
+  set local role postgres;
+  update public.nodes set config = '{"heartbeat_sec":"300"}' where id = 'c0c0c0c0-0000-4000-8000-0000000000aa';
+  set local role authenticated;
+  slow_quiet := (public.hyn_admin_overview()->>'nodes_stale')::integer;
+  select count(*) into offline from json_array_elements(public.hyn_server_notifications(100)) e
+   where e->>'kind' = 'offline' and e->>'node_id' = 'c0c0c0c0-0000-4000-8000-0000000000aa';
+  if slow_quiet <> fast_quiet - 1 or offline <> 0 then
+    raise exception 'a 300-second heartbeat 4 minutes old was called quiet';
+  end if;
+  raise notice 'PASS  quiet means three missed beats of the node''s own heartbeat, at least three minutes';
+end $$;
 rollback;

@@ -185,8 +185,8 @@ for migration in "$HERE"/migrations/*.sql; do
     psql -c "update public.nodes set config=config || '{\"cloud_storage\":\"local\"}' where name='retention-upgrade-custom'" || exit 1
   fi
 done
-psql -c "do \$\$ begin if (select config->>'cloud_storage' from public.nodes where name='retention-upgrade-default')<>'cloud' or (select config->>'cloud_push_min' from public.nodes where name='retention-upgrade-default')<>'5' or (select config->>'cloud_checkin_min' from public.nodes where name='retention-upgrade-default')<>'5' or (select config->>'heartbeat_sec' from public.nodes where name='retention-upgrade-custom')<>'300' or (select config->>'record_interval_min' from public.nodes where name='retention-upgrade-custom')<>'1' or (select config->>'cloud_storage' from public.nodes where name='retention-upgrade-custom')<>'local' then raise exception 'fleet cadence defaults did not migrate'; end if; end \$\$" || exit 1
-printf 'PASS  existing fleet receives managed cadence while explicit local-only storage survives\n'
+psql -c "do \$\$ begin if (select config->>'cloud_storage' from public.nodes where name='retention-upgrade-default')<>'cloud' or (select config->>'cloud_push_min' from public.nodes where name='retention-upgrade-default')<>'1' or exists(select 1 from public.nodes where name like 'retention-upgrade-%' and (config ? 'heartbeat_sec' or config ? 'cloud_checkin_min' or config ? 'record_interval_min' or telemetry_policy_version<>3)) or (select config->>'cloud_storage' from public.nodes where name='retention-upgrade-custom')<>'local' then raise exception 'fleet cadence defaults did not migrate'; end if; end \$\$" || exit 1
+printf 'PASS  existing fleet returns to the fast cadence while explicit local-only storage survives\n'
 psql -c "do \$\$ declare n uuid := '4b000000-0000-4000-8000-0000000000aa'; begin
   if (select count(*) from public.alert_events where node_id=n) <> 3
      or (select count(*) from public.alert_events where node_id=n and not resolved) <> 1

@@ -393,7 +393,7 @@ report_at=${CFG[report_at]}
 report_hours=${CFG[report_hours]}
 report_busy_cpu_pct=${CFG[report_busy_cpu_pct]}
 report_busy_mem_pct=${CFG[report_busy_mem_pct]}
-# How often metrics are sampled locally (default one minute), and how long they are kept.
+# How often metrics are sampled locally (default five minutes), and how long they are kept.
 record_interval_min=${CFG[record_interval_min]}
 metrics_keep_days=${CFG[metrics_keep_days]}
 
@@ -417,7 +417,7 @@ cloud_node_id=${CFG[cloud_node_id]}
 cloud_api_url=${CFG[cloud_api_url]}
 # Where \`hyn link\` tells you to open a browser. The agent never contacts it.
 cloud_portal_url=${CFG[cloud_portal_url]}
-# Minutes between full portal readings (default 5). Heartbeats are independent.
+# Minutes between full portal readings (default 1). Heartbeats are independent.
 # Also settable from the portal, whose explicit settings take precedence.
 cloud_push_min=${CFG[cloud_push_min]}
 # cloud: rolling 48-hour portal history plus bounded local backup. local: local
@@ -426,14 +426,15 @@ cloud_push_min=${CFG[cloud_push_min]}
 cloud_storage=${CFG[cloud_storage]}
 # Explicit consent to send notification/report content through the portal.
 cloud_notifications=${CFG[cloud_notifications]}
-# Minutes between managed-property and command checks (1..60; hosted default 5).
+# Minutes between managed-property and command checks (1..60, default 1).
 cloud_checkin_min=${CFG[cloud_checkin_min]}
 # Secondary snapshots and request accounting stay here, with bounded retention.
 local_keep_days=${CFG[local_keep_days]}
 local_max_mb=${CFG[local_max_mb]}
 # Seconds between liveness beats from the resident agent (hyn-agent.service).
 # One small POST that proves this machine is alive; telemetry still follows
-# cloud_push_min. Clamped to 5..3600. Hosted policy can manage this cadence.
+# cloud_push_min. Clamped to 5..3600. The portal can manage this key; it calls
+# the machine quiet after three missed beats (never sooner than three minutes).
 heartbeat_sec=${CFG[heartbeat_sec]}
 cloud_timeout=${CFG[cloud_timeout]}
 # Self-hosters only: a direct Supabase URL plus its PUBLIC anon key, used instead
@@ -643,7 +644,9 @@ setup_timers() {
   # performs the full telemetry collection only when cloud_push_min is due, so
   # longer custom intervals do not run expensive probes every minute.
   #
-  # Timeout remains bounded below the five-minute check-in cadence.
+  # Timeout is 120s, not the shared 180s: the portal calls a node quiet after
+  # three missed minutes, so one run allowed to hang for the full 180s would
+  # trip that warning by itself. 120s leaves a whole spare interval.
   _write_unit "$HYN_UNIT_DIR/hyn-push.service" \
     "$(_generic_service 'hyn-view web portal push' "$exe push --scheduled" '' 120)"
   # No jitter and 1s accuracy on this one. Jitter exists to stop a fleet

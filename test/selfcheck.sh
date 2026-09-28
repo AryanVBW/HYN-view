@@ -241,10 +241,11 @@ _default_of() {
   printf '%s' "$v"
 }
 eq 'notification access details default off' 'off' "${CFG[notify_access_details]:-missing}"
-eq 'cloud telemetry defaults to five minutes' '5' "${CFG[cloud_push_min]:-missing}"
+eq 'cloud telemetry defaults to one minute' '1' "${CFG[cloud_push_min]:-missing}"
 eq 'cloud is the primary paired history store' 'cloud' "${CFG[cloud_storage]:-missing}"
-eq 'default managed check-in is five minutes' '5' "${CFG[cloud_checkin_min]:-missing}"
-eq 'local sampling remains every minute' '1' "${CFG[record_interval_min]:-missing}"
+eq 'default check-in permits one-minute telemetry' '1' "${CFG[cloud_checkin_min]:-missing}"
+eq 'local report sampling is every five minutes' '5' "${CFG[record_interval_min]:-missing}"
+eq 'the default heartbeat is 24 seconds' '24' "${CFG[heartbeat_sec]:-missing}"
 eq 'automatic CLI updates are the default' 'install' "$(_default_of auto_update)"
 eq 'default view is the advanced dashboard' 'dash' "$(_default_of dashboard_view)"
 color_detect
@@ -2610,7 +2611,7 @@ contains 'a paired machine confirms the token' 'node token' "$_doc_paired"
 contains 'a paired machine checks the transport' 'transport'  "$_doc_paired"
 contains 'a paired machine reports the endpoint scheme' 'https' "$_doc_paired"
 contains 'a paired machine reports the queue budget' 'daily budget' "$_doc_paired"
-contains 'a paired machine is watched from outside' '3 minutes without a beat' "$_doc_paired"
+contains 'a paired machine is watched from outside' 'flags this machine after 3m 00s without a beat' "$_doc_paired"
 
 # ---------------------------------------------------------------------------
 section 'config migration'
@@ -3196,17 +3197,17 @@ truthy 'the agent is not reaped for still running' '[[ $_agent != *TimeoutStartS
 
 # The loop's own logic, driven directly.
 source "$HYN_LIB/agent.sh"
-CFG[heartbeat_sec]=300; agent_interval_v
-eq 'the default beat is 300s'       '300'  "$AGENT_INTERVAL"
+CFG[heartbeat_sec]=24; agent_interval_v
+eq 'the default beat is 24s'        '24'   "$AGENT_INTERVAL"
 CFG[heartbeat_sec]=1; agent_interval_v
 eq 'a too-fast beat is clamped up'  '5'    "$AGENT_INTERVAL"
 CFG[heartbeat_sec]=99999; agent_interval_v
 eq 'a too-slow beat is clamped down' '3600' "$AGENT_INTERVAL"
 CFG[heartbeat_sec]='; rm -rf /'; agent_interval_v
-eq 'a junk interval falls back'     '300'  "$AGENT_INTERVAL"
+eq 'a junk interval falls back'     '24'   "$AGENT_INTERVAL"
 CFG[heartbeat_sec]=0; agent_interval_v
-eq 'zero would spin, so it falls back' '300' "$AGENT_INTERVAL"
-CFG[heartbeat_sec]=300
+eq 'zero would spin, so it falls back' '24' "$AGENT_INTERVAL"
+CFG[heartbeat_sec]=24
 
 # Liveness is measured, not assumed: this is the difference between a loop that
 # is running and a loop that is working, and the portal cannot tell a wedged
