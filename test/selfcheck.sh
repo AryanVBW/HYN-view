@@ -3363,6 +3363,47 @@ eq 'and no stamp at all is unknown, never active' '' "$(
 )"
 rm -f "$(HYN_VAR=$TMP/var; cloud_heartbeat_stamp)" "$(HYN_VAR=$TMP/var; _cloud_push_stamp)"
 
+# Heartbeat fresh, telemetry stale: the production failure mode. The heartbeat
+# and the uploads come from different units, so nothing else notices.
+(
+  export HYN_ETC=$TMP/etc HYN_VAR=$TMP/stale-var
+  mkdir -p "$HYN_VAR"; STATE_DIR=''
+  cloud_linked() { return 0; }
+  CFG[cloud_enabled]=on CFG[cloud_storage]=cloud CFG[cloud_push_min]=1
+  _cloud_stamp "$(_cloud_push_stamp)" "$((EPOCHSECONDS - 1200))" ok
+  cloud_telemetry_stale_v && ((CLOUD_TELEMETRY_LIMIT == 900 && CLOUD_TELEMETRY_AGE >= 1200)) || exit 1
+  [[ $(cloud_status 2>/dev/null) == *'WARNING  no reading has been attempted'* ]] || exit 1
+  _cloud_stamp "$(_cloud_push_stamp)" "$((EPOCHSECONDS - 300))" fail 'network down'
+  ! cloud_telemetry_stale_v || exit 1
+  _cloud_stamp "$(_cloud_push_stamp)" "$((EPOCHSECONDS - 86400))" paused
+  ! cloud_telemetry_stale_v || exit 1
+  # A two-hour gap is stale at a one-minute interval, not at an hourly one.
+  _cloud_stamp "$(_cloud_push_stamp)" "$((EPOCHSECONDS - 7200))" ok
+  cloud_telemetry_stale_v || exit 1
+  CFG[cloud_push_min]=60
+  ! cloud_telemetry_stale_v && ((CLOUD_TELEMETRY_LIMIT == 10800)) || exit 1
+  CFG[cloud_push_min]=1 CFG[cloud_storage]=local
+  ! cloud_telemetry_stale_v || exit 1
+  CFG[cloud_storage]=cloud
+  cloud_linked() { return 1; }
+  ! cloud_telemetry_stale_v
+) && ok || bad 'stale telemetry is not told apart from failing, paused, slow or local-only uploads'
+(
+  export HYN_ETC=$TMP/etc HYN_VAR=$TMP/stale-heal
+  mkdir -p "$HYN_VAR"; STATE_DIR=''
+  source "$HYN_LIB/setup.sh"
+  cloud_linked() { return 0; }
+  CFG[cloud_enabled]=on CFG[cloud_storage]=cloud CFG[cloud_push_min]=1
+  _cloud_stamp "$(_cloud_push_stamp)" "$((EPOCHSECONDS - 7200))" ok
+  CALLS=''
+  systemctl() { CALLS+="$*;"; return 0; }
+  setup_heal_stale_telemetry 2>/dev/null
+  [[ $CALLS == 'restart hyn-push.timer;start --no-block hyn-push.service;' ]] || exit 1
+  CALLS=''
+  setup_heal_stale_telemetry 2>/dev/null
+  [[ -z $CALLS ]]
+) && ok || bad 'stale telemetry is not repaired, or is repaired on every maintenance pass'
+
 # Self-heal, which is the other half: a loop that stopped beating gets restarted,
 # and one that is beating is left alone.
 _heal_log="$TMP/heal-systemctl"

@@ -705,6 +705,36 @@ cloud_heartbeat_age_v() {
   return 0
 }
 
+# Telemetry that has stopped while everything else looks healthy. The heartbeat
+# comes from the resident agent and uploads come from hyn-push.timer, so one can
+# stay green for days while the other is dead -- which is exactly what happened on
+# a production node when its push timer stopped. Every upload attempt (success,
+# failure, pause) rewrites the push stamp, so an old stamp means uploads are not
+# being attempted at all: a scheduling fault, not a network one. Administrative
+# pauses and suspensions are deliberate and never count as stale.
+#
+# Sets CLOUD_TELEMETRY_AGE (seconds since the last attempt, -1 if unknown) and
+# CLOUD_TELEMETRY_LIMIT (the allowance: three missed intervals, at least 15
+# minutes). Returns 0 only when uploads are expected and overdue.
+CLOUD_TELEMETRY_AGE=-1 CLOUD_TELEMETRY_LIMIT=900
+cloud_telemetry_stale_v() {
+  local f ts='' st='' interval=${CFG[cloud_push_min]:-5}
+  CLOUD_TELEMETRY_AGE=-1
+  [[ $interval =~ ^[1-9][0-9]{0,3}$ ]] || interval=5
+  CLOUD_TELEMETRY_LIMIT=$((interval * 180))
+  ((CLOUD_TELEMETRY_LIMIT < 900)) && CLOUD_TELEMETRY_LIMIT=900
+  cfg_on cloud_enabled && cloud_linked || return 1
+  [[ ${CFG[cloud_storage]:-cloud} == cloud ]] || return 1
+  f=$(_cloud_push_stamp)
+  [[ -r $f ]] || return 1
+  IFS=$'\t' read -r ts st _ <"$f" 2>/dev/null
+  [[ $ts =~ ^[0-9]+$ ]] || return 1
+  case $st in paused | suspended) return 1 ;; esac
+  CLOUD_TELEMETRY_AGE=$((${EPOCHSECONDS:-0} - ts))
+  ((CLOUD_TELEMETRY_AGE < 0)) && CLOUD_TELEMETRY_AGE=0
+  ((CLOUD_TELEMETRY_AGE > CLOUD_TELEMETRY_LIMIT))
+}
+
 # Persist cumulative WAN counters at each beat, but report them at most once
 # per minute after a successful upload. Cumulative counters include the bytes
 # observed during skipped/failed requests. The isolated subshell preserves the
@@ -1918,6 +1948,11 @@ cloud_status() {
     esac
   else
     printf 'last push never\n'
+  fi
+  if cloud_telemetry_stale_v; then
+    printf 'WARNING  no reading has been attempted for %s (expected every %s min); the upload\n' \
+      "$(fmt_dur "$CLOUD_TELEMETRY_AGE")" "${CFG[cloud_push_min]:-5}"
+    printf '         timer is not running even if the heartbeat is: sudo hyn doctor --fix\n'
   fi
   # The beat is what the portal reads as proof of life, so it is worth its own
   # line: a machine can be pushing telemetry on schedule and still look quiet if

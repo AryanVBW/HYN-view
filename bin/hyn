@@ -854,6 +854,13 @@ cmd_doctor() {
     else
       _chk warn 'portal node state' 'unknown -- nothing has been accepted yet: hyn push'
     fi
+    # The heartbeat and the uploads come from different units, so a machine can
+    # look alive in the portal with charts that stopped days ago.
+    if cloud_telemetry_stale_v; then
+      _chk warn 'telemetry upload' "none attempted for $(fmt_dur "$CLOUD_TELEMETRY_AGE") -- the push timer is not running: sudo hyn doctor --fix"
+    elif ((CLOUD_TELEMETRY_AGE >= 0)); then
+      _chk ok 'telemetry upload' "last attempt $(fmt_dur "$CLOUD_TELEMETRY_AGE") ago"
+    fi
   else
     # Not a fault. An unpaired machine is a working local monitor that cannot mail
     # anyone, and saying so is different from saying something is broken.

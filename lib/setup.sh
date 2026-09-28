@@ -884,8 +884,29 @@ _setup_self_heal() {
     systemctl reset-failed "$u" >/dev/null 2>&1 || true
     systemctl enable --now "$u" >/dev/null 2>&1 || true
   done
+  setup_heal_stale_telemetry
   setup_heal_agent
   return 0
+}
+
+# Uploads can stop for reasons the timer state does not show (a unit left
+# stopped, a job that never got its first activation). When no upload has been
+# attempted for three intervals, restart the push timer and run one upload now.
+# Once per allowance window, so a machine whose job cannot start at all is not
+# poked every five minutes; `hyn doctor` keeps reporting it either way.
+setup_heal_stale_telemetry() {
+  declare -F cloud_telemetry_stale_v >/dev/null || return 0
+  cloud_telemetry_stale_v || return 0
+  local mark last=0
+  state_dir_v
+  mark=$STATE_DIR/telemetry-heal
+  [[ -r $mark ]] && IFS= read -r last <"$mark"
+  [[ $last =~ ^[0-9]+$ ]] || last=0
+  ((${EPOCHSECONDS:-0} - last < CLOUD_TELEMETRY_LIMIT)) && return 0
+  printf '%s\n' "${EPOCHSECONDS:-0}" >"$mark" 2>/dev/null || true
+  warn "no telemetry upload for $(fmt_dur "$CLOUD_TELEMETRY_AGE"); restarting hyn-push.timer"
+  systemctl restart hyn-push.timer >/dev/null 2>&1 || true
+  systemctl start --no-block hyn-push.service >/dev/null 2>&1 || true
 }
 
 # A timer can be active and never fire again. SubState=elapsed means systemd
