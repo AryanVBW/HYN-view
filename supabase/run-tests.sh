@@ -215,6 +215,10 @@ sed -n '/PASS /p' "$WORK/user-assignments-schema.log"
 printf 'PASS  legacy roles migrate once and reapply preserves restricted Admins\n'
 psql -f "$HERE/roles-test.sql" >"$WORK/roles-test.log" 2>&1 || { cat "$WORK/roles-test.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/roles-test.log"
+psql -f "$HERE/maintainer-visibility-test.sql" >"$WORK/maintainer-visibility.log" 2>&1 || { cat "$WORK/maintainer-visibility.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/maintainer-visibility.log"
+psql -f "$HERE/maintainer-resolve-alert-test.sql" >"$WORK/maintainer-resolve.log" 2>&1 || { cat "$WORK/maintainer-resolve.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/maintainer-resolve.log"
 # Reapply later migrations in order so final overrides remain installed.
 for migration in "$HERE"/migrations/*.sql; do
   [[ ${migration##*/} > 20260909120000_portal_roles.sql ]] || continue

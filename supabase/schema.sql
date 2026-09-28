@@ -1213,9 +1213,12 @@ create table if not exists public.notification_templates (
 
 alter table public.notification_templates
   drop constraint if exists notification_templates_template_key_check;
+-- The complete key set, not the original three: schema.sql is reapplied over
+-- databases that already hold the sign-in, device and first-report templates
+-- added further down, and a narrower CHECK here makes that reapply fail.
 alter table public.notification_templates
   add constraint notification_templates_template_key_check
-  check (template_key in ('alert', 'report', 'system'));
+  check (template_key in ('alert','report','system','signin','device','first_report'));
 
 insert into public.notification_templates (template_key, name, description, html_template)
 values
@@ -6450,41 +6453,29 @@ begin
   return json_build_object('status','ok','role',p_role);
 end $$;
 
--- Read paths: swap hyn_is_admin() for hyn_can_view_fleet(). Owner-scoped access
--- is untouched, so nothing a customer could see changes.
+-- Read paths go through hyn_can_view_node(), which below gains fleet visibility
+-- for maintainers. Replacing these policies with a bare owner-or-fleet test (as
+-- this block first did) silently dropped shared-server and shared-dashboard
+-- access, the suspended-account and revoked-node checks, and the 48-hour
+-- monitoring read window. See 20260928100000_restore_shared_node_visibility.sql.
 drop policy if exists nodes_select_own on public.nodes;
-create policy nodes_select_own on public.nodes
-  for select using (owner = auth.uid() or public.hyn_can_view_fleet());
-
+create policy nodes_select_own on public.nodes for select to authenticated
+  using(public.hyn_can_view_node(id));
 drop policy if exists metrics_select_own on public.metrics;
-create policy metrics_select_own on public.metrics
-  for select using (
-    public.hyn_can_view_fleet() or exists (
-      select 1 from public.nodes n where n.id = metrics.node_id and n.owner = auth.uid()
-    )
-  );
-
+create policy metrics_select_own on public.metrics for select to authenticated
+  using(ts between now()-interval '48 hours' and now()+interval '5 minutes' and public.hyn_can_view_node(node_id));
 drop policy if exists speedtests_select_own on public.speedtests;
-create policy speedtests_select_own on public.speedtests
-  for select using (
-    public.hyn_can_view_fleet() or exists (
-      select 1 from public.nodes n where n.id = speedtests.node_id and n.owner = auth.uid()
-    )
-  );
-
+create policy speedtests_select_own on public.speedtests for select to authenticated
+  using(ts between now()-interval '48 hours' and now()+interval '5 minutes' and public.hyn_can_view_node(node_id));
 drop policy if exists alert_events_select_own on public.alert_events;
-create policy alert_events_select_own on public.alert_events
-  for select using (
-    public.hyn_can_view_fleet() or exists (
-      select 1 from public.nodes n where n.id = alert_events.node_id and n.owner = auth.uid()
-    )
-  );
+create policy alert_events_select_own on public.alert_events for select to authenticated
+  using(ts between now()-interval '48 hours' and now()+interval '5 minutes' and public.hyn_can_view_node(node_id));
 
 -- Delivery history is how the maintainer sees that a notification actually went
--- out, which is part of the job.
+-- out, which is part of the job. Suspended accounts see nothing.
 drop policy if exists notification_log_select_own on public.notification_log;
-create policy notification_log_select_own on public.notification_log
-  for select using (owner = auth.uid() or public.hyn_can_view_fleet());
+create policy notification_log_select_own on public.notification_log for select to authenticated
+  using(public.hyn_is_active() and (owner = auth.uid() or public.hyn_can_view_fleet()));
 
 -- Per-node visibility (bandwidth_daily and the relayer views hang off this).
 create or replace function public.hyn_can_view_node(p_node uuid)
