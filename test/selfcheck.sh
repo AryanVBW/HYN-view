@@ -3504,6 +3504,10 @@ truthy 'the shipped version is a version' "ver_valid '$HYN_VERSION'"
 # "2.0.0" must beat "1.10.0" even though 10 > 0 segment by segment.
 truthy 'a major bump reads as newer than a two-digit minor' "ver_gt '2.0.0' '1.10.0'"
 falsy  'and the reverse is not newer'                      "ver_gt '1.10.0' '2.0.0'"
+# Every deployed agent runs 2.0.0, and main carries behaviour changes. They can
+# only reach the fleet if the shipped version is strictly newer: an unchanged
+# version string is "already current" to every updater.
+truthy 'the shipped version is newer than the deployed 2.0.0' "ver_gt '$HYN_VERSION' '2.0.0'"
 
 # ---------------------------------------------------------------------------
 printf '\n'

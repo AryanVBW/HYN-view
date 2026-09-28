@@ -1,4 +1,37 @@
-# HYN CLI 2.0.0 release verification
+# HYN CLI 2.0.1 release verification
+
+## September 28 release bump
+
+CLI **2.0.1** carries the audit fixes made after 2.0.0 was published
+(2026-09-21). Every deployed agent runs 2.0.0, so the version had to move: with
+an unchanged version string every updater reports the machine as current and
+none of these changes would ever reach the fleet. `test/selfcheck.sh` now fails
+unless the shipped version is newer than 2.0.0.
+
+What 2.0.1 changes on a server:
+
+- Monotonic timers (push, record, alerts, maintenance) are no longer
+  `Persistent=`, so a restart can no longer leave one "active (elapsed)" with no
+  next run; self-heal and `hyn doctor --fix` re-arm a timer that is elapsed.
+- Every unit/timer writer (setup, link, doctor, the updater's service refresh,
+  the agent's reconcile and self-heal, uninstall) runs under one schedule lock.
+- Uploads report cleared alerts and each incident's start time, run the real
+  hysteresis state, and honour `cloud_push_min` instead of doubling it.
+- A fresh heartbeat with no upload attempt for three intervals is reported by
+  `hyn cloud status` / `hyn doctor` and repaired by self-heal.
+- Defaults stay on the fast cadence the fleet and portal use: 24 s heartbeat,
+  one-minute check-in and upload, five-minute local sampling.
+- Only `www.hyn-view.in` is contacted; the apex host is never probed.
+
+Release gates, in order (none of them has been run for 2.0.1):
+
+1. Apply the pending database migrations and deploy the portal first; the
+   agent's incident fields are ignored by an older portal but are what closes
+   alerts on the new one.
+2. On one Ubuntu/systemd host: install 2.0.1 over 2.0.0 with the real updater,
+   confirm `systemctl list-timers 'hyn-*'` shows a next run for every timer,
+   and that a reading, a heartbeat and a resolved alert reach the portal.
+3. `npm publish` and move the `latest` dist-tag only after step 2.
 
 ## September 22 release bump
 
