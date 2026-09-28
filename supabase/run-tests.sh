@@ -170,9 +170,15 @@ psql -f "$HERE/migrations/20260909120000_portal_roles.sql" >"$WORK/roles.log" 2>
 for migration in "$HERE"/migrations/*.sql; do
   [[ ${migration##*/} > 20260909120000_portal_roles.sql ]] || continue
   if [[ ${migration##*/} == 20260912190000_rolling_cloud_telemetry.sql ]]; then
-    psql -c "insert into public.nodes(owner,name,config) values ('90000000-0000-4000-8000-000000000001','retention-upgrade-default','{\"cloud_push_min\":\"10\"}'),('90000000-0000-4000-8000-000000000001','retention-upgrade-custom','{\"cloud_push_min\":\"5\",\"cloud_storage\":\"local\"}')" || exit 1
+    psql -c "insert into public.nodes(owner,name,config) values ('90000000-0000-4000-8000-000000000001','retention-upgrade-default','{\"cloud_push_min\":\"10\"}'),('90000000-0000-4000-8000-000000000001','retention-upgrade-custom','{\"cloud_push_min\":\"5\"}')" || exit 1
   fi
   psql -f "$migration" >"$WORK/upgrade.log" 2>&1 || { cat "$WORK/upgrade.log"; exit 1; }
+  if [[ ${migration##*/} == 20260912190000_rolling_cloud_telemetry.sql ]]; then
+    # cloud_storage does not exist before this migration, so an explicit
+    # local-only choice can only be made after it; later cadence migrations
+    # must then preserve it.
+    psql -c "update public.nodes set config=config || '{\"cloud_storage\":\"local\"}' where name='retention-upgrade-custom'" || exit 1
+  fi
 done
 psql -c "do \$\$ begin if (select config->>'cloud_storage' from public.nodes where name='retention-upgrade-default')<>'cloud' or (select config->>'cloud_push_min' from public.nodes where name='retention-upgrade-default')<>'5' or (select config->>'cloud_checkin_min' from public.nodes where name='retention-upgrade-default')<>'5' or (select config->>'heartbeat_sec' from public.nodes where name='retention-upgrade-custom')<>'300' or (select config->>'record_interval_min' from public.nodes where name='retention-upgrade-custom')<>'1' or (select config->>'cloud_storage' from public.nodes where name='retention-upgrade-custom')<>'local' then raise exception 'fleet cadence defaults did not migrate'; end if; end \$\$" || exit 1
 printf 'PASS  existing fleet receives managed cadence while explicit local-only storage survives\n'
@@ -185,6 +191,8 @@ sed -n '/PASS /p' "$WORK/node-relayer-upgrade.log"
 psql -f "$HERE/user-server-assignments-test.sql" >"$WORK/user-assignments-upgrade.log" 2>&1 || { cat "$WORK/user-assignments-upgrade.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/user-assignments-upgrade.log"
 psql -f "$HERE/rolling-telemetry-test.sql" >"$WORK/telemetry-upgrade.log" 2>&1 || { cat "$WORK/telemetry-upgrade.log"; exit 1; }
+psql -f "$HERE/current-defaults-test.sql" >"$WORK/defaults-upgrade.log" 2>&1 || { cat "$WORK/defaults-upgrade.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/defaults-upgrade.log"
 sed -n '/PASS /p' "$WORK/telemetry-upgrade.log"
 psql -f "$HERE/rolling-telemetry-detail-test.sql" >"$WORK/telemetry-detail-upgrade.log" 2>&1 || { cat "$WORK/telemetry-detail-upgrade.log"; exit 1; }
 sed -n '/PASS /p; /storage bytes/p' "$WORK/telemetry-detail-upgrade.log"
@@ -192,6 +200,8 @@ psql -f "$HERE/schema.sql" >"$WORK/final-schema.log" 2>&1 || { cat "$WORK/final-
 psql -c "do \$\$ begin if (select config->>'cloud_storage' from public.nodes where name='retention-upgrade-custom')<>'local' then raise exception 'schema reapply lost explicit local choice'; end if; end \$\$; delete from public.nodes where name in ('retention-upgrade-default','retention-upgrade-custom')" || exit 1
 printf 'PASS  schema reapplication preserves later explicit local-only choices\n'
 psql -f "$HERE/rolling-telemetry-test.sql" >"$WORK/telemetry-schema.log" 2>&1 || { cat "$WORK/telemetry-schema.log"; exit 1; }
+psql -f "$HERE/current-defaults-test.sql" >"$WORK/defaults-schema.log" 2>&1 || { cat "$WORK/defaults-schema.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/defaults-schema.log"
 sed -n '/PASS /p' "$WORK/telemetry-schema.log"
 psql -f "$HERE/rolling-telemetry-detail-test.sql" >"$WORK/telemetry-detail-schema.log" 2>&1 || { cat "$WORK/telemetry-detail-schema.log"; exit 1; }
 sed -n '/PASS /p; /storage bytes/p' "$WORK/telemetry-detail-schema.log"
