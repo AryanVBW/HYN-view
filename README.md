@@ -208,6 +208,9 @@ sudo hyn unlink        forget the credential locally
    provider in Supabase and add `<your-site>/auth/callback` as a redirect URL.
 3. Set the server-only portal variables (`SUPABASE_SERVICE_ROLE_KEY`,
    `RESEND_API_KEY`, `EMAIL_FROM`, and `CRON_SECRET`) in the deployment.
+   Email is sent only from **`hyn-view.info`** (`EMAIL_FROM=HYN-view
+   <reports@hyn-view.info>`); `hyn-view.in` is the website, not a mail domain.
+   See [email delivery](docs/email-delivery.md).
 4. On the server, run `sudo hyn link`, then follow the code. The CLI talks to
    the hosted `/api/agent/v1` gateway and installs its systemd schedule itself.
 
@@ -425,12 +428,15 @@ anon key — the dashboard hiding a button is a courtesy, not a boundary.
 | Hosted API URL | built into the CLI, overridable in `/etc/hyn-view/config` | Normal customers link without knowing the Supabase project or public key. |
 | Node token | `/etc/hyn-view/secrets` (0600) | The actual credential. Sent in a request body, never in `argv`, so no local user can read it out of `ps`. |
 | Service-role key | portal server environment only | Used by the scheduled email worker; never sent to a browser or monitored server. |
-| Shared Resend key | portal server environment only | One centrally managed provider account serves all portal users. |
+| Shared Resend key | portal server environment only | One centrally managed provider account serves all portal users; its verified sending domain is `hyn-view.info`. |
 
 **Portal email delivery is centrally managed.** Recipients and schedules are
 tenant-private rows protected by RLS; the provider key remains a server-only
 deployment secret. The cron worker sends through Resend, records every outcome,
 and uses an idempotency ledger so overlapping invocations do not duplicate mail.
+Every message, including Supabase Auth mail, comes from `@hyn-view.info`; the
+website domain `hyn-view.in` never sends email. See
+[email delivery](docs/email-delivery.md).
 
 Administrators may edit the non-secret HTML wrappers for incident alerts, daily
 health digests, and system-information messages from the Email templates tab. A wrapper must contain
