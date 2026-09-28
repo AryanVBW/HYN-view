@@ -3014,6 +3014,18 @@ truthy 'the check-in timer spends no heartbeat budget on jitter' \
   '[[ ${_push_tmr##*RandomizedDelaySec=} == 0* ]]'
 truthy 'the check-in timer is not coalesced away from its minute' \
   '[[ ${_push_tmr##*AccuracySec=} == 1s* ]]'
+# Persistent= on a monotonic timer makes systemd treat OnBootSec= as spent after
+# any restart past its deadline, leaving OnUnitActiveSec= with nothing to count
+# from: "active (elapsed)" with no next run. Calendar timers keep it, because it
+# is what catches up a report or speed test missed while the box was off.
+for _t in "$_unitdir"/*.timer; do
+  _c=$(<"$_t")
+  if [[ $_c == *OnCalendar=* ]]; then
+    if [[ $_c == *Persistent=true* ]]; then ok
+    else bad "${_t##*/} is a calendar timer without Persistent=, so missed runs are lost"; fi
+  elif [[ $_c == *Persistent=* ]]; then bad "${_t##*/} is monotonic and Persistent=, so a restart can leave it elapsed forever"
+  else ok; fi
+done
 
 # The maintenance unit is where an install runs: on its own timeout, with its own
 # memory headroom, and out of the sixty-second check-in's way.

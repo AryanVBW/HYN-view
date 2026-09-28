@@ -188,8 +188,19 @@ WantedBy=multi-user.target
 EOF
 }
 
+# Persistent= only for calendar timers. On a monotonic one (OnBootSec= plus
+# OnUnitActiveSec=) it is not merely useless but fatal: systemd loads the stamp
+# file's time as "last triggered", then treats OnBootSec= as an already-spent
+# one-time trigger whenever the timer is (re)started after its deadline -- a
+# restart, a daemon-reload racing boot, or a disable/enable that let systemd
+# unload the idle service and forget when it last ran. OnUnitActiveSec= then has
+# no activation to count from, and the timer sits "active (elapsed)" with no next
+# run, forever. That is how hyn-push.timer stopped uploading on a production node
+# for a week while every local check read it as active.
 _generic_timer() {
   local desc=$1 spec=$2 unit=$3 jitter=${4:-60} accuracy=${5:-30s} extra=${6:-}
+  local persistent=''
+  [[ $spec == *OnCalendar=* ]] && persistent=$'\nPersistent=true'
   cat <<EOF
 [Unit]
 Description=$desc
@@ -198,8 +209,7 @@ Documentation=https://github.com/AryanVBW/HYN-view
 [Timer]
 $spec
 RandomizedDelaySec=$jitter
-AccuracySec=$accuracy
-Persistent=true
+AccuracySec=$accuracy$persistent
 Unit=$unit
 $extra
 
