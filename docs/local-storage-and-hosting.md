@@ -147,12 +147,17 @@ fallback from local storage to permanent cloud ingestion.
 
 ## Consumption model
 
-With defaults, each node sends about **60,480 control POSTs per 30 days**:
-43,200 one-minute heartbeats plus 17,280 settings/command checks. Previously a
-24-second heartbeat, one-minute settings/command checks, and ten-minute telemetry
-yielded about 198,720 POSTs. That is about **70% fewer routine requests**, before
-pairing, explicit commands, errors and retries. Local settings checks also omit
-the email templates, dispatch work and Workflow lease used by the legacy path.
+> Historical figures. The current defaults are a 24-second heartbeat, a
+> one-minute settings/command check and a one-minute reading: per node about
+> 108,000 heartbeats, 43,200 check-ins and 43,200 readings per 30 days.
+> `sudo hyn cloud usage` prints the figure for the configured cadence.
+
+With the local-only defaults of that release, each node sent about **60,480
+control POSTs per 30 days**: 43,200 one-minute heartbeats plus 17,280
+settings/command checks. Previously a 24-second heartbeat, one-minute
+settings/command checks, and ten-minute telemetry yielded about 198,720 POSTs.
+Local settings checks also omit the email templates, dispatch work and Workflow
+lease used by the legacy path.
 Heartbeat failures back off up to 15 minutes while local supervision stays alive.
 Hidden/offline browser tabs skip dashboard refreshes; queued commands poll at
 15 seconds, running commands at five seconds.
