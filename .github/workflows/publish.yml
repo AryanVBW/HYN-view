@@ -10,11 +10,14 @@ name: Publish CLI to npm
 # Trusted publishing -> GitHub Actions): owner AryanVBW, repository HYN-view,
 # workflow file publish.yml, environment npm, allowed action npm publish.
 # Until that exists, this job fails with ENEEDAUTH and nothing is published.
+# After setting it up, publish without a new commit: Actions -> Publish CLI to
+# npm -> Run workflow (main). A manual run still requires passing checks.
 on:
   workflow_run:
     workflows: [CLI and database checks]
     types: [completed]
     branches: [main]
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -26,9 +29,10 @@ concurrency:
 jobs:
   publish:
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main'
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
@@ -36,6 +40,7 @@ jobs:
       url: https://www.npmjs.com/package/hyn-view
     permissions:
       contents: read
+      actions: read
       id-token: write
     env:
       HYN_NO_POSTINSTALL: '1'
@@ -43,13 +48,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # The exact commit the checks passed on, not whatever main is now.
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '24.21.0'
           registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false
+      - name: A manual run needs passing checks on this commit
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          passed=$(gh run list -R "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" --status success --json databaseId --jq length)
+          [[ $passed -gt 0 ]] || { echo "::error::CLI and database checks have not passed on $GITHUB_SHA"; exit 1; }
       - name: Decide whether this version is new
         id: version
         run: |
@@ -70,7 +82,11 @@ jobs:
         run: npm install --global npm@11.20.0 && npm --version
       - name: Publish to npm
         if: steps.version.outputs.publish == 'true'
-        run: npm publish --access public
+        run: |
+          npm publish --access public || {
+            echo "::error::npm refused the publish. If the log shows ENEEDAUTH, npm trusted publishing is not set up for hyn-view yet (docs/cli-release-readiness.md, release gate 3)."
+            exit 1
+          }
       - name: Confirm the registry serves the new version
         if: steps.version.outputs.publish == 'true'
         run: |
