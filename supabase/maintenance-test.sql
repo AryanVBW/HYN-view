@@ -32,4 +32,41 @@ do $$ declare r record; v_first text; begin
   end loop;
   raise notice 'PASS  database maintenance is scheduled once per job by name, and every scheduled command runs';
 end $$;
+
+do $$ declare v_node uuid := '4d000000-0000-4000-8000-0000000000a1'; v_owner uuid := '4d000000-0000-4000-8000-000000000001';
+  v_log bigint := (select count(*) from public.notification_log); v_audit bigint := (select count(*) from public.admin_audit);
+  r jsonb;
+begin
+  if not exists(select 1 from cron.job where jobname = 'hyn-delivery-retention' and schedule = '17 * * * *') then
+    raise exception 'delivery history retention is not scheduled hourly';
+  end if;
+  insert into auth.users(id,email) values (v_owner,'retention@maintenance.test');
+  insert into public.nodes(id,owner,name) values (v_node, v_owner, 'retention node');
+  insert into public.web_notification_jobs(node_id,fingerprint,status,attempts,subject,text_body,created_at,updated_at) values
+    (v_node,'sent-old','sent',1,'s','b',now()-interval '40 days',now()-interval '31 days'),
+    (v_node,'sent-recent','sent',1,'s','b',now()-interval '40 days',now()-interval '29 days'),
+    (v_node,'failed-final-old','failed',5,'s','b',now()-interval '40 days',now()-interval '31 days'),
+    (v_node,'failed-retry-old','failed',2,'s','b',now()-interval '40 days',now()-interval '31 days'),
+    (v_node,'queued-old','queued',0,'s','b',now()-interval '40 days',now()-interval '31 days');
+  insert into public.delivery_events(id,source_key,owner,node_id,kind,recipient,subject,status,terminal,updated_at) values
+    ('4d000000-0000-4000-8000-0000000000e1','retention:old',v_owner,v_node,'incident','r@maintenance.test','s','sent',true,now()-interval '91 days'),
+    ('4d000000-0000-4000-8000-0000000000e2','retention:recent',v_owner,v_node,'incident','r@maintenance.test','s','sent',true,now()-interval '89 days');
+  insert into public.delivery_attempts(event_id,status) values ('4d000000-0000-4000-8000-0000000000e1','sent'),('4d000000-0000-4000-8000-0000000000e2','sent');
+  insert into public.cloud_email_dispatches(idempotency_key,node_id,kind,created_at) values
+    ('retention:dispatch-old',v_node,'report',now()-interval '31 days'),('retention:dispatch-recent',v_node,'report',now()-interval '1 day');
+  r := public._hyn_prune_delivery_history(5000);
+  if (select string_agg(fingerprint, ',' order by fingerprint) from public.web_notification_jobs where node_id = v_node)
+       <> 'failed-retry-old,queued-old,sent-recent' then
+    raise exception 'finished-job retention removed the wrong jobs: %', r;
+  end if;
+  if (select string_agg(source_key, ',') from public.delivery_events where owner = v_owner) <> 'retention:recent'
+     or (select count(*) from public.delivery_attempts where event_id in ('4d000000-0000-4000-8000-0000000000e1','4d000000-0000-4000-8000-0000000000e2')) <> 1
+     or (select string_agg(idempotency_key, ',') from public.cloud_email_dispatches where node_id = v_node) <> 'retention:dispatch-recent' then
+    raise exception 'delivery ledger retention removed the wrong rows: %', r;
+  end if;
+  if (select count(*) from public.notification_log) <> v_log or (select count(*) from public.admin_audit) <> v_audit then
+    raise exception 'delivery retention touched the delivery log or the audit trail';
+  end if;
+  raise notice 'PASS  finished jobs go after 30 days, the delivery ledger after 90, the log and audit trail stay';
+end $$;
 rollback;
