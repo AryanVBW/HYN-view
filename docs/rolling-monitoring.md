@@ -32,6 +32,9 @@ network failures do not erase that secondary copy.
 - Charts use at most 600 five-minute sample points across 48 hours. The latest
   full reading is fetched separately, so detail panels cannot select an old point
   merely because the history query reached its row limit.
+- `hyn_metric_history` and `hyn_fleet_metric_history` check access once per call
+  (`hyn_can_view_node`, `hyn_is_admin`) rather than through row level security on
+  every reading. They return the same rows as before.
 
 ## Retention and cost limits
 

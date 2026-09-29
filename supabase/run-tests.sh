@@ -216,6 +216,8 @@ psql -f "$HERE/web-jobs-test.sql" >"$WORK/web-jobs-upgrade.log" 2>&1 || { cat "$
 sed -n '/PASS /p' "$WORK/web-jobs-upgrade.log"
 psql -f "$HERE/maintenance-test.sql" >"$WORK/maintenance-upgrade.log" 2>&1 || { cat "$WORK/maintenance-upgrade.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/maintenance-upgrade.log"
+psql -f "$HERE/metric-history-test.sql" >"$WORK/metric-history-upgrade.log" 2>&1 || { cat "$WORK/metric-history-upgrade.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/metric-history-upgrade.log"
 sed -n '/PASS /p' "$WORK/telemetry-upgrade.log"
 psql -f "$HERE/rolling-telemetry-detail-test.sql" >"$WORK/telemetry-detail-upgrade.log" 2>&1 || { cat "$WORK/telemetry-detail-upgrade.log"; exit 1; }
 sed -n '/PASS /p; /storage bytes/p' "$WORK/telemetry-detail-upgrade.log"
@@ -231,6 +233,8 @@ psql -f "$HERE/web-jobs-test.sql" >"$WORK/web-jobs-schema.log" 2>&1 || { cat "$W
 sed -n '/PASS /p' "$WORK/web-jobs-schema.log"
 psql -f "$HERE/maintenance-test.sql" >"$WORK/maintenance-schema.log" 2>&1 || { cat "$WORK/maintenance-schema.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/maintenance-schema.log"
+psql -f "$HERE/metric-history-test.sql" >"$WORK/metric-history-schema.log" 2>&1 || { cat "$WORK/metric-history-schema.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/metric-history-schema.log"
 sed -n '/PASS /p' "$WORK/telemetry-schema.log"
 psql -f "$HERE/rolling-telemetry-detail-test.sql" >"$WORK/telemetry-detail-schema.log" 2>&1 || { cat "$WORK/telemetry-detail-schema.log"; exit 1; }
 sed -n '/PASS /p; /storage bytes/p' "$WORK/telemetry-detail-schema.log"
