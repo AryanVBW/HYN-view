@@ -220,6 +220,8 @@ psql -f "$HERE/metric-history-test.sql" >"$WORK/metric-history-upgrade.log" 2>&1
 sed -n '/PASS /p' "$WORK/metric-history-upgrade.log"
 psql -f "$HERE/outage-sweep-test.sql" >"$WORK/outage-sweep-upgrade.log" 2>&1 || { cat "$WORK/outage-sweep-upgrade.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/outage-sweep-upgrade.log"
+psql -f "$HERE/fleet-latest-test.sql" >"$WORK/fleet-latest-upgrade.log" 2>&1 || { cat "$WORK/fleet-latest-upgrade.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/fleet-latest-upgrade.log"
 sed -n '/PASS /p' "$WORK/telemetry-upgrade.log"
 psql -f "$HERE/rolling-telemetry-detail-test.sql" >"$WORK/telemetry-detail-upgrade.log" 2>&1 || { cat "$WORK/telemetry-detail-upgrade.log"; exit 1; }
 sed -n '/PASS /p; /storage bytes/p' "$WORK/telemetry-detail-upgrade.log"
@@ -239,6 +241,8 @@ psql -f "$HERE/metric-history-test.sql" >"$WORK/metric-history-schema.log" 2>&1 
 sed -n '/PASS /p' "$WORK/metric-history-schema.log"
 psql -f "$HERE/outage-sweep-test.sql" >"$WORK/outage-sweep-schema.log" 2>&1 || { cat "$WORK/outage-sweep-schema.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/outage-sweep-schema.log"
+psql -f "$HERE/fleet-latest-test.sql" >"$WORK/fleet-latest-schema.log" 2>&1 || { cat "$WORK/fleet-latest-schema.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/fleet-latest-schema.log"
 sed -n '/PASS /p' "$WORK/telemetry-schema.log"
 psql -f "$HERE/rolling-telemetry-detail-test.sql" >"$WORK/telemetry-detail-schema.log" 2>&1 || { cat "$WORK/telemetry-detail-schema.log"; exit 1; }
 sed -n '/PASS /p; /storage bytes/p' "$WORK/telemetry-detail-schema.log"
