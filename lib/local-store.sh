@@ -259,7 +259,10 @@ local_outbox_quarantine() {
   [[ $queued == "$LOCAL_STORE/outbox/"* && -f $queued && ! -L $queued ]] || return 1
   [[ $code == 400 || $code == 413 ]] || return 1
   printf -v date '%(%Y-%m-%d-%H%M%S)T' -1
-  name="$LOCAL_STORE/snapshots/$date-cloud-rejected-$code-${queued##*/}"
+  # Same <date>-<microseconds> prefix as local_store_snapshot, so history sorts
+  # by time. Without it a rejected reading archived in the same second sorted
+  # after every snapshot of that second ("c" > digits) and read as the newest.
+  name="$LOCAL_STORE/snapshots/$date-${EPOCHREALTIME#*[.,]}-cloud-rejected-$code-${queued##*/}"
   tmp=$(mktemp "$LOCAL_STORE/snapshots/.rejected.XXXXXX") || return 1
   printf '%s\n' "$payload" >"$tmp" || { rm -f -- "$tmp"; return 1; }
   _local_store_publish "$tmp" "$name" || return 1

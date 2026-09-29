@@ -266,7 +266,7 @@ check 'HTTP 413 is a deterministic body size rejection' '(CLOUD_LAST_CODE=413; C
 check 'server failures are retryable even when their message resembles validation' '(CLOUD_LAST_CODE=503; CLOUD_LAST_ERR="monitoring payload exceeds 64 KiB"; ! _cloud_outbox_permanent_rejection)'
 CLOUD_PAYLOAD='{"ts":"2026-09-12T00:00:00Z","sample":"offline-original"}'
 check 'failed upload leaves durable payload and secondary local backup' '! cloud_ingest_collected 1 && [[ $(_outbox_count) == 1 && $(local_history) == "$CLOUD_PAYLOAD" && $CLOUD_INGESTED == 0 ]]'
-check 'queued data contains no credential envelope or node secret' '! rg -q "p_node_token|test-private-node-token" "$HYN_VAR/local/outbox"'
+check 'queued data contains no credential envelope or node secret' '! grep -r -q -E "p_node_token|test-private-node-token" "$HYN_VAR/local/outbox"'
 queued_before=$(find "$HYN_VAR/local/outbox" -type f -name '*.json')
 check 'retry record is private' '[[ $(find "$HYN_VAR/local/outbox" -type f -perm -077 | wc -l) -eq 0 ]]'
 OUTBOX_TEST_MODE=invalid
@@ -341,6 +341,17 @@ expired_path="$HYN_VAR/local/outbox/$((EPOCHSECONDS - 172800))_node-a_2_123.json
 printf '{}\n' >"$expired_path"
 snapshot_count=$(find "$HYN_VAR/local/snapshots" -name '*.json' | wc -l)
 check '48-hour retry expiry preserves longer local snapshot history' 'cloud_outbox_flush && [[ ! -e $expired_path && $(find "$HYN_VAR/local/snapshots" -name "*.json" | wc -l) == "$snapshot_count" ]]'
+# A retry the portal rejected is archived in local history. Snapshot names
+# sort by time, so a reading saved in the same second must still be the newest
+# (CI runners are fast enough to do both within one second).
+check 'a reading saved in the same second as a quarantined one is the newest local snapshot' '(
+  HYN_VAR="$WORK/same-second"; STATE_DIR=""; mkdir -p "$HYN_VAR"
+  local_store_dir_v || exit 1
+  printf "{\"sample\":\"rejected\"}\n" >"$LOCAL_STORE/outbox/000000001000_node-a_2_1.json" &&
+  local_outbox_quarantine "$LOCAL_STORE/outbox/000000001000_node-a_2_1.json" "{\"sample\":\"rejected\"}" 400 &&
+  CLOUD_PAYLOAD="{\"sample\":\"just-saved\"}" && CLOUD_LOCAL_PAYLOAD="" && local_store_snapshot &&
+  [[ $(local_history) == "$CLOUD_PAYLOAD" ]]
+)'
 OUTBOX_TEST_MODE=ok
 printf -v CLOUD_PAYLOAD '%065537d' 0
 CLOUD_PAYLOAD="{\"oversized\":\"$CLOUD_PAYLOAD\"}"
