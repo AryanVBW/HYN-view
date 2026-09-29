@@ -56,7 +56,8 @@ begin
     ('4d000000-0000-4000-8000-0000000000e2','retention:recent',v_owner,v_node,'incident','r@maintenance.test','s','sent',true,now()-interval '89 days');
   insert into public.delivery_attempts(event_id,status) values ('4d000000-0000-4000-8000-0000000000e1','sent'),('4d000000-0000-4000-8000-0000000000e2','sent');
   insert into public.cloud_email_dispatches(idempotency_key,node_id,kind,created_at) values
-    ('retention:dispatch-old',v_node,'report',now()-interval '31 days'),('retention:dispatch-recent',v_node,'report',now()-interval '1 day');
+    ('retention:dispatch-old',v_node,'report',now()-interval '31 days'),('retention:dispatch-recent',v_node,'report',now()-interval '1 day'),
+    ('first-system:' || v_node,v_node,'system',now()-interval '400 days'),('device-linked:' || v_node,v_node,'system',now()-interval '400 days');
   r := public._hyn_prune_delivery_history(5000);
   if (select string_agg(fingerprint, ',' order by fingerprint) from public.web_notification_jobs where node_id = v_node)
        <> 'failed-retry-old,queued-old,sent-recent' then
@@ -64,12 +65,13 @@ begin
   end if;
   if (select string_agg(source_key, ',') from public.delivery_events where owner = v_owner) <> 'retention:recent'
      or (select count(*) from public.delivery_attempts where event_id in ('4d000000-0000-4000-8000-0000000000e1','4d000000-0000-4000-8000-0000000000e2')) <> 1
-     or (select string_agg(idempotency_key, ',') from public.cloud_email_dispatches where node_id = v_node) <> 'retention:dispatch-recent' then
+     or (select string_agg(split_part(idempotency_key, ':', 1) || ':' || case when idempotency_key like 'retention:%' then split_part(idempotency_key, ':', 2) else 'node' end, ',' order by idempotency_key)
+           from public.cloud_email_dispatches where node_id = v_node) <> 'device-linked:node,first-system:node,retention:dispatch-recent' then
     raise exception 'delivery ledger retention removed the wrong rows: %', r;
   end if;
   if (select count(*) from public.notification_log) <> v_log or (select count(*) from public.admin_audit) <> v_audit then
     raise exception 'delivery retention touched the delivery log or the audit trail';
   end if;
-  raise notice 'PASS  finished jobs go after 30 days, the delivery ledger after 90, the log and audit trail stay';
+  raise notice 'PASS  finished jobs go after 30 days, the delivery ledger after 90, one-time email keys, the log and audit trail stay';
 end $$;
 rollback;
