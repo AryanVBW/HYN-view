@@ -174,6 +174,75 @@ Self-hosted `SITE_URL` and `ADDITIONAL_REDIRECT_URLS` already include
 **HYN CLI agents:** keep `cloud_api_url = https://www.hyn-view.in/api/agent/v1`
 (hosted-gateway mode) and no agent needs reconfiguring.
 
+## Schema changes applied to the live database
+
+The live database has no `supabase_migrations` table, so this list is the record
+of what production runs. Each change is applied over SSH (`server02`, then
+`lxc exec supabase -- docker exec -i supabase-db psql -U postgres -d postgres`) in
+this order: take a `pg_dump -Fc` backup, restore it into a scratch database and
+apply there first, apply to `postgres` in one transaction (`lock_timeout` 3 s,
+assertions and `supabase/privilege-check.sql` before `COMMIT`), then check that
+agents keep reporting. The scratch copy must be owned by `postgres`
+(`alter database <copy> owner to postgres`), as the live database is, or the
+migrations fail with `permission denied for schema public`.
+
+**2026-09-29 05:54 UTC — LIVE-1** (one transaction, 0.16 s)
+
+| Migration | Effect on live |
+| --- | --- |
+| `20260913120000_five_minute_monitoring_cadence` | the portal can save `heartbeat_sec` and `cloud_checkin_min` |
+| `20260922070000_maintainer_resolve_alert` | maintainers can resolve alerts (the function was missing) |
+| `20260928100000_restore_shared_node_visibility` | shared servers are visible again (a test user saw 5 servers, was 1) |
+| `20260928110000_reassert_role_privileges` | anon can execute 48 functions instead of 101 and use no tables instead of 28 |
+| `20260928120000_alert_incidents` | `alert_events` 23,521 per-upload rows → 85 incidents (20 open) |
+| `20260928130000_fast_cadence_policy` | node configs unchanged; telemetry policy v3 |
+
+- Backups on `server02`: `~/supabase-migration/pre-live1-20260929T055137Z.dump`
+  (restored and rehearsed) and `pre-live1-apply-20260929T055427Z.dump` (taken
+  seconds before the apply), each with a `.sha256` file.
+- Verified afterwards: `privilege-check.sql` passes, a read-only access check of
+  every portal and agent query matches the rehearsal, all 10 nodes kept
+  heartbeating, and Envoy logged only 2xx responses.
+- Rollback: `pg_restore --clean` from the second backup. Rows written after
+  05:54 UTC would be lost.
+
+**2026-09-29 06:27 UTC — LIVE-2** (one transaction, 0.02 s)
+
+| Migration | Effect on live |
+| --- | --- |
+| `20260929100000_web_jobs_end` | 930 email jobs that had cycled since 2026-09-13 were closed, each with its reason |
+| `20260929110000_schedule_maintenance` | pg_cron job `hyn-telemetry-retention` (every 5 minutes) |
+| `20260929120000_delivery_retention` | pg_cron job `hyn-delivery-retention` (hourly); nothing old enough to delete yet |
+| `20260929130000_confirmed_email_grants` | admin grants by email need a confirmed address (all 17 accounts are confirmed) |
+| `20260929140000_fast_metric_history` | chart history 122 ms → 12 ms (one server), 408 ms → 7 ms (fleet) |
+| `20260929150000_outage_sweep` | pg_cron job `hyn-outage-sweep` (every minute); all 10 watchdogs `running`, none were before |
+
+- Backups on `server02`: `~/supabase-migration/pre-live2-20260929T062646Z.dump`
+  (restored and rehearsed) and `pre-live2-apply-20260929T062732Z.dump`, each with a
+  `.sha256` file.
+- Verified afterwards: `privilege-check.sql` passes, and the portal/agent access
+  check gave the same results before and after. `cron.job_run_details` shows the
+  sweep and the retention job succeeding. All 10 nodes kept heartbeating, and
+  Envoy logged only 2xx responses.
+- The rehearsal copy has no `cron` schema (pg_cron is installed only in
+  `postgres`), so scheduling can be checked only on live. The apply script
+  asserts the three jobs before `COMMIT`.
+
+**2026-09-29 06:50 UTC — LIVE-3** (one transaction, 0.01 s):
+`20260929160000_fleet_latest_readings` adds `hyn_fleet_latest_readings()` for the
+fleet monitor. It takes 2.5 ms and returns 6.5 KB; the old page read 7.5 MB in
+409 ms. Backups: `pre-live3-20260929T065026Z.dump` (rehearsed) and
+`pre-live3-apply-20260929T065041Z.dump`. `privilege-check.sql` passes, and Envoy
+logged only 2xx responses afterwards.
+
+**2026-09-29 10:07 UTC — LIVE-4** (one transaction, 0.01 s):
+`20260929170000_keep_one_time_email_keys`. Delivery retention now keeps each
+server's `first-system:` and `device-linked:` keys; 7 keys existed, none was yet
+old enough to be deleted. The same session also set a password on
+`supabase_read_only_user` (from `POSTGRES_PASSWORD`, as Studio expects), so the
+read-only SQL of the Supabase MCP works; see `ssh-over-cloudflare-tunnel.md`.
+Backup: `pre-live4-20260929T100708Z.dump` (restored and rehearsed first).
+
 ## Residual risk
 
 Auth and all data now live on one self-hosted box. If that server or its connectivity

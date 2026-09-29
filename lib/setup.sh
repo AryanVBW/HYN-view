@@ -188,8 +188,19 @@ WantedBy=multi-user.target
 EOF
 }
 
+# Persistent= only for calendar timers. On a monotonic one (OnBootSec= plus
+# OnUnitActiveSec=) it is not merely useless but fatal: systemd loads the stamp
+# file's time as "last triggered", then treats OnBootSec= as an already-spent
+# one-time trigger whenever the timer is (re)started after its deadline -- a
+# restart, a daemon-reload racing boot, or a disable/enable that let systemd
+# unload the idle service and forget when it last ran. OnUnitActiveSec= then has
+# no activation to count from, and the timer sits "active (elapsed)" with no next
+# run, forever. That is how hyn-push.timer stopped uploading on a production node
+# for a week while every local check read it as active.
 _generic_timer() {
   local desc=$1 spec=$2 unit=$3 jitter=${4:-60} accuracy=${5:-30s} extra=${6:-}
+  local persistent=''
+  [[ $spec == *OnCalendar=* ]] && persistent=$'\nPersistent=true'
   cat <<EOF
 [Unit]
 Description=$desc
@@ -198,8 +209,7 @@ Documentation=https://github.com/AryanVBW/HYN-view
 [Timer]
 $spec
 RandomizedDelaySec=$jitter
-AccuracySec=$accuracy
-Persistent=true
+AccuracySec=$accuracy$persistent
 Unit=$unit
 $extra
 
@@ -383,7 +393,7 @@ report_at=${CFG[report_at]}
 report_hours=${CFG[report_hours]}
 report_busy_cpu_pct=${CFG[report_busy_cpu_pct]}
 report_busy_mem_pct=${CFG[report_busy_mem_pct]}
-# How often metrics are sampled locally (default one minute), and how long they are kept.
+# How often metrics are sampled locally (default five minutes), and how long they are kept.
 record_interval_min=${CFG[record_interval_min]}
 metrics_keep_days=${CFG[metrics_keep_days]}
 
@@ -407,7 +417,7 @@ cloud_node_id=${CFG[cloud_node_id]}
 cloud_api_url=${CFG[cloud_api_url]}
 # Where \`hyn link\` tells you to open a browser. The agent never contacts it.
 cloud_portal_url=${CFG[cloud_portal_url]}
-# Minutes between full portal readings (default 5). Heartbeats are independent.
+# Minutes between full portal readings (default 1). Heartbeats are independent.
 # Also settable from the portal, whose explicit settings take precedence.
 cloud_push_min=${CFG[cloud_push_min]}
 # cloud: rolling 48-hour portal history plus bounded local backup. local: local
@@ -416,14 +426,15 @@ cloud_push_min=${CFG[cloud_push_min]}
 cloud_storage=${CFG[cloud_storage]}
 # Explicit consent to send notification/report content through the portal.
 cloud_notifications=${CFG[cloud_notifications]}
-# Minutes between managed-property and command checks (1..60; hosted default 5).
+# Minutes between managed-property and command checks (1..60, default 1).
 cloud_checkin_min=${CFG[cloud_checkin_min]}
 # Secondary snapshots and request accounting stay here, with bounded retention.
 local_keep_days=${CFG[local_keep_days]}
 local_max_mb=${CFG[local_max_mb]}
 # Seconds between liveness beats from the resident agent (hyn-agent.service).
 # One small POST that proves this machine is alive; telemetry still follows
-# cloud_push_min. Clamped to 5..3600. Hosted policy can manage this cadence.
+# cloud_push_min. Clamped to 5..3600. The portal can manage this key; it calls
+# the machine quiet after three missed beats (never sooner than three minutes).
 heartbeat_sec=${CFG[heartbeat_sec]}
 cloud_timeout=${CFG[cloud_timeout]}
 # Self-hosters only: a direct Supabase URL plus its PUBLIC anon key, used instead
@@ -501,7 +512,16 @@ setup_migrate_config() {
   return 0
 }
 
+# Unit and timer changes are serialized with every other writer; see
+# with_schedule_lock in core.sh.
 setup_run() {
+  with_schedule_lock 120 _setup_run "$@"
+  local rc=$?
+  ((rc == 75)) && warn 'another hyn process is changing the systemd schedule; try again in a minute'
+  return "$rc"
+}
+
+_setup_run() {
   local no_timer=0 wizard=1 integration_ok=1 a
   for a in "$@"; do
     case $a in
@@ -624,7 +644,9 @@ setup_timers() {
   # performs the full telemetry collection only when cloud_push_min is due, so
   # longer custom intervals do not run expensive probes every minute.
   #
-  # Timeout remains bounded below the five-minute check-in cadence.
+  # Timeout is 120s, not the shared 180s: the portal calls a node quiet after
+  # three missed minutes, so one run allowed to hang for the full 180s would
+  # trip that warning by itself. 120s leaves a whole spare interval.
   _write_unit "$HYN_UNIT_DIR/hyn-push.service" \
     "$(_generic_service 'hyn-view web portal push' "$exe push --scheduled" '' 120)"
   # No jitter and 1s accuracy on this one. Jitter exists to stop a fleet
@@ -736,16 +758,13 @@ setup_apply_schedule() {
 # edits. The fingerprint is written only after the units restart successfully,
 # so the next maintenance pass retries a failed application.
 setup_reconcile() {
-  local lock_fd='' rc
+  local rc
   is_root && have systemctl || return 0
   [[ -f $HYN_UNIT_DIR/hyn-agent.service || -f $HYN_VAR/installed ]] || return 0
-  state_dir_v
-  if have flock; then
-    exec {lock_fd}>"$STATE_DIR/schedule.lock" || return 1
-    flock -n "$lock_fd" || { exec {lock_fd}>&-; return 0; }
-  fi
-  _setup_reconcile; rc=$?
-  [[ -z $lock_fd ]] || exec {lock_fd}>&-
+  # Busy means another writer is applying the schedule right now; the next
+  # maintenance pass re-checks the fingerprint.
+  with_schedule_lock 0 _setup_reconcile; rc=$?
+  ((rc == 75)) && return 0
   return "$rc"
 }
 
@@ -839,6 +858,12 @@ setup_timer_reason() {
 setup_self_heal() {
   have systemctl || return 0
   is_root || return 0
+  with_schedule_lock 0 _setup_self_heal
+  (($? == 75)) && return 0
+  return 0
+}
+
+_setup_self_heal() {
   setup_reconcile || warn 'settings could not be applied; the next maintenance pass will retry'
   local u want st
   for u in hyn-record.timer hyn-alerts.timer hyn-report.timer hyn-push.timer hyn-speedtest.timer hyn-update.timer hyn-awake.service; do
@@ -855,13 +880,58 @@ setup_self_heal() {
     if [[ $st == active ]]; then
       # An active-but-disabled unit disappears at the next reboot.
       systemctl is-enabled --quiet "$u" >/dev/null 2>&1 || systemctl enable "$u" >/dev/null 2>&1 || true
+      # Active is not the same as scheduled: see setup_rearm_elapsed.
+      setup_rearm_elapsed "$u" >/dev/null || true
       continue
     fi
     systemctl reset-failed "$u" >/dev/null 2>&1 || true
     systemctl enable --now "$u" >/dev/null 2>&1 || true
   done
+  setup_heal_stale_telemetry
   setup_heal_agent
   return 0
+}
+
+# Uploads can stop for reasons the timer state does not show (a unit left
+# stopped, a job that never got its first activation). When no upload has been
+# attempted for three intervals, restart the push timer and run one upload now.
+# Once per allowance window, so a machine whose job cannot start at all is not
+# poked every five minutes; `hyn doctor` keeps reporting it either way.
+setup_heal_stale_telemetry() {
+  declare -F cloud_telemetry_stale_v >/dev/null || return 0
+  cloud_telemetry_stale_v || return 0
+  local mark last=0
+  state_dir_v
+  mark=$STATE_DIR/telemetry-heal
+  [[ -r $mark ]] && IFS= read -r last <"$mark"
+  [[ $last =~ ^[0-9]+$ ]] || last=0
+  ((${EPOCHSECONDS:-0} - last < CLOUD_TELEMETRY_LIMIT)) && return 0
+  printf '%s\n' "${EPOCHSECONDS:-0}" >"$mark" 2>/dev/null || true
+  warn "no telemetry upload for $(fmt_dur "$CLOUD_TELEMETRY_AGE"); restarting hyn-push.timer"
+  systemctl restart hyn-push.timer >/dev/null 2>&1 || true
+  systemctl start --no-block hyn-push.service >/dev/null 2>&1 || true
+}
+
+# A timer can be active and never fire again. SubState=elapsed means systemd
+# found no next run, yet `systemctl is-active` still says "active" and `enable
+# --now` leaves it alone, so neither the healer nor `doctor --fix` used to touch
+# it -- which is how a production node went a week without uploading while every
+# check read its push timer as healthy. Restarting re-arms it; running the job
+# once gives a monotonic OnUnitActiveSec= an activation to count from even under
+# unit files written by an older release. Our timers are never one-shot, so
+# elapsed is always a fault here, never a finished schedule.
+setup_timer_elapsed() {
+  [[ $1 == hyn-*.timer ]] || return 1
+  [[ $(systemctl show -p SubState --value "$1" 2>/dev/null) == elapsed ]]
+}
+
+setup_rearm_elapsed() {
+  local u=$1 unit
+  setup_timer_elapsed "$u" || return 0
+  unit=${u%.timer}.service
+  systemctl restart "$u" >/dev/null 2>&1 || return 1
+  systemctl start --no-block "$unit" >/dev/null 2>&1 || true
+  printf '  %-34s re-armed (it was elapsed with no next run)\n' "$u"
 }
 
 # The resident agent needs a different check from a timer, and it is the reason
@@ -942,6 +1012,9 @@ _toggle_timer() {
   if [[ $want == 1 ]]; then
     if systemctl enable --now "$unit" >/dev/null 2>&1; then
       printf '  %-34s enabled\n' "$unit"
+      # `enable --now` does not restart an already-active timer, so this is
+      # what lets `hyn setup` and `hyn doctor --fix` repair an elapsed one.
+      setup_rearm_elapsed "$unit" || return 1
     else
       printf '  %-34s could not enable (systemctl status %s)\n' "$unit" "$unit"
       return 1
@@ -969,23 +1042,31 @@ setup_uninstall() {
 
   printf 'hyn: removing system integration\n'
   if have systemctl; then
-    local u
-    for u in "$SVC_NAME.timer" hyn-alerts.timer hyn-record.timer hyn-report.timer hyn-push.timer \
-             hyn-agent.service hyn-update.timer hyn-awake.service; do
-      systemctl disable --now "$u" >/dev/null 2>&1 && printf '  %-24s disabled\n' "$u"
-    done
-    rm -f "$SVC_PATH" "$TMR_PATH" \
-      "$HYN_UNIT_DIR/hyn-alerts.service" "$HYN_UNIT_DIR/hyn-alerts.timer" \
-      "$HYN_UNIT_DIR/hyn-record.service" "$HYN_UNIT_DIR/hyn-record.timer" \
-      "$HYN_UNIT_DIR/hyn-report.service" "$HYN_UNIT_DIR/hyn-report.timer" \
-      "$HYN_UNIT_DIR/hyn-push.service" "$HYN_UNIT_DIR/hyn-push.timer" \
-      "$HYN_UNIT_DIR/hyn-agent.service" \
-      "$HYN_UNIT_DIR/hyn-update.service" "$HYN_UNIT_DIR/hyn-update.timer" "$HYN_UNIT_DIR/hyn-awake.service"
-    systemctl daemon-reload
-    printf '  units removed\n'
+    with_schedule_lock 120 _setup_remove_units || { warn 'another hyn process is changing the systemd schedule; try again in a minute'; return 1; }
   fi
   [[ -L /usr/local/bin/hyn ]] && rm -f /usr/local/bin/hyn && printf '  /usr/local/bin/hyn unlinked\n'
+  _setup_uninstall_tail "$purge"
+}
 
+_setup_remove_units() {
+  local u
+  for u in "$SVC_NAME.timer" hyn-alerts.timer hyn-record.timer hyn-report.timer hyn-push.timer \
+           hyn-agent.service hyn-update.timer hyn-awake.service; do
+    systemctl disable --now "$u" >/dev/null 2>&1 && printf '  %-24s disabled\n' "$u"
+  done
+  rm -f "$SVC_PATH" "$TMR_PATH" \
+    "$HYN_UNIT_DIR/hyn-alerts.service" "$HYN_UNIT_DIR/hyn-alerts.timer" \
+    "$HYN_UNIT_DIR/hyn-record.service" "$HYN_UNIT_DIR/hyn-record.timer" \
+    "$HYN_UNIT_DIR/hyn-report.service" "$HYN_UNIT_DIR/hyn-report.timer" \
+    "$HYN_UNIT_DIR/hyn-push.service" "$HYN_UNIT_DIR/hyn-push.timer" \
+    "$HYN_UNIT_DIR/hyn-agent.service" \
+    "$HYN_UNIT_DIR/hyn-update.service" "$HYN_UNIT_DIR/hyn-update.timer" "$HYN_UNIT_DIR/hyn-awake.service"
+  systemctl daemon-reload
+  printf '  units removed\n'
+}
+
+_setup_uninstall_tail() {
+  local purge=$1
   if ((purge)); then
     # Only with --purge, and only these two paths: config, credentials and
     # recorded history are the user's data, not ours to delete by default.

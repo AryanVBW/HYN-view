@@ -854,6 +854,13 @@ cmd_doctor() {
     else
       _chk warn 'portal node state' 'unknown -- nothing has been accepted yet: hyn push'
     fi
+    # The heartbeat and the uploads come from different units, so a machine can
+    # look alive in the portal with charts that stopped days ago.
+    if cloud_telemetry_stale_v; then
+      _chk warn 'telemetry upload' "none attempted for $(fmt_dur "$CLOUD_TELEMETRY_AGE") -- the push timer is not running: sudo hyn doctor --fix"
+    elif ((CLOUD_TELEMETRY_AGE >= 0)); then
+      _chk ok 'telemetry upload' "last attempt $(fmt_dur "$CLOUD_TELEMETRY_AGE") ago"
+    fi
   else
     # Not a fault. An unpaired machine is a working local monitor that cannot mail
     # anyone, and saying so is different from saying something is broken.
@@ -872,7 +879,9 @@ cmd_doctor() {
   # matters is the one made from outside it. That is the portal's watchdog now, not
   # a ping URL configured per machine.
   if notify_configured; then
-    _chk ok 'outage detection' "the portal alerts the owner after 3 minutes without a beat (${CFG[heartbeat_sec]}s cadence)"
+    local quiet_s=$((3 * ${CFG[heartbeat_sec]:-24}))
+    ((quiet_s < 180)) && quiet_s=180
+    _chk ok 'outage detection' "the portal flags this machine after $(fmt_dur "$quiet_s") without a beat (${CFG[heartbeat_sec]}s cadence)"
   else
     _chk warn 'outage detection' 'nothing will report this host going offline until it is paired: sudo hyn link'
   fi
@@ -893,6 +902,11 @@ cmd_doctor() {
       fi
       st=$(systemctl is-active "$u" 2>/dev/null)
       if [[ $st == active ]]; then
+        # is-active calls an elapsed timer active; it will still never fire.
+        if declare -F setup_timer_elapsed >/dev/null && setup_timer_elapsed "$u"; then
+          _chk warn "$u" 'active but elapsed -- no next run is scheduled: sudo hyn doctor --fix'
+          continue
+        fi
         nxt=$(systemctl show -p NextElapseUSecRealtime --value "$u" 2>/dev/null)
         _chk ok "$u" "active${nxt:+, next $nxt}"
         continue
@@ -914,7 +928,7 @@ cmd_doctor() {
       # Read straight out of the config, so validate before it reaches bash
       # arithmetic below. The resident loop clamps the same value for the same
       # reason; doctor must not be the one place a typo produces an error.
-      hbi=${CFG[heartbeat_sec]:-60}
+      hbi=${CFG[heartbeat_sec]:-24}
       [[ $hbi =~ ^[1-9][0-9]{0,4}$ ]] || hbi=24
       ast=$(systemctl is-active hyn-agent.service 2>/dev/null)
       if [[ $ast == active ]]; then
@@ -1056,7 +1070,7 @@ cmd_help() {
     '  autostart [status|enable|repair]  verify or repair unattended boot services' \
     '  cloud status          portal URL, node id, and when the last push was' \
     '  cloud usage           local HTTP totals and free-plan budget references' \
-    '  cloud optimize        48h cloud history, local backup and 24s beats' \
+    '  cloud optimize        recommended cloud profile: 48h history, local backup, default cadence' \
     '  history --local [N]   print the last N private local snapshots as JSONL' \
     '  logs [N]              read local alert and service diagnostics' \
     '  config pull           fetch monitoring settings from the portal' \
@@ -1142,9 +1156,20 @@ main() {
         status | '') cloud_status ;;
         usage) cloud_usage "${2:-1}" ;;
         optimize)
-          config_set cloud_storage cloud cloud_push_min 1 heartbeat_sec 24 cloud_checkin_min 1 || return 1
-          printf 'hyn: rolling cloud history and local backup enabled; managed portal settings take precedence.\n'
-          printf 'hyn: resident agent reloads within 5 minutes.\n'
+          # The recommended profile for an existing install: rolling cloud
+          # history with a local backup, at the shipped cadence. The values come
+          # from CFG_DEFAULT so this cannot drift from the defaults again -- it
+          # used to hard-code them, and the docs called the result "low
+          # consumption" while it was the fastest cadence there is.
+          config_set cloud_storage cloud \
+            cloud_push_min "${CFG_DEFAULT[cloud_push_min]}" \
+            cloud_checkin_min "${CFG_DEFAULT[cloud_checkin_min]}" \
+            heartbeat_sec "${CFG_DEFAULT[heartbeat_sec]}" || return 1
+          config_apply || warn 'settings saved; the next maintenance pass applies the schedule'
+          printf 'hyn: recommended cloud profile applied: rolling 48-hour cloud history and a local backup,\n'
+          printf '     a reading every %s min and a heartbeat every %ss. Portal-managed settings still\n' \
+            "${CFG_DEFAULT[cloud_push_min]}" "${CFG_DEFAULT[heartbeat_sec]}"
+          printf '     take precedence; the resident agent picks this up within 5 minutes.\n'
           cloud_usage ;;
         push) cloud_push 0 0 ;;
         pull | config) cloud_config_pull 0 || return 1; config_apply || return 1 ;;

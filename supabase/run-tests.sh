@@ -170,12 +170,35 @@ psql -f "$HERE/migrations/20260909120000_portal_roles.sql" >"$WORK/roles.log" 2>
 for migration in "$HERE"/migrations/*.sql; do
   [[ ${migration##*/} > 20260909120000_portal_roles.sql ]] || continue
   if [[ ${migration##*/} == 20260912190000_rolling_cloud_telemetry.sql ]]; then
-    psql -c "insert into public.nodes(owner,name,config) values ('90000000-0000-4000-8000-000000000001','retention-upgrade-default','{\"cloud_push_min\":\"10\"}'),('90000000-0000-4000-8000-000000000001','retention-upgrade-custom','{\"cloud_push_min\":\"5\",\"cloud_storage\":\"local\"}')" || exit 1
+    psql -c "insert into public.nodes(owner,name,config) values ('90000000-0000-4000-8000-000000000001','retention-upgrade-default','{\"cloud_push_min\":\"10\"}'),('90000000-0000-4000-8000-000000000001','retention-upgrade-custom','{\"cloud_push_min\":\"5\"}')" || exit 1
+  fi
+  if [[ ${migration##*/} == 20260928120000_alert_incidents.sql ]]; then
+    # Rows as agents wrote them before incidents: one per upload. Two runs of
+    # disk_root two hours apart (the second still current) and one old mem_high.
+    psql -c "insert into public.nodes(id,owner,name) values ('4b000000-0000-4000-8000-0000000000aa','90000000-0000-4000-8000-000000000001','incident-upgrade'); insert into public.alert_events(node_id,ts,rule,severity,message) select '4b000000-0000-4000-8000-0000000000aa', now()-m*interval '1 minute', 'disk_root', 'warn', 'Disk / at 86%' from unnest(array[124,122,120,10,8,6]) m; insert into public.alert_events(node_id,ts,rule,severity,message) values ('4b000000-0000-4000-8000-0000000000aa', now()-interval '30 minutes', 'mem_high', 'warn', 'Memory at 91%')" >/dev/null || exit 1
   fi
   psql -f "$migration" >"$WORK/upgrade.log" 2>&1 || { cat "$WORK/upgrade.log"; exit 1; }
+  if [[ ${migration##*/} == 20260912190000_rolling_cloud_telemetry.sql ]]; then
+    # cloud_storage does not exist before this migration, so an explicit
+    # local-only choice can only be made after it; later cadence migrations
+    # must then preserve it.
+    psql -c "update public.nodes set config=config || '{\"cloud_storage\":\"local\"}' where name='retention-upgrade-custom'" || exit 1
+  fi
 done
-psql -c "do \$\$ begin if (select config->>'cloud_storage' from public.nodes where name='retention-upgrade-default')<>'cloud' or (select config->>'cloud_push_min' from public.nodes where name='retention-upgrade-default')<>'5' or (select config->>'cloud_checkin_min' from public.nodes where name='retention-upgrade-default')<>'5' or (select config->>'heartbeat_sec' from public.nodes where name='retention-upgrade-custom')<>'300' or (select config->>'record_interval_min' from public.nodes where name='retention-upgrade-custom')<>'1' or (select config->>'cloud_storage' from public.nodes where name='retention-upgrade-custom')<>'local' then raise exception 'fleet cadence defaults did not migrate'; end if; end \$\$" || exit 1
-printf 'PASS  existing fleet receives managed cadence while explicit local-only storage survives\n'
+psql -c "do \$\$ begin if (select config->>'cloud_storage' from public.nodes where name='retention-upgrade-default')<>'cloud' or (select config->>'cloud_push_min' from public.nodes where name='retention-upgrade-default')<>'1' or exists(select 1 from public.nodes where name like 'retention-upgrade-%' and (config ? 'heartbeat_sec' or config ? 'cloud_checkin_min' or config ? 'record_interval_min' or telemetry_policy_version<>3)) or (select config->>'cloud_storage' from public.nodes where name='retention-upgrade-custom')<>'local' then raise exception 'fleet cadence defaults did not migrate'; end if; end \$\$" || exit 1
+printf 'PASS  existing fleet returns to the fast cadence while explicit local-only storage survives\n'
+psql -c "do \$\$ declare n uuid := '4b000000-0000-4000-8000-0000000000aa'; begin
+  if (select count(*) from public.alert_events where node_id=n) <> 3
+     or (select count(*) from public.alert_events where node_id=n and not resolved) <> 1
+     or (select ts-started_at from public.alert_events where node_id=n and not resolved) <> interval '4 minutes'
+     or (select rule from public.alert_events where node_id=n and not resolved) <> 'disk_root'
+     or (select count(*) from public.alert_events where node_id=n and resolved and resolved_at=ts
+           and ts-started_at=case rule when 'disk_root' then interval '4 minutes' else interval '0' end) <> 2
+     or exists(select 1 from public.alert_events where node_id=n and started_at is null) then
+    raise exception 'per-upload alert rows were not collapsed into incidents';
+  end if;
+  delete from public.nodes where id=n; end \$\$" || exit 1
+printf 'PASS  per-upload alert rows collapse into incidents, only the current run stays open\n'
 psql -f "$HERE/owner-linking-test.sql" >"$WORK/owner-test.log" 2>&1 || { cat "$WORK/owner-test.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/owner-test.log"
 psql -f "$HERE/shared-observability-test.sql" >"$WORK/upgrade-test.log" 2>&1 || { cat "$WORK/upgrade-test.log"; exit 1; }
@@ -185,6 +208,20 @@ sed -n '/PASS /p' "$WORK/node-relayer-upgrade.log"
 psql -f "$HERE/user-server-assignments-test.sql" >"$WORK/user-assignments-upgrade.log" 2>&1 || { cat "$WORK/user-assignments-upgrade.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/user-assignments-upgrade.log"
 psql -f "$HERE/rolling-telemetry-test.sql" >"$WORK/telemetry-upgrade.log" 2>&1 || { cat "$WORK/telemetry-upgrade.log"; exit 1; }
+psql -f "$HERE/current-defaults-test.sql" >"$WORK/defaults-upgrade.log" 2>&1 || { cat "$WORK/defaults-upgrade.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/defaults-upgrade.log"
+psql -f "$HERE/alert-incidents-test.sql" >"$WORK/incidents-upgrade.log" 2>&1 || { cat "$WORK/incidents-upgrade.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/incidents-upgrade.log"
+psql -f "$HERE/web-jobs-test.sql" >"$WORK/web-jobs-upgrade.log" 2>&1 || { cat "$WORK/web-jobs-upgrade.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/web-jobs-upgrade.log"
+psql -f "$HERE/maintenance-test.sql" >"$WORK/maintenance-upgrade.log" 2>&1 || { cat "$WORK/maintenance-upgrade.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/maintenance-upgrade.log"
+psql -f "$HERE/metric-history-test.sql" >"$WORK/metric-history-upgrade.log" 2>&1 || { cat "$WORK/metric-history-upgrade.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/metric-history-upgrade.log"
+psql -f "$HERE/outage-sweep-test.sql" >"$WORK/outage-sweep-upgrade.log" 2>&1 || { cat "$WORK/outage-sweep-upgrade.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/outage-sweep-upgrade.log"
+psql -f "$HERE/fleet-latest-test.sql" >"$WORK/fleet-latest-upgrade.log" 2>&1 || { cat "$WORK/fleet-latest-upgrade.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/fleet-latest-upgrade.log"
 sed -n '/PASS /p' "$WORK/telemetry-upgrade.log"
 psql -f "$HERE/rolling-telemetry-detail-test.sql" >"$WORK/telemetry-detail-upgrade.log" 2>&1 || { cat "$WORK/telemetry-detail-upgrade.log"; exit 1; }
 sed -n '/PASS /p; /storage bytes/p' "$WORK/telemetry-detail-upgrade.log"
@@ -192,6 +229,20 @@ psql -f "$HERE/schema.sql" >"$WORK/final-schema.log" 2>&1 || { cat "$WORK/final-
 psql -c "do \$\$ begin if (select config->>'cloud_storage' from public.nodes where name='retention-upgrade-custom')<>'local' then raise exception 'schema reapply lost explicit local choice'; end if; end \$\$; delete from public.nodes where name in ('retention-upgrade-default','retention-upgrade-custom')" || exit 1
 printf 'PASS  schema reapplication preserves later explicit local-only choices\n'
 psql -f "$HERE/rolling-telemetry-test.sql" >"$WORK/telemetry-schema.log" 2>&1 || { cat "$WORK/telemetry-schema.log"; exit 1; }
+psql -f "$HERE/current-defaults-test.sql" >"$WORK/defaults-schema.log" 2>&1 || { cat "$WORK/defaults-schema.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/defaults-schema.log"
+psql -f "$HERE/alert-incidents-test.sql" >"$WORK/incidents-schema.log" 2>&1 || { cat "$WORK/incidents-schema.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/incidents-schema.log"
+psql -f "$HERE/web-jobs-test.sql" >"$WORK/web-jobs-schema.log" 2>&1 || { cat "$WORK/web-jobs-schema.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/web-jobs-schema.log"
+psql -f "$HERE/maintenance-test.sql" >"$WORK/maintenance-schema.log" 2>&1 || { cat "$WORK/maintenance-schema.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/maintenance-schema.log"
+psql -f "$HERE/metric-history-test.sql" >"$WORK/metric-history-schema.log" 2>&1 || { cat "$WORK/metric-history-schema.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/metric-history-schema.log"
+psql -f "$HERE/outage-sweep-test.sql" >"$WORK/outage-sweep-schema.log" 2>&1 || { cat "$WORK/outage-sweep-schema.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/outage-sweep-schema.log"
+psql -f "$HERE/fleet-latest-test.sql" >"$WORK/fleet-latest-schema.log" 2>&1 || { cat "$WORK/fleet-latest-schema.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/fleet-latest-schema.log"
 sed -n '/PASS /p' "$WORK/telemetry-schema.log"
 psql -f "$HERE/rolling-telemetry-detail-test.sql" >"$WORK/telemetry-detail-schema.log" 2>&1 || { cat "$WORK/telemetry-detail-schema.log"; exit 1; }
 sed -n '/PASS /p; /storage bytes/p' "$WORK/telemetry-detail-schema.log"
@@ -205,6 +256,12 @@ sed -n '/PASS /p' "$WORK/user-assignments-schema.log"
 printf 'PASS  legacy roles migrate once and reapply preserves restricted Admins\n'
 psql -f "$HERE/roles-test.sql" >"$WORK/roles-test.log" 2>&1 || { cat "$WORK/roles-test.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/roles-test.log"
+psql -f "$HERE/admin-grants-test.sql" >"$WORK/admin-grants.log" 2>&1 || { cat "$WORK/admin-grants.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/admin-grants.log"
+psql -f "$HERE/maintainer-visibility-test.sql" >"$WORK/maintainer-visibility.log" 2>&1 || { cat "$WORK/maintainer-visibility.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/maintainer-visibility.log"
+psql -f "$HERE/maintainer-resolve-alert-test.sql" >"$WORK/maintainer-resolve.log" 2>&1 || { cat "$WORK/maintainer-resolve.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/maintainer-resolve.log"
 # Reapply later migrations in order so final overrides remain installed.
 for migration in "$HERE"/migrations/*.sql; do
   [[ ${migration##*/} > 20260909120000_portal_roles.sql ]] || continue
@@ -235,5 +292,23 @@ for pid in "${race_pids[@]}"; do wait "$pid" || race_failed=1; done
 if ((race_failed)); then cat "$WORK"/relay-race-*.log; exit 1; fi
 psql -c "do \$\$ begin if (select count(*) from public.relayer_assignments where relayer_id=2147000000)<>8 or (select count(*) from public.relayer_assignments where relayer_id=2147000000 and assignment_role='primary')<>1 or (select count(*) from public.relayer_assignments where relayer_id=2147000000 and assignment_role='view')<>7 then raise exception 'concurrent assignments lost a grant or priority'; end if; raise notice 'PASS shared relay: eight concurrent assignments retain one priority and seven view grants'; end \$\$;" || exit 1
 psql -c "delete from auth.users where email like '%@relay-race.test';" >/dev/null || exit 1
+# The privilege floor holds on the final schema, a schema-only restore that
+# re-grants everything (what the 2026-09-20 self-hosted cutover did) is caught,
+# and the repair migration returns it to the floor without breaking the
+# authorized paths the earlier suites exercised.
+psql -f "$HERE/privilege-check.sql" >"$WORK/privilege-check.log" 2>&1 || { cat "$WORK/privilege-check.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/privilege-check.log"
+psql -c "grant all on all tables in schema public to anon, authenticated; grant all on all sequences in schema public to anon, authenticated; grant execute on all functions in schema public to anon, authenticated, public" >/dev/null || exit 1
+if psql -f "$HERE/privilege-check.sql" >"$WORK/privilege-drift.log" 2>&1; then
+  printf 'run-tests: privilege check did not detect a restore that re-granted everything\n' >&2; exit 1
+fi
+printf 'PASS  privilege check detects a restore that re-grants every object\n'
+psql -f "$HERE/migrations/20260928110000_reassert_role_privileges.sql" >"$WORK/privilege-repair.log" 2>&1 || { cat "$WORK/privilege-repair.log"; exit 1; }
+psql -f "$HERE/privilege-check.sql" >"$WORK/privilege-check.log" 2>&1 || { cat "$WORK/privilege-check.log"; exit 1; }
+printf 'PASS  the privilege repair migration restores the floor\n'
+for suite in roles-test admin-grants-test owner-linking-test maintainer-visibility-test server-access-bandwidth-test delivery-controls-test; do
+  psql -f "$HERE/$suite.sql" >"$WORK/repaired-$suite.log" 2>&1 || { cat "$WORK/repaired-$suite.log"; exit 1; }
+done
+printf 'PASS  authorized access paths still work after the privilege repair\n'
 printf 'run-tests: final role and server authorization checks passed\n'
 exit 0

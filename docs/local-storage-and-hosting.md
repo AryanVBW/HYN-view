@@ -61,7 +61,7 @@ reading; five minutes is the server's retention, not remote erasure of a screen.
 ```sh
 sudo hyn autostart enable       # install/repair startup and recovery services once
 hyn autostart status            # show boot enablement, sleep prevention and update policy
-sudo hyn cloud optimize        # local archive, email sharing off, 60s beats, 5min checks
+sudo hyn cloud optimize        # recommended cloud profile: 48h history, local backup, default cadence
 sudo hyn cloud usage            # actual local POST accounting and reference quotas
 sudo hyn cloud usage 20         # configured request baseline for 20 identical nodes
 sudo hyn history --local 12    # JSONL for the last 12 local readings
@@ -147,12 +147,17 @@ fallback from local storage to permanent cloud ingestion.
 
 ## Consumption model
 
-With defaults, each node sends about **60,480 control POSTs per 30 days**:
-43,200 one-minute heartbeats plus 17,280 settings/command checks. Previously a
-24-second heartbeat, one-minute settings/command checks, and ten-minute telemetry
-yielded about 198,720 POSTs. That is about **70% fewer routine requests**, before
-pairing, explicit commands, errors and retries. Local settings checks also omit
-the email templates, dispatch work and Workflow lease used by the legacy path.
+> Historical figures. The current defaults are a 24-second heartbeat, a
+> one-minute settings/command check and a one-minute reading: per node about
+> 108,000 heartbeats, 43,200 check-ins and 43,200 readings per 30 days.
+> `sudo hyn cloud usage` prints the figure for the configured cadence.
+
+With the local-only defaults of that release, each node sent about **60,480
+control POSTs per 30 days**: 43,200 one-minute heartbeats plus 17,280
+settings/command checks. Previously a 24-second heartbeat, one-minute
+settings/command checks, and ten-minute telemetry yielded about 198,720 POSTs.
+Local settings checks also omit the email templates, dispatch work and Workflow
+lease used by the legacy path.
 Heartbeat failures back off up to 15 minutes while local supervision stays alive.
 Hidden/offline browser tabs skip dashboard refreshes; queued commands poll at
 15 seconds, running commands at five seconds.
@@ -227,11 +232,13 @@ to the one.com account owning this domain is still required.
    and run `sudo hyn cloud optimize` on existing machines. Deploy the portal
    **before** upgrading agents: older portals do not support transient readings.
 
-The CLI prefers `www`, tries the apex if the health probe fails, and caches a
-verified host for six hours. A transport/5xx failure invalidates that selection
-and gives the other host priority on the next operation. It never replays an
-ambiguous POST and never sends secrets in a probe or follows a cross-host
-redirect. Explicit custom endpoints retain their own configuration.
+The CLI uses only `https://www.hyn-view.in/api/agent/v1`. The apex
+`hyn-view.in` currently serves an unrelated site, so the CLI never probes it; a
+config that names the apex is sent to `www`. A verified health probe is cached
+for six hours, and a transport/5xx failure invalidates it so the next operation
+re-probes first. It never replays an ambiguous POST and never sends secrets in a
+probe or follows a cross-host redirect. Explicit custom endpoints retain their
+own configuration.
 
 The previous Vercel Workflow watchdog is disabled unless
 `HYN_ENABLE_WORKFLOW_WATCHDOG=true` and a compatible durable runtime is separately

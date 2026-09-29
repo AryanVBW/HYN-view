@@ -1213,9 +1213,12 @@ create table if not exists public.notification_templates (
 
 alter table public.notification_templates
   drop constraint if exists notification_templates_template_key_check;
+-- The complete key set, not the original three: schema.sql is reapplied over
+-- databases that already hold the sign-in, device and first-report templates
+-- added further down, and a narrower CHECK here makes that reapply fail.
 alter table public.notification_templates
   add constraint notification_templates_template_key_check
-  check (template_key in ('alert', 'report', 'system'));
+  check (template_key in ('alert','report','system','signin','device','first_report'));
 
 insert into public.notification_templates (template_key, name, description, html_template)
 values
@@ -6047,6 +6050,62 @@ do $$ begin
   end if;
 end $$;
 
+-- ===========================================================================
+-- alert incidents (supabase/migrations/20260928120000_alert_incidents.sql)
+-- ===========================================================================
+-- One alert_events row per incident instead of one per upload. started_at is
+-- when the incident began, ts when it was last observed, resolved_at when it
+-- ended, dismissed_at when a maintainer called it a false alarm (a dismissed
+-- incident is not reopened while the agent keeps reporting it).
+alter table public.alert_events add column if not exists started_at timestamptz;
+alter table public.alert_events add column if not exists resolved_at timestamptz;
+alter table public.alert_events add column if not exists dismissed_at timestamptz;
+
+-- Collapse rows written one-per-upload into incidents: consecutive rows of the
+-- same rule on the same node, less than 15 minutes apart, are one incident. The
+-- newest row of each run is kept. Only the most recent run of a rule can still
+-- be open, and only if it was seen in the last 15 minutes; the next reading
+-- closes it if the rule is no longer firing. Demo data is left as seeded.
+-- Idempotent: rows that already have a started_at are not touched.
+with ordered as (
+  select a.id, a.node_id, a.rule, a.ts,
+         case when lag(a.ts) over w is null or a.ts - lag(a.ts) over w > interval '15 minutes'
+              then 1 else 0 end as brk
+    from public.alert_events a join public.nodes n on n.id = a.node_id
+   where a.started_at is null and not n.is_demo
+  window w as (partition by a.node_id, a.rule order by a.ts, a.id)
+), grouped as (
+  select id, node_id, rule, ts, sum(brk) over (partition by node_id, rule order by ts, id) as grp
+    from ordered
+), incidents as (
+  select node_id, rule, grp, min(ts) as first_ts, max(ts) as last_ts,
+         (array_agg(id order by ts desc, id desc))[1] as keep_id, array_agg(id) as ids
+    from grouped group by node_id, rule, grp
+), latest as (
+  select distinct on (node_id, rule) node_id, rule, grp
+    from incidents order by node_id, rule, last_ts desc
+), removed as (
+  delete from public.alert_events a using incidents i
+   where a.id = any(i.ids) and a.id <> i.keep_id
+)
+update public.alert_events a
+   set started_at = i.first_ts,
+       event_fingerprint = null,
+       resolved = a.resolved or not open_now.v,
+       resolved_at = case when a.resolved or not open_now.v then coalesce(a.resolved_at, i.last_ts) end
+  from incidents i
+  cross join lateral (
+    select exists(select 1 from latest l where l.node_id = i.node_id and l.rule is not distinct from i.rule
+                    and l.grp = i.grp)
+           and i.last_ts >= now() - interval '15 minutes' as v
+  ) open_now
+ where a.id = i.keep_id;
+
+create unique index if not exists alert_events_incident_idx
+  on public.alert_events (node_id, rule, started_at) where started_at is not null;
+create index if not exists alert_events_open_idx
+  on public.alert_events (node_id, rule) where not resolved;
+
 create or replace function public.hyn_ingest(
   p_node_token text,
   p_payload jsonb
@@ -6068,6 +6127,19 @@ declare
   v_alert_written integer;
   v_event_ts timestamptz;
   v_cutoff timestamptz := now() - interval '48 hours';
+  -- Alert incidents (see the alert-incident comment below).
+  v_raw_alerts jsonb;
+  v_complete boolean := false;
+  v_newest boolean;
+  v_since_map jsonb := '{}'::jsonb;
+  v_seen text[] := '{}';
+  v_rule text;
+  v_sev text;
+  v_msg text;
+  v_since timestamptz;
+  v_open public.alert_events;
+  v_prev public.alert_events;
+  v_gap interval;
 begin
   select * into v_node from public.nodes
    where token_hash = public._hyn_sha256(p_node_token)
@@ -6110,6 +6182,17 @@ begin
   end if;
   if v_ts < v_cutoff then
     return json_build_object('status','ok','node_id',v_node.id,'discarded','expired','alerts_written',0);
+  end if;
+  -- The agent sends every firing rule (and, from 2.0.1, the rules that just
+  -- cleared). A list that fits the 32-element bound below is therefore complete,
+  -- which is what allows an incident missing from it to be closed.
+  v_raw_alerts := p_payload->'alerts';
+  if jsonb_typeof(v_raw_alerts) = 'array' then
+    v_complete := jsonb_array_length(v_raw_alerts) <= 32;
+    select coalesce(jsonb_object_agg(a->>'rule', a->'since'), '{}'::jsonb) into v_since_map
+      from jsonb_array_elements(v_raw_alerts) with ordinality e(a, n)
+     where n <= 32 and jsonb_typeof(a) = 'object' and jsonb_typeof(a->'rule') = 'string'
+       and jsonb_typeof(a->'since') = 'number' and (a->>'since') ~ '^[1-9][0-9]{0,11}$';
   end if;
   p_payload := public._hyn_monitoring_payload(p_payload);
   -- Cached children retain their own collection time, never the envelope time.
@@ -6204,25 +6287,98 @@ begin
     on conflict (node_id, ts) do nothing;
   end if;
 
-  for v_alert in select * from jsonb_array_elements(v_alerts)
-  loop
-    v_event_ts := coalesce((v_alert->>'ts')::timestamptz, v_ts);
-    if not isfinite(v_event_ts) or v_event_ts < v_cutoff or v_event_ts > now() + interval '5 minutes' then continue; end if;
-    insert into public.alert_events (node_id, ts, rule, severity, message, resolved, event_fingerprint)
-    values (
-      v_node.id,
-      v_event_ts,
-      v_alert->>'rule',
-      case when v_alert->>'severity' in ('info','warn','crit') then v_alert->>'severity' else 'info' end,
-      left(coalesce(v_alert->>'message', 'alert'), 500),
-      coalesce((v_alert->>'resolved')::boolean, false),
-      public._hyn_sha256(jsonb_build_array(extract(epoch from v_event_ts),v_alert->>'rule',
-        case when v_alert->>'severity' in ('info','warn','crit') then v_alert->>'severity' else 'info' end,
-        left(coalesce(v_alert->>'message','alert'),500),coalesce((v_alert->>'resolved')::boolean,false))::text)
-    ) on conflict(node_id,event_fingerprint) where event_fingerprint is not null do nothing;
-    get diagnostics v_alert_written = row_count;
-    v_written := v_written + v_alert_written;
-  end loop;
+  -- Alert incidents. One alert_events row is one incident: started_at is when
+  -- it began, ts when it was last observed (bumped at most every ten minutes, or
+  -- when its severity changes), resolved/resolved_at when it ended. This used to
+  -- insert a new row for every firing rule on every upload -- 572 rows an hour
+  -- for 21 real alerts, none of them ever resolved.
+  --
+  -- Only the newest reading drives the lifecycle. An older reading replayed from
+  -- the agent's outbox describes a state that has already been superseded, so it
+  -- neither opens nor closes anything.
+  v_newest := v_node.last_metric_at is null or v_ts > v_node.last_metric_at;
+  v_gap := greatest(interval '15 minutes',
+    make_interval(mins => 2 * coalesce(nullif(v_node.config->>'cloud_push_min', '')::integer, 5)));
+  if v_newest then
+    for v_alert in select * from jsonb_array_elements(v_alerts)
+    loop
+      if jsonb_typeof(v_alert) <> 'object' then continue; end if;
+      v_event_ts := coalesce((v_alert->>'ts')::timestamptz, v_ts);
+      if not isfinite(v_event_ts) or v_event_ts < v_cutoff or v_event_ts > now() + interval '5 minutes' then continue; end if;
+      v_rule := coalesce(nullif(left(v_alert->>'rule', 120), ''), 'unnamed');
+      v_sev := case when v_alert->>'severity' in ('info','warn','crit') then v_alert->>'severity' else 'info' end;
+      v_msg := left(coalesce(v_alert->>'message', 'alert'), 500);
+      v_since := null;
+      if v_since_map ? v_rule then
+        v_since := to_timestamp((v_since_map->>v_rule)::bigint);
+        if v_since < timestamptz '2020-01-01' or v_since > now() + interval '5 minutes' then v_since := null; end if;
+      end if;
+
+      if jsonb_typeof(v_alert->'resolved') = 'boolean' and (v_alert->'resolved')::boolean then
+        -- Cleared. Close whatever is open for the rule; an incident that began
+        -- and ended between two uploads is recorded closed so the log still has it.
+        update public.alert_events set resolved = true, resolved_at = v_ts, ts = greatest(ts, v_ts)
+         where node_id = v_node.id and rule = v_rule and not resolved;
+        if not found and v_since is not null then
+          insert into public.alert_events (node_id, ts, rule, severity, message, resolved, started_at, resolved_at)
+          values (v_node.id, v_ts, v_rule, v_sev, v_msg, true, v_since, v_ts)
+          on conflict (node_id, rule, started_at) where started_at is not null do nothing;
+        end if;
+        continue;
+      end if;
+
+      v_seen := v_seen || v_rule;
+      select * into v_open from public.alert_events
+       where node_id = v_node.id and rule = v_rule and not resolved
+       order by id desc limit 1;
+      if found then
+        if v_open.severity <> v_sev or v_open.ts < v_ts - interval '10 minutes' then
+          update public.alert_events set severity = v_sev, message = v_msg, ts = greatest(ts, v_ts)
+           where id = v_open.id;
+        end if;
+        continue;
+      end if;
+
+      -- Not open. Either the same incident was closed (by an earlier reading that
+      -- did not include it, or dismissed by a maintainer), or this is a new one.
+      if v_since is not null then
+        select * into v_prev from public.alert_events
+         where node_id = v_node.id and rule = v_rule and started_at = v_since;
+      else
+        -- Agents before 2.0.1 send no start time; a dismissal still covers a
+        -- report that continues it without a gap.
+        select * into v_prev from public.alert_events
+         where node_id = v_node.id and rule = v_rule and dismissed_at is not null and ts >= v_ts - v_gap
+         order by ts desc limit 1;
+      end if;
+      if found then
+        if v_prev.dismissed_at is not null then
+          -- A maintainer called it a false alarm: stay closed, stay visible.
+          if v_prev.ts < v_ts - interval '5 minutes' then
+            update public.alert_events set ts = v_ts where id = v_prev.id;
+          end if;
+        else
+          update public.alert_events
+             set resolved = false, resolved_at = null, severity = v_sev, message = v_msg, ts = greatest(ts, v_ts)
+           where id = v_prev.id;
+        end if;
+        continue;
+      end if;
+
+      insert into public.alert_events (node_id, ts, rule, severity, message, resolved, started_at)
+      values (v_node.id, v_ts, v_rule, v_sev, v_msg, false, coalesce(v_since, v_ts))
+      on conflict (node_id, rule, started_at) where started_at is not null do nothing;
+      get diagnostics v_alert_written = row_count;
+      v_written := v_written + v_alert_written;
+    end loop;
+
+    -- Resolve by absence: the list is complete, so an open incident the agent no
+    -- longer reports has ended.
+    if v_complete then
+      update public.alert_events set resolved = true, resolved_at = v_ts
+       where node_id = v_node.id and not resolved and (rule is null or not (rule = any(v_seen)));
+    end if;
+  end if;
 
   update public.nodes
      set last_seen_at = greatest(last_seen_at, least(v_ts,now())),
@@ -6450,41 +6606,29 @@ begin
   return json_build_object('status','ok','role',p_role);
 end $$;
 
--- Read paths: swap hyn_is_admin() for hyn_can_view_fleet(). Owner-scoped access
--- is untouched, so nothing a customer could see changes.
+-- Read paths go through hyn_can_view_node(), which below gains fleet visibility
+-- for maintainers. Replacing these policies with a bare owner-or-fleet test (as
+-- this block first did) silently dropped shared-server and shared-dashboard
+-- access, the suspended-account and revoked-node checks, and the 48-hour
+-- monitoring read window. See 20260928100000_restore_shared_node_visibility.sql.
 drop policy if exists nodes_select_own on public.nodes;
-create policy nodes_select_own on public.nodes
-  for select using (owner = auth.uid() or public.hyn_can_view_fleet());
-
+create policy nodes_select_own on public.nodes for select to authenticated
+  using(public.hyn_can_view_node(id));
 drop policy if exists metrics_select_own on public.metrics;
-create policy metrics_select_own on public.metrics
-  for select using (
-    public.hyn_can_view_fleet() or exists (
-      select 1 from public.nodes n where n.id = metrics.node_id and n.owner = auth.uid()
-    )
-  );
-
+create policy metrics_select_own on public.metrics for select to authenticated
+  using(ts between now()-interval '48 hours' and now()+interval '5 minutes' and public.hyn_can_view_node(node_id));
 drop policy if exists speedtests_select_own on public.speedtests;
-create policy speedtests_select_own on public.speedtests
-  for select using (
-    public.hyn_can_view_fleet() or exists (
-      select 1 from public.nodes n where n.id = speedtests.node_id and n.owner = auth.uid()
-    )
-  );
-
+create policy speedtests_select_own on public.speedtests for select to authenticated
+  using(ts between now()-interval '48 hours' and now()+interval '5 minutes' and public.hyn_can_view_node(node_id));
 drop policy if exists alert_events_select_own on public.alert_events;
-create policy alert_events_select_own on public.alert_events
-  for select using (
-    public.hyn_can_view_fleet() or exists (
-      select 1 from public.nodes n where n.id = alert_events.node_id and n.owner = auth.uid()
-    )
-  );
+create policy alert_events_select_own on public.alert_events for select to authenticated
+  using(ts between now()-interval '48 hours' and now()+interval '5 minutes' and public.hyn_can_view_node(node_id));
 
 -- Delivery history is how the maintainer sees that a notification actually went
--- out, which is part of the job.
+-- out, which is part of the job. Suspended accounts see nothing.
 drop policy if exists notification_log_select_own on public.notification_log;
-create policy notification_log_select_own on public.notification_log
-  for select using (owner = auth.uid() or public.hyn_can_view_fleet());
+create policy notification_log_select_own on public.notification_log for select to authenticated
+  using(public.hyn_is_active() and (owner = auth.uid() or public.hyn_can_view_fleet()));
 
 -- Per-node visibility (bandwidth_daily and the relayer views hang off this).
 create or replace function public.hyn_can_view_node(p_node uuid)
@@ -6831,7 +6975,10 @@ begin
   end if;
 
   if not v_was_resolved then
-    update public.alert_events set resolved = true where id = p_alert_id;
+    -- Dismissed, not merely resolved: ingest keeps a dismissed incident closed
+    -- while the agent goes on reporting the same condition.
+    update public.alert_events set resolved = true, resolved_at = now(), dismissed_at = now()
+     where id = p_alert_id;
     perform public._hyn_audit(
       'alert.resolve.manual', null, v_node,
       jsonb_build_object('alert_id', p_alert_id, 'reason', coalesce(p_reason, ''))
@@ -6841,6 +6988,644 @@ begin
 end $$;
 revoke all on function public.hyn_maintainer_resolve_alert(bigint, text) from public,anon;
 grant execute on function public.hyn_maintainer_resolve_alert(bigint, text) to authenticated;
+
+-- ===========================================================================
+-- fast monitoring cadence (supabase/migrations/20260928130000_fast_cadence_policy.sql)
+-- ===========================================================================
+-- The five-minute policy (20260913120000) was made for Cloudflare D1's free
+-- write cap. Production moved to self-hosted Supabase on 2026-09-20, and every
+-- deployed agent (2.0.0) runs the fast cadence the portal is built for: a
+-- 24-second heartbeat, one-minute check-ins and uploads. Its 300-second beat
+-- against the portal's 180-second quiet threshold would have shown every
+-- healthy machine as gone quiet. Nodes still carrying exactly the five-minute
+-- policy return to the fast defaults; explicit per-node choices are kept.
+--
+-- "Quiet" follows each node's own heartbeat interval: three missed beats, and
+-- never less than three minutes. The portal applies the same rule.
+create or replace function public._hyn_quiet_after_seconds(p_config jsonb)
+returns integer language sql immutable set search_path = public as $$
+  select greatest(180, 3 * case when p_config->>'heartbeat_sec' ~ '^[1-9][0-9]{0,3}$'
+    then least((p_config->>'heartbeat_sec')::integer, 3600) else 24 end);
+$$;
+revoke all on function public._hyn_quiet_after_seconds(jsonb) from public, anon, authenticated;
+
+update public.nodes
+   set config = (config - 'heartbeat_sec' - 'cloud_checkin_min' - 'record_interval_min')
+                || '{"cloud_push_min":"1"}'::jsonb,
+       telemetry_policy_version = 3
+ where telemetry_policy_version < 3 and not is_demo
+   and config->>'heartbeat_sec' = '300' and config->>'cloud_checkin_min' = '5'
+   and config->>'cloud_push_min' = '5' and config->>'record_interval_min' = '1';
+update public.nodes set telemetry_policy_version = 3 where telemetry_policy_version < 3;
+alter table public.nodes alter column telemetry_policy_version set default 3;
+alter table public.nodes alter column config set default
+  '{"auto_update":"install","cloud_storage":"cloud","cloud_push_min":"1"}'::jsonb;
+
+create or replace function public.hyn_admin_overview()
+returns json language plpgsql security definer set search_path = public as $$
+begin
+  perform public._hyn_require_staff();
+  return json_build_object(
+    'clients_total', (select count(*) from public.profiles),
+    'clients_suspended', (select count(*) from public.profiles where status = 'suspended'),
+    'admins', (select count(*) from public.profiles where role in ('admin','super_admin')),
+    'nodes_total', (select count(*) from public.nodes where is_demo = false),
+    'nodes_active', (select count(*) from public.nodes where status = 'active' and revoked = false and is_demo = false),
+    'nodes_paused', (select count(*) from public.nodes where status = 'paused' and is_demo = false),
+    'nodes_suspended', (select count(*) from public.nodes where status = 'suspended' and is_demo = false),
+    'nodes_revoked', (select count(*) from public.nodes where revoked = true),
+    'nodes_stale', (select count(*) from public.nodes n
+      where n.is_demo = false and n.revoked = false and n.status = 'active'
+        and case
+          when coalesce(n.agent_version, '') ~ '^(1\.([7-9]|[1-9][0-9]+)\.|([2-9]|[1-9][0-9]+)\.)'
+            then n.last_heartbeat_at is null
+              or n.last_heartbeat_at <= now() - make_interval(secs => public._hyn_quiet_after_seconds(n.config))
+          else n.last_seen_at is null or n.last_seen_at < now() - make_interval(
+            mins => greatest(15, 3 * case
+              when n.config->>'cloud_push_min' ~ '^[1-9][0-9]{0,3}$'
+                then (n.config->>'cloud_push_min')::integer else 10 end))
+        end),
+    'alerts_open', (select count(*) from public.alert_events where resolved = false and ts > now() - interval '7 days'),
+    'notifications_24h', (select count(*) from public.notification_log where ts > now() - interval '24 hours'),
+    'notifications_failed_24h', (select count(*) from public.notification_log where ts > now() - interval '24 hours' and status = 'failed'),
+    'metrics_24h', (select count(*) from public.metrics where ts > now() - interval '24 hours')
+  );
+end;
+$$;
+
+create or replace function public.hyn_server_notifications(p_limit integer default 50)
+returns json language plpgsql stable security definer set search_path=public as $$
+declare result json;
+begin
+  if auth.uid() is null then raise exception 'not authenticated'; end if;
+  if not public.hyn_is_active() then raise exception 'active account required'; end if;
+  if p_limit is null or p_limit<1 or p_limit>100 then raise exception 'choose 1 to 100 notifications'; end if;
+  with visible as materialized (
+    select n.id,n.owner,n.name,n.status,n.config,n.agent_version,
+      coalesce(n.last_heartbeat_at,n.last_config_pull_at,n.last_seen_at,n.created_at) heartbeat_at
+    from public.nodes n where not n.revoked and not n.is_demo and public.hyn_can_view_node(n.id)
+      and (n.owner=auth.uid() or public.hyn_is_admin() or coalesce((select a.notifications_allowed from public.server_access a
+        where a.viewer_id=auth.uid() and a.node_id=n.id),true))
+  ), events as (
+    select 'alert:'||a.id::text id,n.id node_id,n.owner,n.name node_name,a.ts,a.severity,
+      a.message,case when a.resolved then 'resolved' else 'alert' end kind
+    from visible n cross join lateral (
+      select * from public.alert_events where node_id=n.id and ts>now()-interval '7 days' order by ts desc limit 50
+    ) a
+    union all
+    select 'command:'||c.id::text,n.id,n.owner,n.name,c.finished_at,
+      case when c.status='failed' then 'warn' else 'info' end,
+      case when c.command='update' then 'Agent update ' else 'Reading refresh ' end||c.status||coalesce(': '||c.message,''),'command'
+    from visible n cross join lateral (
+      select * from public.node_commands where node_id=n.id and status in('succeeded','failed')
+        and finished_at>now()-interval '7 days' order by finished_at desc limit 20
+    ) c
+    union all
+    select 'heartbeat:'||n.id::text||':'||n.heartbeat_at::text,n.id,n.owner,n.name,n.heartbeat_at,'crit',
+      'No recent heartbeat. The server may be offline; displayed readings can be stale.','offline'
+    from visible n where n.status='active' and n.heartbeat_at < now()-make_interval(secs=>
+      case when coalesce(n.agent_version,'') ~ '^1\.[0-6]\.' or n.agent_version is null
+        then greatest(900,case when n.config->>'cloud_push_min' ~ '^[1-9][0-9]{0,3}$'
+          then least((n.config->>'cloud_push_min')::integer,1440)*180 else 1800 end)
+        else public._hyn_quiet_after_seconds(n.config) end)
+  )
+  select coalesce(json_agg(e order by ts desc,id),'[]'::json) into result
+    from (select * from events order by ts desc,id limit p_limit) e;
+  return result;
+end $$;
+
+-- ===========================================================================
+-- web notification jobs end (supabase/migrations/20260929100000_web_jobs_end.sql)
+-- ===========================================================================
+-- Web notification jobs always end instead of cycling for ever.
+--
+-- hyn_defer_web_delivery put a job back in the queue and handed back its
+-- attempt, and hyn_claim_web_notification always offered the oldest queued job
+-- first. A job the portal could never send (automatic email off, no recipient,
+-- the owner opted out) was therefore claimed and deferred again every few
+-- seconds, and every newer job waited behind it. On production on 2026-09-29,
+-- 510 jobs were queued this way (the oldest from 2026-09-13), and two had been
+-- stuck in 'sending' since 2026-09-20 and 2026-09-22.
+--
+-- Each job now ends:
+--   * not delivered within 24 hours          -> failed, no further attempts
+--   * no recipient, or its kind switched off  -> failed when it is claimed
+--   * left 'sending' by a worker that stopped -> offered again after 15 minutes
+--   * deferred by the portal                  -> offered again after 10 minutes
+-- A retired job keeps its row and the reason; it is not logged as a send.
+create or replace function public.hyn_defer_web_delivery(p_job uuid, p_reason text)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  -- A deferral is not a provider attempt, so the attempt is handed back, but a
+  -- job older than a day is closed rather than queued again.
+  update public.web_notification_jobs
+     set status = case when created_at < now() - interval '24 hours' then 'failed' else 'queued' end,
+         attempts = case when created_at < now() - interval '24 hours' then 5 else greatest(0, attempts - 1) end,
+         error = left(p_reason, 1000), updated_at = now()
+   where id = p_job and status = 'sending';
+end $$;
+
+create or replace function public.hyn_claim_web_notification(p_job_id uuid default null)
+returns json language plpgsql security definer set search_path = public as $$
+declare
+  v_job public.web_notification_jobs; v_node public.nodes; v_pref public.email_preferences; v_end text;
+begin
+  update public.web_notification_jobs j
+     set status = 'failed', attempts = 5, updated_at = now(),
+         error = left('Not delivered within 24 hours' || coalesce('. Last reason: ' || j.error, ''), 1000)
+    from (select id from public.web_notification_jobs
+           where created_at < now() - interval '24 hours'
+             and (status in ('queued', 'sending') or (status = 'failed' and attempts < 5))
+           for update skip locked) expired
+   where j.id = expired.id;
+  update public.web_notification_jobs j
+     set status = 'queued', updated_at = now(), error = null
+    from (select id from public.web_notification_jobs
+           where status = 'sending' and updated_at < now() - interval '15 minutes'
+           for update skip locked) stale
+   where j.id = stale.id;
+
+  loop
+    with candidate as (
+      select j.id from public.web_notification_jobs j
+       where (p_job_id is null or j.id = p_job_id)
+         and ((j.status = 'queued' and (j.error is null or j.updated_at < now() - interval '10 minutes'))
+              or (j.status = 'failed' and j.attempts < 5))
+         and not exists(select 1 from public.delivery_events e where e.source_key = 'web-notification:' || j.id::text
+               and ((e.terminal and e.status <> 'sent') or e.status = 'sending' or e.next_retry_at > now()))
+       order by j.created_at for update of j skip locked limit 1
+    ) update public.web_notification_jobs j
+         set status = 'sending', attempts = j.attempts + 1, updated_at = now(), error = null
+        from candidate where j.id = candidate.id returning j.* into v_job;
+    if not found then return json_build_object('status', 'idle'); end if;
+    select * into v_node from public.nodes where id = v_job.node_id;
+    select * into v_pref from public.email_preferences where node_id = v_job.node_id;
+    v_end := case
+      when v_pref.recipient is null then 'No email recipient is set for this server'
+      when v_job.category = 'alert' and not v_pref.incident_enabled then 'Incident alerts are switched off for this server'
+      when v_job.category = 'report' and not v_pref.daily_enabled then 'Daily email is switched off for this server'
+    end;
+    exit when v_end is null;
+    update public.web_notification_jobs set status = 'failed', attempts = 5, error = v_end, updated_at = now()
+     where id = v_job.id;
+    if p_job_id is not null then return json_build_object('status', 'idle'); end if;
+  end loop;
+
+  return json_build_object('status', 'send', 'id', v_job.id, 'node_id', v_job.node_id, 'node_name', v_node.name,
+    'hostname', v_node.hostname, 'owner', v_node.owner, 'recipient', v_pref.recipient,
+    'fingerprint', v_job.fingerprint, 'category', v_job.category, 'severity', v_job.severity,
+    'subject', v_job.subject, 'text_body', v_job.text_body, 'html_body', v_job.html_body,
+    'attempts', v_job.attempts);
+end $$;
+
+-- ===========================================================================
+-- database maintenance schedule (supabase/migrations/20260929110000_schedule_maintenance.sql)
+-- ===========================================================================
+-- The database schedules its own maintenance whenever pg_cron is installed.
+--
+-- The schedule was created only if pg_cron already existed at the moment the
+-- schema was applied. The self-hosted database restored on 2026-09-20 has
+-- pg_cron 1.6.4 preloaded but had no jobs at all, so telemetry cleanup depended
+-- on the portal's 10-minute host cron reaching /api/cron/email.
+--
+-- _hyn_schedule_jobs() creates or updates every HYN job by name, so it is safe to
+-- re-run. Run it again after enabling pg_cron on an existing database:
+--   select public._hyn_schedule_jobs();
+create or replace function public._hyn_schedule_jobs()
+returns text language plpgsql set search_path = public as $$
+declare r record; n integer := 0;
+begin
+  if to_regprocedure('cron.schedule(text,text,text)') is null then
+    return 'pg_cron is not installed: no database jobs scheduled';
+  end if;
+  for r in select * from (values
+    ('hyn-telemetry-retention', '*/5 * * * *', 'select public.hyn_prune_telemetry(5000)')
+  ) j(name, schedule, command) loop
+    perform cron.schedule(r.name, r.schedule, r.command);
+    n := n + 1;
+  end loop;
+  return format('pg_cron jobs scheduled: %s', n);
+end $$;
+revoke all on function public._hyn_schedule_jobs() from public, anon, authenticated;
+
+do $$ begin raise notice '%', public._hyn_schedule_jobs(); end $$;
+
+-- ===========================================================================
+-- delivery history retention (supabase/migrations/20260929120000_delivery_retention.sql)
+-- ===========================================================================
+-- Delivery history is pruned instead of growing for ever.
+--
+-- Nothing deleted finished email jobs, the delivery ledger or the scheduled-mail
+-- idempotency keys; each only ever grew. Their rows are only needed while a send
+-- can still be retried or duplicated, and for the admin delivery view:
+--   * web_notification_jobs  finished (sent, or failed with no attempts left)
+--                            for 30 days
+--   * delivery_events        not updated for 90 days (attempts cascade)
+--   * cloud_email_dispatches older than 30 days (keys are per day or per event)
+-- notification_log (cleared by administrators from /admin) and admin_audit (the
+-- audit trail must outlive what it records) keep their existing policies.
+-- Runs hourly through pg_cron (_hyn_schedule_jobs); each run deletes at most
+-- p_batch rows per table.
+create or replace function public._hyn_prune_delivery_history(p_batch integer default 5000)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  v_batch integer := greatest(1, least(coalesce(p_batch, 5000), 5000));
+  v_jobs integer := 0; v_events integer := 0; v_dispatches integer := 0;
+begin
+  if not pg_try_advisory_xact_lock(1876901121, 90) then return jsonb_build_object('status', 'busy'); end if;
+  with expired as (
+    select id from public.web_notification_jobs
+     where (status = 'sent' or (status = 'failed' and attempts >= 5)) and updated_at < now() - interval '30 days'
+     order by updated_at for update skip locked limit v_batch
+  ) delete from public.web_notification_jobs j using expired e where j.id = e.id;
+  get diagnostics v_jobs = row_count;
+  with expired as (
+    select id from public.delivery_events where updated_at < now() - interval '90 days'
+     order by updated_at for update skip locked limit v_batch
+  ) delete from public.delivery_events d using expired e where d.id = e.id;
+  get diagnostics v_events = row_count;
+  with expired as (
+    select idempotency_key from public.cloud_email_dispatches where created_at < now() - interval '30 days'
+     order by created_at for update skip locked limit v_batch
+  ) delete from public.cloud_email_dispatches d using expired e where d.idempotency_key = e.idempotency_key;
+  get diagnostics v_dispatches = row_count;
+  return jsonb_build_object('status', 'ok', 'jobs_deleted', v_jobs, 'delivery_events_deleted', v_events,
+    'dispatches_deleted', v_dispatches);
+end $$;
+revoke all on function public._hyn_prune_delivery_history(integer) from public, anon, authenticated;
+
+create or replace function public._hyn_schedule_jobs()
+returns text language plpgsql set search_path = public as $$
+declare r record; n integer := 0;
+begin
+  if to_regprocedure('cron.schedule(text,text,text)') is null then
+    return 'pg_cron is not installed: no database jobs scheduled';
+  end if;
+  for r in select * from (values
+    ('hyn-telemetry-retention', '*/5 * * * *', 'select public.hyn_prune_telemetry(5000)'),
+    ('hyn-delivery-retention', '17 * * * *', 'select public._hyn_prune_delivery_history(5000)')
+  ) j(name, schedule, command) loop
+    perform cron.schedule(r.name, r.schedule, r.command);
+    n := n + 1;
+  end loop;
+  return format('pg_cron jobs scheduled: %s', n);
+end $$;
+revoke all on function public._hyn_schedule_jobs() from public, anon, authenticated;
+
+do $$ begin raise notice '%', public._hyn_schedule_jobs(); end $$;
+
+-- ===========================================================================
+-- confirmed email for email-based grants (supabase/migrations/20260929130000_confirmed_email_grants.sql)
+-- ===========================================================================
+-- Administrator grants made by email address require a confirmed address.
+--
+-- hyn_claim_env_admin (the admin_allowlist bootstrap: Super admin on sign-in)
+-- and hyn_admin_promote_by_email (an admin typing an address) grant a role to
+-- whichever account holds that address. Supabase Auth can hold an account for an
+-- address nobody has proved they own: an unconfirmed email sign-up, or any
+-- sign-up while email auto-confirm is on. Registering an address before its
+-- owner did was therefore enough to receive the grant meant for them.
+--
+-- Both now require auth.users.email_confirmed_at. Promotion by email also
+-- matches the account's current Auth address instead of the copy saved in
+-- profiles at sign-up, and refuses an unconfirmed account with an error so that
+-- older portals do not report it as promoted.
+-- email_confirmed_at proves mailbox ownership only while GoTrue email
+-- auto-confirm is off (ENABLE_EMAIL_AUTOCONFIRM=false in the self-hosted .env).
+create or replace function public.hyn_claim_env_admin(p_caller_email text)
+returns json language plpgsql security definer set search_path = public as $$
+declare
+  v_uid uuid := auth.uid();
+  v_real_email text;
+  v_confirmed timestamptz;
+begin
+  if v_uid is null then
+    raise exception 'not authenticated';
+  end if;
+
+  select email, email_confirmed_at into v_real_email, v_confirmed from auth.users where id = v_uid;
+  if v_real_email is null then
+    return json_build_object('status', 'no_email');
+  end if;
+  -- p_caller_email is optional now that the list lives here; when supplied it
+  -- must be the caller's own address.
+  if p_caller_email is not null and p_caller_email <> ''
+     and lower(v_real_email) <> lower(p_caller_email) then
+    raise exception 'email does not match the authenticated session';
+  end if;
+
+  if not exists (
+    select 1 from public.admin_allowlist a where lower(a.email) = lower(v_real_email)
+  ) then
+    return json_build_object('status', 'not_allowed');
+  end if;
+  -- The entry stays on the list until its owner confirms the address.
+  if v_confirmed is null then
+    return json_build_object('status', 'unconfirmed');
+  end if;
+
+  perform pg_advisory_xact_lock(74821901);
+  if not public.hyn_is_active() then raise exception 'active account required'; end if;
+  delete from public.admin_allowlist where lower(email)=lower(v_real_email);
+  if not found then return json_build_object('status','not_allowed'); end if;
+  perform public._hyn_audit('client.role.super_admin',v_uid,null,jsonb_build_object('via','bootstrap_allowlist'));
+  update public.profiles
+     set role = 'super_admin', updated_at = now()
+   where id = v_uid and role <> 'super_admin';
+
+  return json_build_object('status', 'ok', 'role', 'super_admin');
+end;
+$$;
+
+create or replace function public.hyn_admin_promote_by_email(p_email text)
+returns json language plpgsql security definer set search_path = public as $$
+declare v_target uuid; v_role text; v_confirmed timestamptz;
+begin
+  perform public._hyn_require_staff();
+  select p.id, p.role, u.email_confirmed_at into v_target, v_role, v_confirmed
+    from auth.users u join public.profiles p on p.id = u.id
+   where lower(u.email) = lower(trim(p_email));
+  if not found then return json_build_object('status','not_found'); end if;
+  if v_confirmed is null then
+    raise exception 'that account has not confirmed its email address yet';
+  end if;
+  if v_role='super_admin' then raise exception 'this account is already a super admin'; end if;
+  perform public.hyn_admin_set_role(v_target,'admin');
+  return json_build_object('status','ok','user_id',v_target);
+end $$;
+
+-- ===========================================================================
+-- fast metric history (supabase/migrations/20260929140000_fast_metric_history.sql)
+-- ===========================================================================
+-- Metric history charts check access once per call, not once per row.
+--
+-- hyn_metric_history and hyn_fleet_metric_history ran as the caller, so row
+-- level security on metrics called hyn_can_view_node() for every row. Measured
+-- on production on 2026-09-29: 105 ms for one server's 1,181 rows and 378 ms for
+-- the fleet's 4,193. Both now run as the function owner and check access once:
+--   hyn_metric_history(node)   hyn_can_view_node(node), the rule the metrics
+--                              policy applies to every row
+--   hyn_fleet_metric_history() hyn_is_admin(), as before
+-- Callers without access still get an empty list. Rows outside the 48-hour
+-- window the policy enforces are still excluded by the queries themselves.
+create or replace function public.hyn_metric_history(p_node uuid)
+returns jsonb language sql stable security definer set search_path = public as $$
+  select coalesce(jsonb_agg(to_jsonb(h) || '{"payload":null,"sensors":null}'::jsonb order by h.ts),'[]'::jsonb)
+  from (
+    select distinct on (floor(extract(epoch from m.ts)/300))
+      m.id,m.node_id,m.ts,m.cpu_pct,m.cpu_temp_c,m.cpu_mhz,m.cpu_model,m.cpu_steal,m.cpu_iowait,m.cpu_cores,
+      m.load1,m.mem_pct,m.mem_total,m.mem_used,m.swap_used,m.disk_pct,m.uptime_s,
+      m.net_iface,m.net_rx_bps,m.net_tx_bps,m.net_retrans_pm,m.latency_ms,
+      m.net_link_mbps,m.psi_cpu,m.psi_mem,m.psi_io,m.tcp_estab,m.conntrack_pct,m.proc_count
+    from public.metrics m
+    where (select public.hyn_can_view_node(p_node))
+      and m.node_id=p_node and m.ts>=now()-interval '48 hours' and m.ts<=now()+interval '5 minutes'
+    order by floor(extract(epoch from m.ts)/300) desc,m.ts desc limit 600
+  ) h
+$$;
+revoke all on function public.hyn_metric_history(uuid) from public, anon;
+grant execute on function public.hyn_metric_history(uuid) to authenticated;
+
+create or replace function public.hyn_fleet_metric_history()
+returns jsonb language sql stable security definer set search_path = public as $$
+  select coalesce(jsonb_agg(to_jsonb(h) order by h.ts),'[]'::jsonb)
+  from (
+    select to_timestamp(floor(extract(epoch from m.ts)/1800)*1800) as ts,
+      avg(m.cpu_pct) as cpu_pct,avg(m.net_rx_bps) as net_rx_bps,avg(m.net_tx_bps) as net_tx_bps
+    from public.metrics m join public.nodes n on n.id=m.node_id join public.profiles o on o.id=n.owner
+    where (select public.hyn_is_admin()) and not n.is_demo and not n.revoked
+      and m.ts>=now()-interval '24 hours' and m.ts<=now()
+    group by floor(extract(epoch from m.ts)/1800)
+    order by floor(extract(epoch from m.ts)/1800) desc limit 49
+  ) h
+$$;
+revoke all on function public.hyn_fleet_metric_history() from public, anon;
+grant execute on function public.hyn_fleet_metric_history() to authenticated;
+
+-- ===========================================================================
+-- database outage sweep (supabase/migrations/20260929150000_outage_sweep.sql)
+-- ===========================================================================
+-- Outage detection runs in the database, every minute.
+--
+-- The portal's watchdog was a Vercel Workflow started from the agent gateway.
+-- The portal runs on Heroku, where the workflow runtime does not exist, and it
+-- was also switched off (HYN_ENABLE_WORKFLOW_WATCHDOG). So no server was ever
+-- reported offline. On production every node_watchdogs row was still
+-- 'starting'.
+--
+-- _hyn_outage_sweep() runs every minute through pg_cron (_hyn_schedule_jobs).
+-- It compares each server's last heartbeat with its quiet threshold
+-- (_hyn_quiet_after_seconds: three missed beats, never under three minutes) and
+-- records the result in node_watchdogs.last_alert_state. On a real transition
+-- (online -> offline or offline -> online) it queues one email in
+-- web_notification_jobs, but only if the server has a recipient and incident
+-- alerts are on. The portal sends queued jobs like any other alert.
+-- Servers seen for the first time are recorded without an email, so a server
+-- that went quiet long ago is not reported as a new outage. Servers that never
+-- sent a heartbeat (agents before 1.7), paused, suspended, revoked and demo
+-- servers are left out.
+create or replace function public._hyn_outage_sweep()
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare v_seen integer := 0; v_changed integer := 0; v_queued integer := 0;
+begin
+  if not pg_try_advisory_xact_lock(1876901121, 60) then return jsonb_build_object('status', 'busy'); end if;
+
+  insert into public.node_watchdogs(node_id, state)
+    select n.id, 'running' from public.nodes n
+     where n.last_heartbeat_at is not null and not n.is_demo and not n.revoked
+  on conflict (node_id) do nothing;
+
+  with cur as (
+    select n.id, n.name, n.hostname, n.last_heartbeat_at, w.last_alert_state as prior,
+           case when n.last_heartbeat_at > now() - make_interval(secs => public._hyn_quiet_after_seconds(n.config))
+                then 'online' else 'offline' end as now_state,
+           extract(epoch from now() - n.last_heartbeat_at)::bigint as age
+      from public.nodes n join public.node_watchdogs w on w.node_id = n.id
+     where n.last_heartbeat_at is not null and not n.is_demo and not n.revoked
+       and (n.status = 'active' or (n.status = 'paused' and n.paused_until <= now()))
+     for update of w skip locked
+  ), upd as (
+    update public.node_watchdogs w
+       set state = 'running', last_alert_state = c.now_state, updated_at = now()
+      from cur c where w.node_id = c.id
+    returning c.*
+  ), queued as (
+    insert into public.web_notification_jobs(node_id, fingerprint, category, severity, subject, text_body)
+    select u.id,
+           format('outage:%s:%s', u.now_state, extract(epoch from u.last_heartbeat_at)::bigint),
+           'alert',
+           case u.now_state when 'offline' then 'crit' else 'info' end,
+           left(case u.now_state
+             when 'offline' then format('[HYN CRIT] %s missed three heartbeats', coalesce(u.name, u.hostname, 'Machine'))
+             else format('[HYN RECOVERED] %s is reporting again', coalesce(u.name, u.hostname, 'Machine')) end, 300),
+           case u.now_state
+             when 'offline' then format(
+               'No heartbeat has reached the portal for %s seconds (last at %s UTC). Charts still show the last received values.'
+               || E'\n\nOn the server: sudo hyn doctor --fix',
+               u.age, to_char(u.last_heartbeat_at at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
+             else format('The machine resumed its heartbeat at %s UTC.',
+               to_char(u.last_heartbeat_at at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')) end
+      from upd u join public.email_preferences e on e.node_id = u.id
+     where u.now_state <> u.prior and u.prior in ('online', 'offline')
+       and e.recipient is not null and e.incident_enabled
+    on conflict (node_id, fingerprint) do nothing
+    returning 1
+  )
+  select (select count(*) from upd), (select count(*) from upd where now_state <> prior), (select count(*) from queued)
+    into v_seen, v_changed, v_queued;
+
+  update public.node_watchdogs w set state = 'stopped', updated_at = now()
+    from public.nodes n
+   where n.id = w.node_id and w.state <> 'stopped'
+     and (n.is_demo or n.revoked or n.status not in ('active', 'paused')
+          or (n.status = 'paused' and (n.paused_until is null or n.paused_until > now())));
+
+  return jsonb_build_object('status', 'ok', 'servers', v_seen, 'transitions', v_changed, 'emails_queued', v_queued);
+end $$;
+revoke all on function public._hyn_outage_sweep() from public, anon, authenticated;
+
+create or replace function public._hyn_schedule_jobs()
+returns text language plpgsql set search_path = public as $$
+declare r record; n integer := 0;
+begin
+  if to_regprocedure('cron.schedule(text,text,text)') is null then
+    return 'pg_cron is not installed: no database jobs scheduled';
+  end if;
+  for r in select * from (values
+    ('hyn-telemetry-retention', '*/5 * * * *', 'select public.hyn_prune_telemetry(5000)'),
+    ('hyn-delivery-retention', '17 * * * *', 'select public._hyn_prune_delivery_history(5000)'),
+    ('hyn-outage-sweep', '* * * * *', 'select public._hyn_outage_sweep()')
+  ) j(name, schedule, command) loop
+    perform cron.schedule(r.name, r.schedule, r.command);
+    n := n + 1;
+  end loop;
+  return format('pg_cron jobs scheduled: %s', n);
+end $$;
+revoke all on function public._hyn_schedule_jobs() from public, anon, authenticated;
+
+do $$ begin raise notice '%', public._hyn_schedule_jobs(); end $$;
+
+-- ===========================================================================
+-- fleet latest readings (supabase/migrations/20260929160000_fleet_latest_readings.sql)
+-- ===========================================================================
+-- The fleet view reads one latest reading per server in one call.
+--
+-- The maintainer page fetched the newest 2,000 metrics rows of the last 24
+-- hours (every column, including the payload) plus 500 speed tests and kept the
+-- newest per server. On production on 2026-09-29 that was 7.5 MB and 409 ms per
+-- page load, repeated by the page's live refresh, and it still missed any server
+-- whose last reading was older than the newest 2,000 rows: at one-minute
+-- uploads, about three hours for ten servers.
+--
+-- hyn_fleet_latest_readings() returns, for every non-revoked server, its newest
+-- metrics row (scalar columns only, no payload or sensors) and newest speed test
+-- from the last 24 hours. It uses the (node_id, ts desc) indexes and checks
+-- fleet access once. Callers without fleet access get empty lists.
+create or replace function public.hyn_fleet_latest_readings()
+returns jsonb language sql stable security definer set search_path = public as $$
+  select jsonb_build_object(
+    'metrics', coalesce(jsonb_agg(to_jsonb(m) || '{"payload":null,"sensors":null}'::jsonb) filter (where m.id is not null), '[]'::jsonb),
+    'speedtests', coalesce(jsonb_agg(to_jsonb(s)) filter (where s.id is not null), '[]'::jsonb))
+  from public.nodes n
+  left join lateral (
+    select m.id,m.node_id,m.ts,m.cpu_pct,m.cpu_temp_c,m.cpu_mhz,m.cpu_model,m.cpu_steal,m.cpu_iowait,m.cpu_cores,
+      m.load1,m.mem_pct,m.mem_total,m.mem_used,m.swap_used,m.disk_pct,m.uptime_s,
+      m.net_iface,m.net_rx_bps,m.net_tx_bps,m.net_retrans_pm,m.latency_ms,
+      m.net_link_mbps,m.psi_cpu,m.psi_mem,m.psi_io,m.tcp_estab,m.conntrack_pct,m.proc_count
+    from public.metrics m
+    where m.node_id = n.id and m.ts >= now() - interval '24 hours' and m.ts <= now() + interval '5 minutes'
+    order by m.ts desc limit 1
+  ) m on true
+  left join lateral (
+    select s.* from public.speedtests s
+    where s.node_id = n.id and s.ts >= now() - interval '24 hours' and s.ts <= now() + interval '5 minutes'
+    order by s.ts desc limit 1
+  ) s on true
+  where (select public.hyn_can_view_fleet()) and not n.revoked;
+$$;
+revoke all on function public.hyn_fleet_latest_readings() from public, anon;
+grant execute on function public.hyn_fleet_latest_readings() to authenticated;
+
+-- ===========================================================================
+-- keep one-time email keys (supabase/migrations/20260929170000_keep_one_time_email_keys.sql)
+-- ===========================================================================
+-- One-time email keys survive delivery-history retention.
+--
+-- cloud_email_dispatches is also where the portal records that a server's
+-- one-time messages were sent: 'first-system:<node>' (the first system report,
+-- claimed after every upload) and 'device-linked:<node>' (the linking
+-- confirmation). _hyn_prune_delivery_history deleted every key older than 30
+-- days, including these, so 30 days after linking each server would have been
+-- sent its "first" system report again. These keys are kept for the life of the
+-- server; they are removed with it (on delete cascade).
+create or replace function public._hyn_prune_delivery_history(p_batch integer default 5000)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  v_batch integer := greatest(1, least(coalesce(p_batch, 5000), 5000));
+  v_jobs integer := 0; v_events integer := 0; v_dispatches integer := 0;
+begin
+  if not pg_try_advisory_xact_lock(1876901121, 90) then return jsonb_build_object('status', 'busy'); end if;
+  with expired as (
+    select id from public.web_notification_jobs
+     where (status = 'sent' or (status = 'failed' and attempts >= 5)) and updated_at < now() - interval '30 days'
+     order by updated_at for update skip locked limit v_batch
+  ) delete from public.web_notification_jobs j using expired e where j.id = e.id;
+  get diagnostics v_jobs = row_count;
+  with expired as (
+    select id from public.delivery_events where updated_at < now() - interval '90 days'
+     order by updated_at for update skip locked limit v_batch
+  ) delete from public.delivery_events d using expired e where d.id = e.id;
+  get diagnostics v_events = row_count;
+  with expired as (
+    select idempotency_key from public.cloud_email_dispatches
+     where created_at < now() - interval '30 days'
+       and idempotency_key not like 'first-system:%'
+       and idempotency_key not like 'device-linked:%'
+     order by created_at for update skip locked limit v_batch
+  ) delete from public.cloud_email_dispatches d using expired e where d.idempotency_key = e.idempotency_key;
+  get diagnostics v_dispatches = row_count;
+  return jsonb_build_object('status', 'ok', 'jobs_deleted', v_jobs, 'delivery_events_deleted', v_events,
+    'dispatches_deleted', v_dispatches);
+end $$;
+revoke all on function public._hyn_prune_delivery_history(integer) from public, anon, authenticated;
+
+-- ===========================================================================
+-- role privilege floor (supabase/migrations/20260928110000_reassert_role_privileges.sql)
+-- ===========================================================================
+-- Rules rather than a list, so an object added later cannot slip past them.
+-- Supabase's default privileges grant every new table, sequence and function to
+-- anon and authenticated by name; a restore that drops the REVOKEs above (the
+-- 2026-09-20 self-hosted cutover did exactly that) makes the whole schema
+-- reachable with the public anon key. supabase/privilege-check.sql asserts
+-- these rules and can be run read-only against a live database.
+do $$
+declare r record;
+begin
+  -- The anon role is the agent's transport and the signed-out browser. It works
+  -- only through SECURITY DEFINER RPCs and never needs table or sequence access.
+  execute 'revoke all on all tables in schema public from anon';
+  execute 'revoke all on all sequences in schema public from anon';
+  -- TRUNCATE ignores row level security; REFERENCES and TRIGGER are DDL-level.
+  execute 'revoke truncate, references, trigger on all tables in schema public from authenticated';
+  -- Internal helpers stay internal. _hyn_portal_config_valid backs a CHECK
+  -- constraint on nodes, which is evaluated as the writing role.
+  for r in
+    select p.oid::regprocedure as sig from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public' and p.proname like '\_hyn\_%' and p.proname <> '_hyn_portal_config_valid'
+  loop
+    execute format('revoke all on function %s from public, anon, authenticated', r.sig);
+  end loop;
+  -- Service-only entry points used by the portal's server-side key.
+  for r in
+    select p.oid::regprocedure as sig from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public' and p.proname in (
+       'hyn_claim_web_notification', 'hyn_complete_web_notification', 'hyn_defer_web_delivery',
+       'hyn_reserve_delivery', 'hyn_complete_delivery', 'hyn_due_user_digests',
+       'hyn_user_digest_content', 'hyn_prune_telemetry')
+  loop
+    execute format('revoke all on function %s from public, anon, authenticated', r.sig);
+  end loop;
+end $$;
 
 notify pgrst,'reload schema';
 commit;

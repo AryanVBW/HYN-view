@@ -105,6 +105,12 @@ source "${HYN_LIB:-${BASH_SOURCE[0]%/*}}/local-store.sh"
 source "${HYN_LIB:-${BASH_SOURCE[0]%/*}}/cloud-platform.sh"
 
 CLOUD_RESOLVED_URL=''
+# The hosted agent API lives on www.hyn-view.in only. The apex hyn-view.in is
+# not the portal -- it serves an unrelated site that answers /api/agent/v1/health
+# with a 404 -- so it is never probed or used. A config that names the apex
+# (older installs could be pointed at either host) is still the official
+# endpoint, and goes to www.
+CLOUD_OFFICIAL_API='https://www.hyn-view.in/api/agent/v1'
 cloud_official_url() {
   case ${CFG[cloud_api_url]:-} in
     https://www.hyn-view.in/api/agent/v1 | https://hyn-view.in/api/agent/v1) [[ -z ${CFG[cloud_url]:-} ]] ;;
@@ -112,34 +118,27 @@ cloud_official_url() {
   esac
 }
 
-# Probe only the two trusted HTTPS hosts, without secrets or redirects. Cache
-# discovery on disk so independent timer processes do not double every request.
+# One unauthenticated health probe, no secrets and no redirects. A verified
+# result is cached on disk for six hours so independent timer processes do not
+# double every request; a failed request (see _cloud_rpc) invalidates it, and an
+# endpoint cached by an older release (possibly the apex) is simply ignored.
 cloud_resolve_portal() {
   cloud_official_url || return 0
   state_dir_v
-  local f="$STATE_DIR/portal-endpoint" ts='' cached='' u response preferred
-  preferred=${CFG[cloud_api_url]}
+  local f="$STATE_DIR/portal-endpoint" ts='' cached='' response u=$CLOUD_OFFICIAL_API
   [[ -r $f ]] && read -r ts cached <"$f"
-  if [[ $ts =~ ^[0-9]+$ ]] && ((${EPOCHSECONDS:-0} >= ts && ${EPOCHSECONDS:-0} - ts < 21600)); then
-    case $cached in
-      https://www.hyn-view.in/api/agent/v1 | https://hyn-view.in/api/agent/v1) CLOUD_RESOLVED_URL=$cached; return 0 ;;
-    esac
+  if [[ $ts =~ ^[0-9]+$ && $cached == "$u" ]] && ((ts > 0 && ${EPOCHSECONDS:-0} >= ts && ${EPOCHSECONDS:-0} - ts < 21600)); then
+    CLOUD_RESOLVED_URL=$u
+    return 0
   fi
-  local other='https://hyn-view.in/api/agent/v1'
-  [[ $preferred == "$other" ]] && other='https://www.hyn-view.in/api/agent/v1'
-  if [[ $ts == 0 && $cached == "$preferred" ]]; then
-    u=$preferred; preferred=$other; other=$u
-  fi
-  for u in "$preferred" "$other"; do
-    _cloud_request_timeout_v 20 || return 1
-    response=$(curl -fsS --connect-timeout 5 --max-time "$CLOUD_REQUEST_TIMEOUT" "$u/health" 2>/dev/null) || continue
-    json_field_v "$response" service || continue
-    [[ $JSON_FIELD == hyn-agent-v1 ]] || continue
+  _cloud_request_timeout_v 20 || return 1
+  if response=$(curl -fsS --connect-timeout 5 --max-time "$CLOUD_REQUEST_TIMEOUT" "$u/health" 2>/dev/null) &&
+     json_field_v "$response" service && [[ $JSON_FIELD == hyn-agent-v1 ]]; then
     CLOUD_RESOLVED_URL=$u
     (umask 077; mkdir -p "$STATE_DIR"; printf '%s %s\n' "${EPOCHSECONDS:-0}" "$u" >"$f") || return 1
     return 0
-  done
-  CLOUD_LAST_ERR='neither www.hyn-view.in nor hyn-view.in passed the HTTPS agent health check; history remains local'
+  fi
+  CLOUD_LAST_ERR='www.hyn-view.in did not pass the HTTPS agent health check; history remains local'
   return 1
 }
 
@@ -147,19 +146,10 @@ cloud_url() {
   local u
   if [[ -n ${CFG[cloud_url]} && -n ${CFG[cloud_anon_key]} ]]; then
     u=${CFG[cloud_url]}
+  elif cloud_official_url; then
+    u=$CLOUD_OFFICIAL_API
   else
     u=${CFG[cloud_api_url]:-}
-    if cloud_official_url && [[ -z $CLOUD_RESOLVED_URL ]]; then
-      state_dir_v
-      local ts='' cached=''
-      [[ -r $STATE_DIR/portal-endpoint ]] && read -r ts cached <"$STATE_DIR/portal-endpoint"
-      if [[ $ts =~ ^[0-9]+$ ]] && ((${EPOCHSECONDS:-0} >= ts && ${EPOCHSECONDS:-0} - ts < 21600)); then
-        case $cached in
-          https://www.hyn-view.in/api/agent/v1 | https://hyn-view.in/api/agent/v1) CLOUD_RESOLVED_URL=$cached ;;
-        esac
-      fi
-    fi
-    if cloud_official_url && [[ -n $CLOUD_RESOLVED_URL ]]; then u=$CLOUD_RESOLVED_URL; fi
   fi
   u=${u%/}
   printf '%s' "$u"
@@ -351,11 +341,8 @@ cloud_monitoring_logs_v() {
   _cloud_monitoring_add "$ts" crit service_failed "${HW_FAILED:-0}"
   _cloud_monitoring_add "$ts" warn service_warning "${HW_JOURNAL_WARN:-0}"
   _cloud_monitoring_add "$ts" crit service_error "${HW_JOURNAL_ERR:-0}"
-  local active=0 i
-  for ((i = 0; i < ${#AL_ID[@]}; i++)); do
-    [[ ${AL_RESOLVED[i]:-0} == 1 ]] || active=$((active + 1))
-  done
-  _cloud_monitoring_add "$ts" warn alerts_active "$active"
+  # AL_ID holds exactly the rules firing now.
+  _cloud_monitoring_add "$ts" warn alerts_active "${#AL_ID[@]}"
   CLOUD_MONITORING_LOGS+=']'
 }
 
@@ -611,18 +598,41 @@ cloud_payload_v() {
   # monitoring without copying arbitrary log content off the server.
   p+='}'
 
-  # Currently firing alerts, so the portal's event log is the same truth the
-  # email alerts are built from rather than a second, drifting judgement.
+  # Every rule firing now, plus the ones the alert timer last recorded as firing
+  # that are clear now, so the portal's event log is the same truth the email
+  # alerts are built from rather than a second, drifting judgement. The list of
+  # firing rules is complete: a rule missing from it is not firing.
+  #
+  # `since` is the incident's start as the alert timer persisted it (epoch
+  # seconds). It is stable across pushes, which is what lets the portal keep one
+  # row per incident instead of one per upload. A rule the timer has not seen
+  # firing yet has no since; the portal opens the incident at the reading time.
   p+=', "alerts": ['
   first=1
-  local i
+  local i id since
   for ((i = 0; i < ${#AL_ID[@]}; i++)); do
     ((first)) || p+=', '
     first=0
-    p+="{\"rule\": \"$(_jstr "${AL_ID[i]}")\""
+    id=${AL_ID[i]}
+    p+="{\"rule\": \"$(_jstr "$id")\""
     p+=", \"severity\": \"$(_jstr "${AL_SEV[i]}")\""
     p+=", \"message\": \"$(_jstr "${AL_MSG[i]}")\""
-    p+=", \"resolved\": $([[ ${AL_RESOLVED[i]:-0} == 1 ]] && printf true || printf false)}"
+    p+=', "resolved": false'
+    since=${_AL_PREV_SINCE[$id]:-}
+    [[ ${_AL_PREV_STATE[$id]:-} == firing && $since =~ ^[1-9][0-9]{0,11}$ ]] && p+=", \"since\": $since"
+    p+='}'
+  done
+  for ((i = 0; i < ${#AL_CLEARED_ID[@]}; i++)); do
+    ((first)) || p+=', '
+    first=0
+    id=${AL_CLEARED_ID[i]}
+    p+="{\"rule\": \"$(_jstr "$id")\""
+    p+=", \"severity\": \"$(_jstr "${AL_CLEARED_SEV[i]}")\""
+    p+=", \"message\": \"$(_jstr "${AL_CLEARED_MSG[i]}")\""
+    p+=', "resolved": true'
+    since=${_AL_PREV_SINCE[$id]:-}
+    [[ $since =~ ^[1-9][0-9]{0,11}$ ]] && p+=", \"since\": $since"
+    p+='}'
   done
   p+=']}'
 
@@ -683,6 +693,36 @@ cloud_heartbeat_age_v() {
   CLOUD_HEARTBEAT_AGE=$((${EPOCHSECONDS:-0} - ts))
   ((CLOUD_HEARTBEAT_AGE < 0)) && CLOUD_HEARTBEAT_AGE=0
   return 0
+}
+
+# Telemetry that has stopped while everything else looks healthy. The heartbeat
+# comes from the resident agent and uploads come from hyn-push.timer, so one can
+# stay green for days while the other is dead -- which is exactly what happened on
+# a production node when its push timer stopped. Every upload attempt (success,
+# failure, pause) rewrites the push stamp, so an old stamp means uploads are not
+# being attempted at all: a scheduling fault, not a network one. Administrative
+# pauses and suspensions are deliberate and never count as stale.
+#
+# Sets CLOUD_TELEMETRY_AGE (seconds since the last attempt, -1 if unknown) and
+# CLOUD_TELEMETRY_LIMIT (the allowance: three missed intervals, at least 15
+# minutes). Returns 0 only when uploads are expected and overdue.
+CLOUD_TELEMETRY_AGE=-1 CLOUD_TELEMETRY_LIMIT=900
+cloud_telemetry_stale_v() {
+  local f ts='' st='' interval=${CFG[cloud_push_min]:-5}
+  CLOUD_TELEMETRY_AGE=-1
+  [[ $interval =~ ^[1-9][0-9]{0,3}$ ]] || interval=5
+  CLOUD_TELEMETRY_LIMIT=$((interval * 180))
+  ((CLOUD_TELEMETRY_LIMIT < 900)) && CLOUD_TELEMETRY_LIMIT=900
+  cfg_on cloud_enabled && cloud_linked || return 1
+  [[ ${CFG[cloud_storage]:-cloud} == cloud ]] || return 1
+  f=$(_cloud_push_stamp)
+  [[ -r $f ]] || return 1
+  IFS=$'\t' read -r ts st _ <"$f" 2>/dev/null
+  [[ $ts =~ ^[0-9]+$ ]] || return 1
+  case $st in paused | suspended) return 1 ;; esac
+  CLOUD_TELEMETRY_AGE=$((${EPOCHSECONDS:-0} - ts))
+  ((CLOUD_TELEMETRY_AGE < 0)) && CLOUD_TELEMETRY_AGE=0
+  ((CLOUD_TELEMETRY_AGE > CLOUD_TELEMETRY_LIMIT))
 }
 
 # Persist cumulative WAN counters at each beat, but report them at most once
@@ -812,6 +852,10 @@ cloud_web_notify() {
 # dashboard sync button from returning a reduced snapshot.
 cloud_collect_full() {
   alerts_collect
+  # Read-only: the alert timer owns this state (it saves it after notifying).
+  # Loading it here gives the upload the same hysteresis and incident start
+  # times; without it every firing rule looked new on every push.
+  alerts_state_load
   alerts_evaluate
   net_link "${NET_WAN:-}" 2>/dev/null || true
   net_identity 1 2>/dev/null || true
@@ -1395,8 +1439,15 @@ cloud_push() {
     local prior_stamp
     prior_stamp=$(_cloud_push_stamp)
     [[ -r $prior_stamp ]] && IFS=$'\t' read -r prior_ts prior_status prior_error <"$prior_stamp"
+    # The stamp is written when the previous upload *finished*, a few seconds
+    # into its run, while the timer wakes on a fixed one-minute grid. A strict
+    # `elapsed < interval` therefore failed on every other wake-up: 55 seconds
+    # after a one-minute upload looked "not due", so cloud_push_min=1 uploaded
+    # every two minutes (and 5 every six). Half a grid step of slack keeps each
+    # wake-up that lands on the interval due, and still never uploads twice
+    # within one wake-up.
     if [[ $prior_ts =~ ^[0-9]+$ && $prior_status == ok ]] &&
-       ((${EPOCHSECONDS:-0} - prior_ts < interval * 60)); then
+       ((${EPOCHSECONDS:-0} - prior_ts < interval * 60 - 30)); then
       ((quiet)) || printf 'hyn: configuration checked; next reading is not due yet\n'
       return 0
     fi
@@ -1887,6 +1938,11 @@ cloud_status() {
     esac
   else
     printf 'last push never\n'
+  fi
+  if cloud_telemetry_stale_v; then
+    printf 'WARNING  no reading has been attempted for %s (expected every %s min); the upload\n' \
+      "$(fmt_dur "$CLOUD_TELEMETRY_AGE")" "${CFG[cloud_push_min]:-5}"
+    printf '         timer is not running even if the heartbeat is: sudo hyn doctor --fix\n'
   fi
   # The beat is what the portal reads as proof of life, so it is worth its own
   # line: a machine can be pushing telemetry on schedule and still look quiet if

@@ -10,7 +10,7 @@
 # HYN_PROC / HYN_SYS exist so test/selfcheck.sh can point the readers at a
 # fixture tree and assert on known numbers. Never hardcode /proc below.
 
-HYN_VERSION="2.0.0"
+HYN_VERSION="2.0.1"
 HYN_AUTHOR='NEXUSV'
 HYN_AUTHOR_URL='https://www.hyn-view.in'
 HYN_COPYRIGHT='(c) 2026 NEXUSV TECHNOLOGIES PRIVATE LIMITED'
@@ -181,7 +181,7 @@ declare -A CFG=(
   [report_hours]=24
   [report_busy_cpu_pct]=80
   [report_busy_mem_pct]=85
-  [record_interval_min]=1
+  [record_interval_min]=5
   [metrics_keep_days]=8
 
   # --- web portal / cloud sync ----------------------------------------------
@@ -197,20 +197,21 @@ declare -A CFG=(
   # during `hyn link`; the agent never contacts it.
   [cloud_portal_url]='https://www.hyn-view.in'
   [cloud_node_id]=''
-  [cloud_push_min]=5
+  [cloud_push_min]=1
   # Paired nodes retain rolling cloud telemetry with a bounded local backup.
   # Explicit local mode remains available through local or managed settings.
   [cloud_storage]=cloud
   [cloud_notifications]=off
-  [cloud_checkin_min]=5
+  [cloud_checkin_min]=1
   [local_keep_days]=14
   [local_max_mb]=256
   [cloud_timeout]=20
   # Seconds between liveness beats from the resident agent (hyn-agent.service).
   # This is not the reading interval: a beat is one small POST that proves the
-  # machine is alive. The portal delays status after ten minutes and marks a
-  # machine quiet after fifteen, allowing two missed five-minute beats.
-  [heartbeat_sec]=300
+  # machine is alive. The portal calls a machine quiet after three missed beats
+  # and never sooner than three minutes, so the default 24s tolerates seven
+  # missed beats before an outage is reported.
+  [heartbeat_sec]=24
 
   # --- self update -----------------------------------------------------------
   # off     never look
@@ -846,6 +847,47 @@ state_dir() { state_dir_v; printf '%s' "$STATE_DIR"; }
 
 die() { printf 'hyn: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'hyn: %s\n' "$*" >&2; }
+
+# with_schedule_lock <wait-seconds> <command...>
+#
+# Every writer of hyn's units and timers -- `hyn setup`, `hyn link`, `doctor
+# --fix`, the self-update's service refresh, the resident agent's reconcile and
+# self-heal, uninstall -- runs its changes under one lock. They used to overlap:
+# on 2026-09-21 a self-update's refresh and the still-running old agent each did
+# their own daemon-reload/stop/start pass over the same timers, and one of them
+# left hyn-push.timer stopped.
+#
+# wait=0 skips when the lock is busy (background repair: whoever holds it is
+# already doing the work) and returns 75. A positive wait blocks up to that many
+# seconds. The holder exports HYN_SCHEDULE_LOCKED=1 so a child it runs for the
+# same job (the updater runs `hyn setup`) proceeds instead of deadlocking on the
+# lock its own parent holds.
+with_schedule_lock() {
+  local wait=$1 fd rc
+  shift
+  if [[ ${HYN_SCHEDULE_LOCKED:-0} == 1 ]] || ! have flock; then
+    "$@"
+    return
+  fi
+  state_dir_v
+  mkdir -p "$STATE_DIR" 2>/dev/null
+  exec {fd}>>"$STATE_DIR/schedule.lock" || { "$@"; return; }
+  local got=0
+  if ((wait > 0)); then flock -w "$wait" "$fd"; else flock -n "$fd"; fi
+  got=$?
+  # 1 is util-linux flock's "busy" (or timed out). Anything else means locking
+  # itself is unavailable here, and the change proceeds unserialized, as before.
+  if ((got == 1)); then
+    exec {fd}>&-
+    return 75
+  fi
+  export HYN_SCHEDULE_LOCKED=1
+  "$@"
+  rc=$?
+  unset HYN_SCHEDULE_LOCKED
+  exec {fd}>&-
+  return "$rc"
+}
 
 # ---------------------------------------------------------------------------
 # first run

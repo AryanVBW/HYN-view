@@ -241,10 +241,11 @@ _default_of() {
   printf '%s' "$v"
 }
 eq 'notification access details default off' 'off' "${CFG[notify_access_details]:-missing}"
-eq 'cloud telemetry defaults to five minutes' '5' "${CFG[cloud_push_min]:-missing}"
+eq 'cloud telemetry defaults to one minute' '1' "${CFG[cloud_push_min]:-missing}"
 eq 'cloud is the primary paired history store' 'cloud' "${CFG[cloud_storage]:-missing}"
-eq 'default managed check-in is five minutes' '5' "${CFG[cloud_checkin_min]:-missing}"
-eq 'local sampling remains every minute' '1' "${CFG[record_interval_min]:-missing}"
+eq 'default check-in permits one-minute telemetry' '1' "${CFG[cloud_checkin_min]:-missing}"
+eq 'local report sampling is every five minutes' '5' "${CFG[record_interval_min]:-missing}"
+eq 'the default heartbeat is 24 seconds' '24' "${CFG[heartbeat_sec]:-missing}"
 eq 'automatic CLI updates are the default' 'install' "$(_default_of auto_update)"
 eq 'default view is the advanced dashboard' 'dash' "$(_default_of dashboard_view)"
 color_detect
@@ -1862,6 +1863,32 @@ contains 'payload carries the agent version' "\"agent_version\": \"$HYN_VERSION\
 contains 'payload carries cpu percent'   '"cpu": {"pct":' "$CLOUD_PAYLOAD"
 contains 'payload carries an alerts array' '"alerts": ['   "$CLOUD_PAYLOAD"
 
+# Incident lifecycle in the payload. The persisted state (what the alert timer
+# saved) says disk and memory were firing; now disk still is, memory cleared and
+# load started. Before this, every firing rule was sent as resolved:false with no
+# start time, and a cleared rule was never sent at all, so the portal could not
+# close an incident and stored one new row per upload instead.
+(
+  _AL_PREV_STATE=([t_disk]=firing [t_mem]=firing) _AL_PREV_SINCE=([t_disk]=1790000000 [t_mem]=1790000100)
+  _AL_PREV_NOTIFIED=()
+  AL_ID=() AL_SEV=() AL_MSG=() AL_NEW=() AL_VAL=() AL_RESOLVED=()
+  AL_CLEARED_ID=() AL_CLEARED_SEV=() AL_CLEARED_MSG=() AL_CRIT=0 AL_WARN=0 AL_INFO=0 AL_FIRING=0 _AL_SEEN=()
+  _check_num t_disk warn 90 85 80 'Disk / at 90%'
+  _check_num t_mem crit 50 90 82 'Memory at 50%'
+  _check_num t_load warn 9 4 3 'Load 9 per core'
+  cloud_payload_v
+  printf '%s' "$CLOUD_PAYLOAD" | python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+a = {x["rule"]: x for x in p["alerts"]}
+assert a["t_disk"]["resolved"] is False and a["t_disk"]["since"] == 1790000000, a
+assert a["t_mem"]["resolved"] is True and a["t_mem"]["since"] == 1790000100 and a["t_mem"]["severity"] == "crit", a
+assert a["t_load"]["resolved"] is False and "since" not in a["t_load"], a
+active = [x["count"] for x in p["monitoring_logs"] if x["code"] == "alerts_active"]
+assert active == [2], active
+'
+) && ok || bad 'the payload does not report cleared alerts and stable incident start times'
+
 # A first-link report must identify the actual connection without requiring a
 # second agent version. These values are collected locally; the gateway adds
 # the public address it observes on the HTTPS request.
@@ -2439,6 +2466,93 @@ section 'a timer is on, or there is a reason'
   setup_self_heal
   ((CALLED == 0))
 ) && ok || bad 'a healthy timer was touched when nothing had drifted'
+# The production failure: active, but elapsed with no next run. is-active says
+# active and enable --now is a no-op, so only an explicit SubState check sees it.
+(
+  source "$HYN_LIB/setup.sh"
+  is_root() { return 0; }
+  setup_reconcile() { return 0; }
+  setup_heal_agent() { return 0; }
+  CFG[alert_enabled]=on CFG[report_enabled]=on CFG[cloud_enabled]=on
+  cloud_linked() { return 0; }
+  CALLS=''
+  systemctl() {
+    case "$1 $2" in
+      'cat hyn-push.timer') return 0 ;;
+      'is-active hyn-push.timer') printf 'active\n'; return 0 ;;
+      'show -p') [[ $5 == hyn-push.timer ]] && printf 'elapsed\n'; return 0 ;;
+      cat*) return 1 ;;
+    esac
+    CALLS+="$*;"
+    return 0
+  }
+  setup_self_heal
+  [[ $CALLS == *'restart hyn-push.timer;'* && $CALLS == *'start --no-block hyn-push.service;'* ]]
+) && ok || bad 'an elapsed push timer with no next run was left alone'
+(
+  source "$HYN_LIB/setup.sh"
+  CALLS=''
+  systemctl() {
+    case "$1" in
+      show) printf 'elapsed\n'; return 0 ;;
+    esac
+    CALLS+="$*;"
+    return 0
+  }
+  _toggle_timer hyn-record.timer 1 >/dev/null
+  [[ $CALLS == *'restart hyn-record.timer;'* ]]
+) && ok || bad 'hyn setup / doctor --fix cannot repair an elapsed timer'
+(
+  source "$HYN_LIB/setup.sh"
+  systemctl() { [[ $1 == show ]] && printf 'waiting\n'; return 0; }
+  ! setup_timer_elapsed hyn-push.timer && ! setup_timer_elapsed hyn-awake.service
+) && ok || bad 'a waiting timer or a service was mistaken for an elapsed timer'
+
+# One lock serializes every writer of units and timers. On 2026-09-21 a
+# self-update's service refresh and the still-running old agent each did their
+# own daemon-reload/stop/start pass, and one of them left hyn-push.timer stopped.
+(
+  source "$ROOT/test/flock-fixture.sh"
+  export HYN_VAR=$TMP/schedule-lock
+  mkdir -p "$HYN_VAR"
+  STATE_DIR=''
+  inner=''
+  with_schedule_lock 0 eval 'inner=${HYN_SCHEDULE_LOCKED:-}'
+  [[ $inner == 1 && -z ${HYN_SCHEDULE_LOCKED:-} ]] || exit 1
+  # Held elsewhere: a background pass skips, a waiting one gives up in time,
+  # and neither runs its command.
+  exec {held}>>"$HYN_VAR/schedule.lock"
+  flock -n "$held" || exit 1
+  ran=0
+  with_schedule_lock 0 eval 'ran=1'; rc0=$?
+  start=$SECONDS
+  with_schedule_lock 1 eval 'ran=1'; rc1=$?
+  ((rc0 == 75 && rc1 == 75 && ran == 0 && SECONDS - start <= 3)) || exit 1
+  exec {held}>&-
+  # A child of the holder (the updater runs `hyn setup`) must not wait on the
+  # lock its own parent holds.
+  with_schedule_lock 0 bash -c '[[ ${HYN_SCHEDULE_LOCKED:-} == 1 ]]'
+) && ok || bad 'the schedule lock does not serialize writers or deadlocks a child of its holder'
+(
+  source "$HYN_LIB/setup.sh"
+  source "$HYN_LIB/update.sh"
+  is_root() { return 0; }
+  have() { return 0; }
+  export HYN_UNIT_DIR=$TMP/lock-units
+  mkdir -p "$HYN_UNIT_DIR"
+  : >"$HYN_UNIT_DIR/hyn-agent.service"
+  CALLS=''
+  with_schedule_lock() { CALLS+="$1:$2;"; return 75; }
+  setup_self_heal; setup_reconcile; setup_run --no-wizard 2>/dev/null
+  [[ $CALLS == *'0:_setup_self_heal;'* && $CALLS == *'0:_setup_reconcile;'* && $CALLS == *'120:_setup_run;'* ]]
+) && ok || bad 'a unit writer runs without the schedule lock'
+# The updater's refresh is the writer that raced; it must go through the lock,
+# and nothing else in update.sh may rewrite units on its own.
+_updsrc=$(code_only "$HYN_LIB/update.sh")
+eq 'the update refreshes services only under the schedule lock' 2 \
+  "$(grep -c 'with_schedule_lock 300 _update_refresh_all' <<<"$_updsrc")"
+eq 'only the locked refresh rewrites units during an update' 1 \
+  "$(grep -c 'bin/hyn" setup --no-wizard' <<<"$_updsrc")"
 (
   source "$HYN_LIB/setup.sh"
   is_root() { return 1; }
@@ -2497,9 +2611,25 @@ contains 'a paired machine confirms the token' 'node token' "$_doc_paired"
 contains 'a paired machine checks the transport' 'transport'  "$_doc_paired"
 contains 'a paired machine reports the endpoint scheme' 'https' "$_doc_paired"
 contains 'a paired machine reports the queue budget' 'daily budget' "$_doc_paired"
-contains 'a paired machine is watched from outside' '3 minutes without a beat' "$_doc_paired"
+contains 'a paired machine is watched from outside' 'flags this machine after 3m 00s without a beat' "$_doc_paired"
 
 # ---------------------------------------------------------------------------
+# `hyn cloud optimize` restores the recommended profile, which is exactly the
+# shipped defaults. It used to hard-code its own numbers, and the docs called
+# the fastest cadence there is a "low-consumption" profile.
+_opt_out=$(
+  export HYN_ETC=$TMP/optimize-etc HYN_VAR=$TMP/optimize-var XDG_CONFIG_HOME=$TMP/optimize-xdg TERM=dumb
+  mkdir -p "$HYN_ETC" "$HYN_VAR" "$XDG_CONFIG_HOME/hyn-view"
+  printf 'cloud_storage=local\ncloud_push_min=30\nheartbeat_sec=600\ncloud_checkin_min=15\n' >"$XDG_CONFIG_HOME/hyn-view/config"
+  bash "$ROOT/bin/hyn" cloud optimize 2>&1
+  printf '\n--config--\n'; cat "$XDG_CONFIG_HOME/hyn-view/config"
+)
+_opt_cfg=${_opt_out##*--config--}
+truthy 'cloud optimize writes the shipped cadence and cloud history' \
+  "[[ \$_opt_cfg == *cloud_storage=cloud* && \$_opt_cfg == *cloud_push_min=$(_default_of cloud_push_min)* && \$_opt_cfg == *heartbeat_sec=$(_default_of heartbeat_sec)* && \$_opt_cfg == *cloud_checkin_min=$(_default_of cloud_checkin_min)* ]]"
+contains 'cloud optimize says what it applied' 'recommended cloud profile applied' "$_opt_out"
+falsy 'cloud optimize no longer claims to cut consumption' '[[ $_opt_out == *low-consumption* ]]'
+
 section 'config migration'
 # ---------------------------------------------------------------------------
 # Changing a default in core.sh does nothing for a box whose config file already
@@ -2765,6 +2895,31 @@ if [[ -r $_inst ]]; then
   # design, so "npm exited 0" is not evidence that monitoring is running.
   contains 'the installer verifies the resident agent' 'is-active hyn-agent.service' "$_instsrc"
   contains 'the installer repairs a failed setup' 'doctor --fix' "$_instsrc"
+  # verify() runs against a fake systemd on which a paired machine's upload timer
+  # is active but elapsed (the server02 failure) until `doctor --fix` re-arms it.
+  # It must report the configured heartbeat, repair the timer and say so.
+  _vdir=$(mktemp -d)
+  cat >"$_vdir/hyn" <<'EOS'
+#!/usr/bin/env bash
+case "$*" in
+  --version) echo 'hyn-view 2.0.1' ;;
+  'config get heartbeat_sec') echo 45 ;;
+  'config get cloud_enabled') echo on ;;
+  'doctor --fix') : >"${0%/*}/repaired" ;;
+esac
+EOS
+  cat >"$_vdir/systemctl" <<'EOS'
+#!/usr/bin/env bash
+[[ $1 == is-active ]] && { echo active; exit 0; }
+if [[ $* == *hyn-push.timer* && ! -e ${0%/*}/repaired ]]; then echo elapsed; else echo waiting; fi
+EOS
+  chmod +x "$_vdir/hyn" "$_vdir/systemctl"
+  _vout=$(PATH="$_vdir:$PATH" bash -c 'vdir=$2; source <(sed "\$d" "$1"); hyn_bin() { printf "%s\n" "$vdir/hyn"; }; verify' _ "$_inst" "$_vdir" 2>&1)
+  contains 'the installer reports the configured heartbeat' 'heartbeat every 45s' "$_vout"
+  contains 'the installer repairs an elapsed upload timer' 'will not fire; repairing' "$_vout"
+  contains 'the installer confirms a paired machine uploads' 'hyn-push.timer will upload readings' "$_vout"
+  contains 'the installer counts the upload timer of a paired machine' '5 of 5 scheduled timers armed' "$_vout"
+  rm -rf "$_vdir"
   # The command shown on the site and the script it fetches must agree. Drift
   # here is a 404 in the one place a new user starts.
   _installui="$ROOT/web-portal/components/product-sections.tsx"
@@ -3014,6 +3169,18 @@ truthy 'the check-in timer spends no heartbeat budget on jitter' \
   '[[ ${_push_tmr##*RandomizedDelaySec=} == 0* ]]'
 truthy 'the check-in timer is not coalesced away from its minute' \
   '[[ ${_push_tmr##*AccuracySec=} == 1s* ]]'
+# Persistent= on a monotonic timer makes systemd treat OnBootSec= as spent after
+# any restart past its deadline, leaving OnUnitActiveSec= with nothing to count
+# from: "active (elapsed)" with no next run. Calendar timers keep it, because it
+# is what catches up a report or speed test missed while the box was off.
+for _t in "$_unitdir"/*.timer; do
+  _c=$(<"$_t")
+  if [[ $_c == *OnCalendar=* ]]; then
+    if [[ $_c == *Persistent=true* ]]; then ok
+    else bad "${_t##*/} is a calendar timer without Persistent=, so missed runs are lost"; fi
+  elif [[ $_c == *Persistent=* ]]; then bad "${_t##*/} is monotonic and Persistent=, so a restart can leave it elapsed forever"
+  else ok; fi
+done
 
 # The maintenance unit is where an install runs: on its own timeout, with its own
 # memory headroom, and out of the sixty-second check-in's way.
@@ -3071,17 +3238,17 @@ truthy 'the agent is not reaped for still running' '[[ $_agent != *TimeoutStartS
 
 # The loop's own logic, driven directly.
 source "$HYN_LIB/agent.sh"
-CFG[heartbeat_sec]=300; agent_interval_v
-eq 'the default beat is 300s'       '300'  "$AGENT_INTERVAL"
+CFG[heartbeat_sec]=24; agent_interval_v
+eq 'the default beat is 24s'        '24'   "$AGENT_INTERVAL"
 CFG[heartbeat_sec]=1; agent_interval_v
 eq 'a too-fast beat is clamped up'  '5'    "$AGENT_INTERVAL"
 CFG[heartbeat_sec]=99999; agent_interval_v
 eq 'a too-slow beat is clamped down' '3600' "$AGENT_INTERVAL"
 CFG[heartbeat_sec]='; rm -rf /'; agent_interval_v
-eq 'a junk interval falls back'     '300'  "$AGENT_INTERVAL"
+eq 'a junk interval falls back'     '24'   "$AGENT_INTERVAL"
 CFG[heartbeat_sec]=0; agent_interval_v
-eq 'zero would spin, so it falls back' '300' "$AGENT_INTERVAL"
-CFG[heartbeat_sec]=300
+eq 'zero would spin, so it falls back' '24' "$AGENT_INTERVAL"
+CFG[heartbeat_sec]=24
 
 # Liveness is measured, not assumed: this is the difference between a loop that
 # is running and a loop that is working, and the portal cannot tell a wedged
@@ -3238,6 +3405,47 @@ eq 'and no stamp at all is unknown, never active' '' "$(
 )"
 rm -f "$(HYN_VAR=$TMP/var; cloud_heartbeat_stamp)" "$(HYN_VAR=$TMP/var; _cloud_push_stamp)"
 
+# Heartbeat fresh, telemetry stale: the production failure mode. The heartbeat
+# and the uploads come from different units, so nothing else notices.
+(
+  export HYN_ETC=$TMP/etc HYN_VAR=$TMP/stale-var
+  mkdir -p "$HYN_VAR"; STATE_DIR=''
+  cloud_linked() { return 0; }
+  CFG[cloud_enabled]=on CFG[cloud_storage]=cloud CFG[cloud_push_min]=1
+  _cloud_stamp "$(_cloud_push_stamp)" "$((EPOCHSECONDS - 1200))" ok
+  cloud_telemetry_stale_v && ((CLOUD_TELEMETRY_LIMIT == 900 && CLOUD_TELEMETRY_AGE >= 1200)) || exit 1
+  [[ $(cloud_status 2>/dev/null) == *'WARNING  no reading has been attempted'* ]] || exit 1
+  _cloud_stamp "$(_cloud_push_stamp)" "$((EPOCHSECONDS - 300))" fail 'network down'
+  ! cloud_telemetry_stale_v || exit 1
+  _cloud_stamp "$(_cloud_push_stamp)" "$((EPOCHSECONDS - 86400))" paused
+  ! cloud_telemetry_stale_v || exit 1
+  # A two-hour gap is stale at a one-minute interval, not at an hourly one.
+  _cloud_stamp "$(_cloud_push_stamp)" "$((EPOCHSECONDS - 7200))" ok
+  cloud_telemetry_stale_v || exit 1
+  CFG[cloud_push_min]=60
+  ! cloud_telemetry_stale_v && ((CLOUD_TELEMETRY_LIMIT == 10800)) || exit 1
+  CFG[cloud_push_min]=1 CFG[cloud_storage]=local
+  ! cloud_telemetry_stale_v || exit 1
+  CFG[cloud_storage]=cloud
+  cloud_linked() { return 1; }
+  ! cloud_telemetry_stale_v
+) && ok || bad 'stale telemetry is not told apart from failing, paused, slow or local-only uploads'
+(
+  export HYN_ETC=$TMP/etc HYN_VAR=$TMP/stale-heal
+  mkdir -p "$HYN_VAR"; STATE_DIR=''
+  source "$HYN_LIB/setup.sh"
+  cloud_linked() { return 0; }
+  CFG[cloud_enabled]=on CFG[cloud_storage]=cloud CFG[cloud_push_min]=1
+  _cloud_stamp "$(_cloud_push_stamp)" "$((EPOCHSECONDS - 7200))" ok
+  CALLS=''
+  systemctl() { CALLS+="$*;"; return 0; }
+  setup_heal_stale_telemetry 2>/dev/null
+  [[ $CALLS == 'restart hyn-push.timer;start --no-block hyn-push.service;' ]] || exit 1
+  CALLS=''
+  setup_heal_stale_telemetry 2>/dev/null
+  [[ -z $CALLS ]]
+) && ok || bad 'stale telemetry is not repaired, or is repaired on every maintenance pass'
+
 # Self-heal, which is the other half: a loop that stopped beating gets restarted,
 # and one that is beating is left alone.
 _heal_log="$TMP/heal-systemctl"
@@ -3321,6 +3529,10 @@ truthy 'the shipped version is a version' "ver_valid '$HYN_VERSION'"
 # "2.0.0" must beat "1.10.0" even though 10 > 0 segment by segment.
 truthy 'a major bump reads as newer than a two-digit minor' "ver_gt '2.0.0' '1.10.0'"
 falsy  'and the reverse is not newer'                      "ver_gt '1.10.0' '2.0.0'"
+# Every deployed agent runs 2.0.0, and main carries behaviour changes. They can
+# only reach the fleet if the shipped version is strictly newer: an unchanged
+# version string is "already current" to every updater.
+truthy 'the shipped version is newer than the deployed 2.0.0' "ver_gt '$HYN_VERSION' '2.0.0'"
 
 # ---------------------------------------------------------------------------
 printf '\n'

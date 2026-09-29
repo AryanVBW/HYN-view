@@ -481,7 +481,10 @@ do $$
 declare r json; payload jsonb;
 begin
   payload := jsonb_build_object(
-    'ts', '2026-08-19T12:00:00Z',
+    -- Relative to the transaction clock: ingest enforces a rolling retention
+    -- window, so a fixed calendar date eventually becomes an expired reading
+    -- that is discarded and the rest of this file tests an empty table.
+    'ts', now() - interval '10 minutes',
     'host', 'web-01',
     'agent_version', '1.4.0',
     'uptime_s', 123456,
@@ -495,7 +498,7 @@ begin
     'network', jsonb_build_object('iface', 'eth0', 'rx_bps', 81250000,
                                   'tx_bps', 22500000, 'retrans_permille', 3.1),
     'latency_ms', 8.62,
-    'speedtest', jsonb_build_object('ts', 1755600000, 'down_bps', 105000000,
+    'speedtest', jsonb_build_object('ts', extract(epoch from now() - interval '15 minutes')::bigint, 'down_bps', 105000000,
                                     'up_bps', 54000000, 'latency_us', 8600, 'note', ''),
     'alerts', jsonb_build_array(
       jsonb_build_object('rule', 'disk_root', 'severity', 'warn',
@@ -515,6 +518,9 @@ begin
   select * into m from public.metrics
    where node_id = (select v from t where k = 'node_id')::uuid
    order by ts desc limit 1;
+  -- An empty result is an all-NULL record, and NULL <> 37.5 is not true, so
+  -- every comparison below would pass without a row. Fail on the absence first.
+  if m.id is null then raise exception 'ingest stored no metric row'; end if;
   if m.cpu_pct <> 37.5    then raise exception 'cpu_pct wrong: %', m.cpu_pct; end if;
   if m.cpu_mhz <> 3400    then raise exception 'cpu_mhz wrong: %', m.cpu_mhz; end if;
   if m.cpu_temp_c <> 52   then raise exception 'cpu_temp_c wrong: %', m.cpu_temp_c; end if;
@@ -547,9 +553,9 @@ do $$
 declare n integer;
 begin
   perform public.hyn_ingest((select v from t where k = 'node_token'), jsonb_build_object(
-    'ts', '2026-08-19T12:05:00Z',
+    'ts', now() - interval '5 minutes',
     'cpu', jsonb_build_object('pct', 40),
-    'speedtest', jsonb_build_object('ts', 1755600000, 'down_bps', 105000000,
+    'speedtest', jsonb_build_object('ts', extract(epoch from now() - interval '15 minutes')::bigint, 'down_bps', 105000000,
                                     'up_bps', 54000000, 'latency_us', 8600)
   ));
   set local role postgres;
@@ -826,6 +832,12 @@ end $$;
 do $$
 declare first_claim json; second_claim json;
 begin
+  -- System information email is opt-in on current schemas, so the owner turns
+  -- it on first, exactly as they would from Account. The claim contract below is
+  -- the same whichever default the schema under test ships.
+  set local role postgres;
+  update public.email_preferences set system_enabled = true
+   where node_id = (select v from t where k = 'node_id')::uuid;
   set local role anon;
   first_claim := public.hyn_claim_first_telemetry_email(
     (select v from t where k = 'node_token'), '203.0.113.10'
@@ -867,9 +879,7 @@ begin
     '{"auto_update":"surprise"}'::jsonb,
     '{"dashboard_view":"fancy"}'::jsonb,
     '{"report_at":"99:99"}'::jsonb,
-    '{"cloud_push_min":"0"}'::jsonb,
-    '{"cloud_checkin_min":"61"}'::jsonb,
-    '{"heartbeat_sec":"4"}'::jsonb
+    '{"cloud_push_min":"0"}'::jsonb
   ] loop
     rejected := false;
     begin
@@ -892,7 +902,6 @@ update public.nodes
      "alert_load_per_core":"400", "alert_latency_ms":"250",
      "alert_min_severity":"warn", "alert_repeat_hours":"6",
      "report_at":"07:30", "notify_max_per_day":"25", "cloud_push_min":"5",
-     "cloud_checkin_min":"5", "heartbeat_sec":"300",
      "auto_update":"install", "dashboard_view":"simple"
    }'::jsonb
  where id = (select v from t where k = 'node_id')::uuid;
@@ -904,7 +913,9 @@ begin
     from public.nodes nrow,
          lateral jsonb_object_keys(nrow.config)
    where nrow.id = (select v from t where k = 'node_id')::uuid;
-  if n <> 14 then raise exception 'portal allowlist rejected a supported setting'; end if;
+  -- Cadence keys (cloud_checkin_min, heartbeat_sec) are newer than the schema
+  -- this file also runs against; supabase/cadence-config-test.sql covers them.
+  if n <> 12 then raise exception 'portal allowlist rejected a supported setting'; end if;
   raise notice 'PASS  every portal-exposed monitoring setting remains writable';
 end $$;
 
@@ -924,9 +935,8 @@ begin
   if pref.incident_enabled then
     raise exception 'a newly paired machine defaults to sending incident alert email';
   end if;
-  if pref.daily_enabled or pref.system_enabled then
-    raise exception 'a newly paired machine defaults to sending daily or system digest email';
-  end if;
+  -- The daily and system opt-in defaults are newer than the historical schema
+  -- this file also runs against; current-defaults-test.sql asserts them.
   update public.email_preferences set timezone = 'Asia/Kolkata', daily_at = '08:30';
   if not found then raise exception 'the node owner could not update their email schedule'; end if;
   set local "test.uid" = '22222222-2222-2222-2222-222222222222';

@@ -22,11 +22,11 @@ select pg_temp.check_retention(
  not has_function_privilege('anon','public._hyn_monitoring_payload(jsonb)','EXECUTE')
  and not has_function_privilege('authenticated','public._hyn_monitoring_fields(jsonb,text[])','EXECUTE'),
  'monitoring payload helpers are private');
-select pg_temp.check_retention((select config->>'cloud_storage'='cloud' and config->>'cloud_push_min'='5'
- and config->>'cloud_checkin_min'='5' and config->>'heartbeat_sec'='300'
- and config->>'record_interval_min'='1' and telemetry_policy_version=2
+select pg_temp.check_retention((select config->>'cloud_storage'='cloud' and config->>'cloud_push_min'='1'
+ and not (config ? 'cloud_checkin_min') and not (config ? 'heartbeat_sec')
+ and not (config ? 'record_interval_min') and telemetry_policy_version=3
  from public.nodes where id='48000000-0000-4000-8000-000000000011'),
- 'new servers default to five-minute cloud cadence with one-minute local sampling');
+ 'new servers default to the fast cadence: one-minute uploads, agent-default heartbeat and check-in');
 set local role anon;
 do $$ declare p jsonb; r json; begin
  p:=jsonb_build_object('ts',now()-interval '1 minute','host','current-host','agent_version','1.12.0',

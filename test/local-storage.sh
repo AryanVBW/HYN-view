@@ -14,7 +14,7 @@ PASS=0 FAIL=0
 check() { if eval "$2"; then PASS=$((PASS + 1)); else printf 'FAIL %s\n' "$1"; FAIL=$((FAIL + 1)); fi; }
 is_root() { return 0; }
 cfg_load
-check 'default history uploads and beats every five minutes' '[[ ${CFG[cloud_storage]} == cloud && ${CFG[cloud_push_min]} == 5 && ${CFG[cloud_checkin_min]} == 5 && ${CFG[heartbeat_sec]} == 300 && ${CFG[record_interval_min]} == 1 ]]'
+check 'default history uploads every minute and beats every 24 seconds' '[[ ${CFG[cloud_storage]} == cloud && ${CFG[cloud_push_min]} == 1 && ${CFG[cloud_checkin_min]} == 1 && ${CFG[heartbeat_sec]} == 24 && ${CFG[record_interval_min]} == 5 ]]'
 check 'bad numeric property is refused without changing file' '! config_set cloud_checkin_min 0 2>/dev/null && [[ ! -f $HYN_ETC/config ]]'
 BAD_SETTING=$'mono\ncloud_storage=cloud'
 check 'multiline cannot inject a second property' '! config_set theme "$BAD_SETTING" 2>/dev/null'
@@ -164,16 +164,36 @@ check 'second timer tick sends no control requests' 'cloud_push 1 1 && [[ $(wc -
 
 # Discovery does not use any credentials or follow redirects, caches success,
 # and never extends the trusted host list to a lookalike or a custom endpoint.
+# Only www.hyn-view.in is the agent API: the apex serves an unrelated site, so it
+# must never be probed, even when www is down.
 curl() {
   printf '%s\n' "$*" >>"$WORK/probes"
   [[ $* != *'--location'* && $* != *'test-private-node-token'* ]] || return 3
-  [[ ${*: -1} == https://hyn-view.in/api/agent/v1/health ]] || return 7
+  [[ ${*: -1} == https://www.hyn-view.in/api/agent/v1/health ]] || return 22
   printf '{"service":"hyn-agent-v1"}'
 }
 CFG[cloud_api_url]='https://www.hyn-view.in/api/agent/v1'
 CLOUD_RESOLVED_URL=''
-check 'apex is selected when www is down' 'cloud_resolve_portal && [[ $(cloud_url) == https://hyn-view.in/api/agent/v1 ]]'
-check 'successful discovery is cached across calls' 'cloud_resolve_portal && [[ $(wc -l <"$WORK/probes") -eq 2 ]]'
+rm -f "$HYN_VAR/portal-endpoint" "$WORK/probes"
+check 'discovery verifies www' 'cloud_resolve_portal && [[ $(cloud_url) == https://www.hyn-view.in/api/agent/v1 ]]'
+check 'successful discovery is cached across calls' 'CLOUD_RESOLVED_URL=""; cloud_resolve_portal && [[ $(wc -l <"$WORK/probes") -eq 1 ]]'
+# A config written for the apex, and an apex endpoint cached by an older release,
+# both end up on www.
+printf '%s https://hyn-view.in/api/agent/v1\n' "$EPOCHSECONDS" >"$HYN_VAR/portal-endpoint"
+CFG[cloud_api_url]='https://hyn-view.in/api/agent/v1'
+CLOUD_RESOLVED_URL=''
+check 'an apex config and a cached apex endpoint are sent to www' 'cloud_resolve_portal && [[ $(cloud_url) == https://www.hyn-view.in/api/agent/v1 && $(tail -1 "$WORK/probes") == *https://www.hyn-view.in/api/agent/v1/health && $(cat "$HYN_VAR/portal-endpoint") == *" https://www.hyn-view.in/api/agent/v1" ]]'
+curl() { printf '%s\n' "$*" >>"$WORK/probes"; return 7; }
+rm -f "$HYN_VAR/portal-endpoint" "$WORK/probes"
+CLOUD_RESOLVED_URL=''
+check 'a www outage keeps history local and never tries the apex' '! cloud_resolve_portal && [[ $CLOUD_LAST_ERR == *"www.hyn-view.in did not pass"* && $(wc -l <"$WORK/probes") -eq 1 ]] && ! grep -q "//hyn-view.in" "$WORK/probes"'
+curl() {
+  printf '%s\n' "$*" >>"$WORK/probes"
+  [[ ${*: -1} == https://www.hyn-view.in/api/agent/v1/health ]] || return 22
+  printf '{"service":"hyn-agent-v1"}'
+}
+CFG[cloud_api_url]='https://www.hyn-view.in/api/agent/v1'
+cloud_resolve_portal
 CFG[cloud_api_url]='https://private.example/api/agent/v1'
 check 'explicit custom endpoint overrides a cached official domain' 'cloud_resolve_portal && [[ $(cloud_url) == https://private.example/api/agent/v1 ]]'
 CFG[cloud_api_url]='https://www.hyn-view.in.attacker.example/api/agent/v1'
@@ -181,7 +201,7 @@ check 'a lookalike is not an official domain' '! cloud_official_url'
 CFG[cloud_api_url]='https://www.hyn-view.in/api/agent/v1'
 _cloud_rpc_once() { printf 'POST\n' >>"$WORK/posts"; CLOUD_LAST_CODE=503; CLOUD_LAST_BODY='temporarily unavailable'; return 1; }
 check 'an ambiguous POST failure is not replayed on another host' '! _cloud_rpc hyn_claim_node_command "{}" && [[ $(wc -l <"$WORK/posts") -eq 1 ]]'
-check 'failed host is invalidated for the next operation' '[[ $(cat "$HYN_VAR/portal-endpoint") == "0 https://hyn-view.in/api/agent/v1" ]]'
+check 'failed host is invalidated for the next operation' '[[ $(cat "$HYN_VAR/portal-endpoint") == "0 https://www.hyn-view.in/api/agent/v1" ]]'
 
 # Keep the established resident loop alive while backing network failures off.
 source "$HYN_LIB/agent.sh"
@@ -246,7 +266,7 @@ check 'HTTP 413 is a deterministic body size rejection' '(CLOUD_LAST_CODE=413; C
 check 'server failures are retryable even when their message resembles validation' '(CLOUD_LAST_CODE=503; CLOUD_LAST_ERR="monitoring payload exceeds 64 KiB"; ! _cloud_outbox_permanent_rejection)'
 CLOUD_PAYLOAD='{"ts":"2026-09-12T00:00:00Z","sample":"offline-original"}'
 check 'failed upload leaves durable payload and secondary local backup' '! cloud_ingest_collected 1 && [[ $(_outbox_count) == 1 && $(local_history) == "$CLOUD_PAYLOAD" && $CLOUD_INGESTED == 0 ]]'
-check 'queued data contains no credential envelope or node secret' '! rg -q "p_node_token|test-private-node-token" "$HYN_VAR/local/outbox"'
+check 'queued data contains no credential envelope or node secret' '! grep -r -q -E "p_node_token|test-private-node-token" "$HYN_VAR/local/outbox"'
 queued_before=$(find "$HYN_VAR/local/outbox" -type f -name '*.json')
 check 'retry record is private' '[[ $(find "$HYN_VAR/local/outbox" -type f -perm -077 | wc -l) -eq 0 ]]'
 OUTBOX_TEST_MODE=invalid
@@ -321,6 +341,17 @@ expired_path="$HYN_VAR/local/outbox/$((EPOCHSECONDS - 172800))_node-a_2_123.json
 printf '{}\n' >"$expired_path"
 snapshot_count=$(find "$HYN_VAR/local/snapshots" -name '*.json' | wc -l)
 check '48-hour retry expiry preserves longer local snapshot history' 'cloud_outbox_flush && [[ ! -e $expired_path && $(find "$HYN_VAR/local/snapshots" -name "*.json" | wc -l) == "$snapshot_count" ]]'
+# A retry the portal rejected is archived in local history. Snapshot names
+# sort by time, so a reading saved in the same second must still be the newest
+# (CI runners are fast enough to do both within one second).
+check 'a reading saved in the same second as a quarantined one is the newest local snapshot' '(
+  HYN_VAR="$WORK/same-second"; STATE_DIR=""; mkdir -p "$HYN_VAR"
+  local_store_dir_v || exit 1
+  printf "{\"sample\":\"rejected\"}\n" >"$LOCAL_STORE/outbox/000000001000_node-a_2_1.json" &&
+  local_outbox_quarantine "$LOCAL_STORE/outbox/000000001000_node-a_2_1.json" "{\"sample\":\"rejected\"}" 400 &&
+  CLOUD_PAYLOAD="{\"sample\":\"just-saved\"}" && CLOUD_LOCAL_PAYLOAD="" && local_store_snapshot &&
+  [[ $(local_history) == "$CLOUD_PAYLOAD" ]]
+)'
 OUTBOX_TEST_MODE=ok
 printf -v CLOUD_PAYLOAD '%065537d' 0
 CLOUD_PAYLOAD="{\"oversized\":\"$CLOUD_PAYLOAD\"}"
@@ -353,6 +384,25 @@ cloud_config_pull() { CLOUD_CONFIG_CHANGED=0; return 1; }
 cloud_command_poll() { CLOUD_COMMAND_CLAIMED=0; CLOUD_COMMAND_UPDATED=0; return 0; }
 cloud_collect_full() { CLOUD_PAYLOAD='{"sample":"scheduled-current"}'; }
 check 'legacy check-in cadence cannot block one-minute cloud sampling' 'cloud_push 1 1 && [[ $(tail -1 "$WORK/replay-requests") == *scheduled-current* ]]'
+
+# The production pattern: the stamp is written when an upload finishes, a few
+# seconds after its one-minute wake-up, so the next wake-up sees ~55 seconds.
+# That must be due, or cloud_push_min=1 uploads every two minutes.
+_due_at() {
+  local elapsed=$1 before
+  printf '%s\n' "$((EPOCHSECONDS - elapsed))" >"$HYN_VAR/cloud-checkin"
+  printf '%s\tok\n' "$((EPOCHSECONDS - elapsed))" >"$HYN_VAR/cloud-last-push"
+  before=$(wc -l <"$WORK/replay-requests")
+  cloud_push 1 1 >/dev/null
+  (($(wc -l <"$WORK/replay-requests") > before))
+}
+CFG[cloud_checkin_min]=1 CFG[cloud_push_min]=1
+check 'a one-minute interval uploads on the very next wake-up' '_due_at 55'
+check 'a one-minute interval still never uploads twice in one wake-up' '! _due_at 10'
+CFG[cloud_push_min]=5
+check 'a five-minute interval uploads on its fifth wake-up' '_due_at 295'
+check 'a five-minute interval waits through the fourth wake-up' '! _due_at 235'
+CFG[cloud_push_min]=1
 
 # Managed policy can intentionally transition legacy local-mode installations;
 # clearing the managed key restores the explicitly configured local choice.
@@ -388,8 +438,8 @@ cloud_record_bandwidth test-private-node-token
 check 'WAN recovery retries next beat with cumulative counters and no local byte loss' '[[ $(wc -l <"$WORK/replay-requests") -eq 3 && $(tail -1 "$WORK/replay-requests") == *"\"p_rx\":25,\"p_tx\":38"* && $(tail -1 "$HYN_VAR/local/bandwidth-state") == *"\"observed_total_bytes\":\"33\""* ]]'
 
 # Drive the real resolver/transport with an injected monotonic clock and curl
-# fixture. Discovery and upload must spend the same15-second budget, including
-# a failed first hostname; tests make no real network call or blocking sleep.
+# fixture. Discovery and upload must spend the same 15-second budget; tests make
+# no real network call or blocking sleep.
 check 'discovery and upload share the remaining replay time budget' '(
   source "$HYN_LIB/cloud.sh"
   HYN_VAR="$WORK/deadline-shared"; STATE_DIR=""; mkdir -p "$HYN_VAR"
@@ -411,7 +461,7 @@ check 'discovery and upload share the remaining replay time budget' '(
   }
   _cloud_rpc hyn_ingest "{}" && [[ $(<"$HYN_VAR/timeouts") == $'"'"'health:15.000\nupload:3.000'"'"' ]]
 )'
-check 'exhausted discovery cannot begin a second hostname or upload' '(
+check 'exhausted discovery cannot begin an upload' '(
   source "$HYN_LIB/cloud.sh"
   HYN_VAR="$WORK/deadline-exhausted"; STATE_DIR=""; mkdir -p "$HYN_VAR"
   CFG[cloud_api_url]="https://www.hyn-view.in/api/agent/v1"; CFG[cloud_url]=""; CFG[cloud_anon_key]=""
@@ -419,7 +469,7 @@ check 'exhausted discovery cannot begin a second hostname or upload' '(
   printf "1000\n" >"$HYN_VAR/clock"
   sample_clock_ms_v() { read -r SAMPLE_CLOCK_MS <"$HYN_VAR/clock"; }
   curl() { printf "request\n" >>"$HYN_VAR/requests"; printf "16000\n" >"$HYN_VAR/clock"; return 7; }
-  ! _cloud_rpc hyn_ingest "{}" && [[ $(wc -l <"$HYN_VAR/requests") -eq 1 && $CLOUD_LAST_CODE == 0 && $CLOUD_LAST_ERR == *"time budget exhausted"* ]]
+  ! _cloud_rpc hyn_ingest "{}" && [[ $(wc -l <"$HYN_VAR/requests") -eq 1 && $CLOUD_LAST_CODE == 0 && $CLOUD_LAST_ERR == *"did not pass the HTTPS agent health check"* ]]
 )'
 check 'failed discovery cannot reuse an earlier payload rejection status' '(
   source "$HYN_LIB/cloud.sh"

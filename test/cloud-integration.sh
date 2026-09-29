@@ -84,7 +84,10 @@ declare -A LAT_MS LAT_LOSS LAT_JIT
 # subject is the transport, so stub sampling out and set the few globals the
 # payload reads.
 alerts_collect() { :; }
-alerts_evaluate() { AL_ID=(disk_root); AL_SEV=(warn); AL_MSG=('Disk / at 86%'); AL_RESOLVED=(0); }
+# The real rule engine runs on the fixed reading below: root at 86% of its disk
+# trips disk__. It used to be stubbed with hand-built AL_* arrays, and that stub
+# is how the resolved-alert bug in the payload stayed hidden: the fake arrays
+# happened to line up where the real ones never do.
 # Reads /proc/sys/net/*, which does not exist on every machine this test runs on,
 # and it would clear the TUNE values the payload assertions below rely on.
 net_tuning() { :; }
@@ -126,7 +129,8 @@ PWR_INPUT_DW=1180 PWR_INPUT_SRC=hwmon-input PWR_CPU_DW=150 PWR_DRAM_DW=20
 PWR_AC=0 PWR_BAT_PCT=87 PWR_BAT_STATUS=Discharging PWR_BAT_DW=95
 declare -A PWR_RAILS=(['pmbus PSU1 Input Power']=1180 ['package-0']=150)
 MEM_TOTAL=33285996544 MEM_USED=20000000000 MEM_PCT=61.2 SWAP_USED=0
-MOUNTS=(/) ; MP_PCT[/]=58.4 ; MP_USED[/]=100 ; MP_SIZE[/]=200 ; MP_AVAIL[/]=100 ; MP_FSTYPE[/]=ext4
+MOUNTS=(/) ; MP_PCT[/]=86 ; MP_USED[/]=172 ; MP_SIZE[/]=200 ; MP_AVAIL[/]=28 ; MP_FSTYPE[/]=ext4
+SWAP_TOTAL=0 ROOT_RO=0
 NET_WAN=eth0
 NET_RXR[eth0]=81250000 NET_TXR[eth0]=22500000
 NET_RX[eth0]=999 NET_TX[eth0]=888
@@ -330,6 +334,23 @@ missing  'token is not in the URL'      "rpc/hyn_ingest?" "$ingest_line"
 contains 'payload carries cpu percent'  '37.5' "$ingest_line"
 contains 'payload carries clock speed'  '3400' "$ingest_line"
 contains 'payload carries the alert'    'Disk / at 86%' "$ingest_line"
+truthy 'the alert is the real disk rule, firing' \
+  'printf "%s" "$ingest_line" | python3 "$ROOT/test/payload-alerts.py" firing disk__ warn'
+
+# A recovery reaches the portal. The alert timer has saved disk__ as firing;
+# the disk then drops below its clear threshold, so the next upload must carry
+# the rule as resolved with the incident's start time, and nothing still firing.
+_since=$((EPOCHSECONDS - 900))
+printf 'disk__\tfiring\t%s\t0\t86\n' "$_since" >"$(alert_state_file)"
+MP_PCT=([/]=60)
+printf '%s\tok\n' "$((EPOCHSECONDS - 3600))" >"$(_cloud_push_stamp)"
+rm -f "$HYN_VAR/cloud-checkin"
+cloud_push 1 1 >/dev/null 2>&1
+recovery_line=$(grep hyn_ingest "$REQLOG" | tail -1)
+truthy 'a cleared rule is uploaded as resolved, with its start time' \
+  'printf "%s" "$recovery_line" | python3 "$ROOT/test/payload-alerts.py" resolved disk__ "$_since" "Disk / at 60%"'
+rm -f "$(alert_state_file)"
+MP_PCT=([/]=86)
 
 # The payload the agent actually sent must be valid JSON, checked with a parser.
 truthy 'sent payload is valid JSON' 'printf "%s" "$ingest_line" | python3 -c "
@@ -338,7 +359,7 @@ req = json.loads(sys.stdin.read())
 body = json.loads(req[\"body\"])
 assert body[\"p_payload\"][\"cpu\"][\"mhz\"] == 3400, body[\"p_payload\"][\"cpu\"]
 assert body[\"p_payload\"][\"cpu\"][\"temp_c\"] == 52
-assert body[\"p_payload\"][\"disk\"][\"pct\"] == 58.4
+assert body[\"p_payload\"][\"disk\"][\"pct\"] == 86
 assert body[\"p_payload\"][\"alerts\"][0][\"severity\"] == \"warn\"
 assert body[\"p_payload\"][\"latency_ms\"] == 1.20, body[\"p_payload\"][\"latency_ms\"]
 pw = body[\"p_payload\"][\"power\"]

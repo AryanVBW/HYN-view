@@ -202,6 +202,19 @@ update_detect_method() {
   return 0
 }
 
+# Rewrite the units with the newly installed code, then restart the timers.
+# Runs under with_schedule_lock so the resident agent and any operator command
+# cannot interleave their own daemon-reload/stop/start pass with this one; the
+# child `hyn setup` inherits HYN_SCHEDULE_LOCKED and does not wait on it.
+_update_refresh_all() {
+  if ! "$HYN_ROOT/bin/hyn" setup --no-wizard >/dev/null 2>&1; then
+    UPD_LAST_ERR='background services could not be refreshed'
+    return 1
+  fi
+  # update_refresh_services records the failing service in UPD_LAST_ERR.
+  update_refresh_services
+}
+
 # Reload and restart only hyn-view's managed timers. Restarting a timer reloads
 # its schedule without firing daily reports or alert jobs out of band. The
 # current hyn-push one-shot is deliberately not restarted from inside itself;
@@ -326,7 +339,7 @@ _update_restore_package() {
   rm -rf "$backup"
   UPD_LAST_ERR="$cause; previous package restored"
   if ((refresh)) && is_root; then
-    if ! "$HYN_ROOT/bin/hyn" setup --no-wizard >/dev/null 2>&1 || ! update_refresh_services; then
+    if ! with_schedule_lock 300 _update_refresh_all; then
       UPD_LAST_ERR="$cause; previous package restored, but service recovery needs sudo hyn doctor --fix"
       return 1
     fi
@@ -408,11 +421,8 @@ _update_apply() {
       installed=$UPD_INSTALLED
       if is_root; then
         update_emit_progress restarting 'Refreshing configuration and restarting hyn-view timers'
-        if ! "$HYN_ROOT/bin/hyn" setup --no-wizard >/dev/null 2>&1; then
-          UPD_LAST_ERR='background services could not be refreshed'
-        elif ! update_refresh_services; then
-          : # update_refresh_services records the failing service in UPD_LAST_ERR.
-        fi
+        with_schedule_lock 300 _update_refresh_all
+        (($? == 75)) && UPD_LAST_ERR='another hyn process held the systemd schedule for five minutes'
         if [[ -n $UPD_LAST_ERR ]]; then
           _update_restore_package "$backup" 1 || true
           warn "$UPD_LAST_ERR"

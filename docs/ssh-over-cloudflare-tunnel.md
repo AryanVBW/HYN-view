@@ -170,11 +170,49 @@ a browser once, then caches the token.
 
 ---
 
+## Supabase MCP over this SSH login
+
+Studio's MCP server has no authentication, so `data.hyn-view.in/mcp` and `/api/mcp`
+stay blocked (403) at the gateway. Do **not** follow the Supabase guide's step that
+allow-lists the Docker gateway IP. Here every request, including every one arriving
+through Cloudflare, reaches Envoy from `172.18.0.1`, so that allow-list would open MCP to
+the whole internet.
+
+[`supabase/mcp-over-ssh.sh`](../supabase/mcp-over-ssh.sh) is a local stdio MCP server
+instead. It uses your SSH key login (`ssh hyn`, through this tunnel) and runs a small
+bridge inside the Studio container. The bridge forwards each JSON-RPC message to Studio
+on loopback. Nothing is opened on the server. Kiro, in `.kiro/settings/mcp.json`:
+
+```json
+{ "mcpServers": { "supabase": {
+    "command": "/bin/bash",
+    "args": ["/Volumes/DATA_vivek/GITHUB/HYN-view/supabase/mcp-over-ssh.sh"] } } }
+```
+
+- **Read-only by default.** SQL runs as `supabase_read_only_user` in a read-only
+  transaction. Set `HYN_MCP_QUERY=read_only=false` in the server's `env` to allow writes.
+  Keep schema changes on the reviewed migration path in `selfhost-supabase-migration.md`.
+- **Read-only mode needs a password on `supabase_read_only_user`.** Studio connects as
+  that role with `POSTGRES_PASSWORD`. The Supabase image creates the role without one,
+  so read-only SQL failed with `password authentication failed`. The password was set on
+  2026-09-29. After rebuilding the database, set it again from inside the LXD container:
+
+  ```sh
+  docker exec -i supabase-db psql -U supabase_admin -d postgres <<'SQL'
+  \set pgpass `echo "$POSTGRES_PASSWORD"`
+  alter role supabase_read_only_user with password :'pgpass';
+  SQL
+  ```
+- On the LAN, set `HYN_MCP_HOST=hyn-lan`. With a Cloudflare Access policy on
+  `ssh.hyn-view.in` (Step 4), the first launch waits for the browser sign-in.
+- Check: `/mcp` in Kiro shows `supabase` with 10 tools.
+
+---
+
 ## What this does not change
 
 - `data.hyn-view.in` keeps serving Supabase exactly as now — this only adds a hostname.
-- Supabase's `/mcp` route stays blocked by envoy RBAC (separate issue, see
-  `docs/selfhost-supabase-migration.md`).
+- Supabase's `/mcp` route stays blocked by envoy RBAC; use the SSH bridge above.
 - Google sign-in remains broken until the real `GOCSPX-…` client secret is set in
   `~/supabase-project/.env` → `GOOGLE_SECRET=`, then:
   ```sh

@@ -3,10 +3,10 @@
 **CLI 2.0 uploads monitoring every minute and keeps a continuous local backup.**
 See the [release verification and Ubuntu acceptance notes](docs/cli-release-readiness.md)
 for what has been tested and what still needs verification before publication.
-The website runs on Heroku using
-GitHub Student Developer Pack credits, with **Supabase Auth** for sign-in and
-**Cloudflare D1** for pairing, telemetry, settings and the latest **48 hours**
-of monitoring history.
+The website runs on Heroku using GitHub Student Developer Pack credits. Sign-in,
+pairing, settings, telemetry and the latest **48 hours** of monitoring history live
+in a **self-hosted Supabase** (PostgreSQL, GoTrue and PostgREST) at
+`data.hyn-view.in`; Cloudflare D1 was retired on 2026-09-20.
 Cloud records expire automatically; longer local history follows its own age and
 disk budget. Failed uploads enter a bounded local retry queue. HYN operational
 summaries and alerts are included; raw host logs and credentials are never uploaded.
@@ -16,7 +16,7 @@ VPS/container reporting, and the database → portal → CLI rollout order.
 ```sh
 sudo hyn autostart enable # one-time boot, recovery and keep-awake setup
 hyn autostart status      # verify automatic operation
-sudo hyn cloud optimize  # apply the low-consumption profile to an existing install
+sudo hyn cloud optimize  # restore the recommended cloud profile on an existing install
 sudo hyn cloud usage     # local request/byte totals and hosting budget references
 sudo hyn history --local 12      # recent private local snapshots, as JSONL
 sudo hyn logs 100        # local diagnostics
@@ -24,9 +24,8 @@ sudo hyn logs 100        # local diagnostics
 
 See [local storage, free-plan budgets and Heroku rollout](docs/local-storage-and-hosting.md)
 for historical deployment observations and the required portal/database
-upgrade order. The CLI checks both `https://www.hyn-view.in` and
-`https://hyn-view.in`, caches the working HTTPS endpoint, and preserves custom
-endpoint settings.
+upgrade order. The CLI talks to `https://www.hyn-view.in`, caches the verified
+HTTPS endpoint, and preserves custom endpoint settings.
 
 Once installed and paired, use the portal's **Update CLI** and **Account →
 Server settings** controls. Updates, schedule changes and service restarts run
@@ -209,6 +208,9 @@ sudo hyn unlink        forget the credential locally
    provider in Supabase and add `<your-site>/auth/callback` as a redirect URL.
 3. Set the server-only portal variables (`SUPABASE_SERVICE_ROLE_KEY`,
    `RESEND_API_KEY`, `EMAIL_FROM`, and `CRON_SECRET`) in the deployment.
+   Email is sent only from **`hyn-view.info`** (`EMAIL_FROM=HYN-view
+   <reports@hyn-view.info>`); `hyn-view.in` is the website, not a mail domain.
+   See [email delivery](docs/email-delivery.md).
 4. On the server, run `sudo hyn link`, then follow the code. The CLI talks to
    the hosted `/api/agent/v1` gateway and installs its systemd schedule itself.
 
@@ -398,7 +400,8 @@ update public.profiles set role = 'super_admin' where email = 'you@example.com';
 
 After that, Admins can add other Admins from `/admin`; Super admins can assign
 any role. The database-only bootstrap allowlist grants Super admin on the next
-sign-in and consumes the entry once:
+sign-in and consumes the entry once. Both grants by email address (this list,
+and an Admin promoting by address) need an account whose address is confirmed:
 
 ```sql
 insert into public.admin_allowlist (email) values ('you@example.com');
@@ -426,12 +429,15 @@ anon key — the dashboard hiding a button is a courtesy, not a boundary.
 | Hosted API URL | built into the CLI, overridable in `/etc/hyn-view/config` | Normal customers link without knowing the Supabase project or public key. |
 | Node token | `/etc/hyn-view/secrets` (0600) | The actual credential. Sent in a request body, never in `argv`, so no local user can read it out of `ps`. |
 | Service-role key | portal server environment only | Used by the scheduled email worker; never sent to a browser or monitored server. |
-| Shared Resend key | portal server environment only | One centrally managed provider account serves all portal users. |
+| Shared Resend key | portal server environment only | One centrally managed provider account serves all portal users; its verified sending domain is `hyn-view.info`. |
 
 **Portal email delivery is centrally managed.** Recipients and schedules are
 tenant-private rows protected by RLS; the provider key remains a server-only
 deployment secret. The cron worker sends through Resend, records every outcome,
 and uses an idempotency ledger so overlapping invocations do not duplicate mail.
+Every message, including Supabase Auth mail, comes from `@hyn-view.info`; the
+website domain `hyn-view.in` never sends email. See
+[email delivery](docs/email-delivery.md).
 
 Administrators may edit the non-secret HTML wrappers for incident alerts, daily
 health digests, and system-information messages from the Email templates tab. A wrapper must contain
@@ -505,14 +511,19 @@ Set any threshold to `0` to switch that rule off.
 **hyn cannot tell you the server went down.** If the box is off, so is hyn. Any
 tool claiming otherwise from inside the machine is lying to you.
 
-So the check that matters is made from outside it, and the portal makes it. Pairing
-starts a watchdog for that node. `hyn-agent.service` beats every 24 seconds; after
+So the check that matters is made from outside the machine, by the portal's
+database. Every minute, a scheduled database job (`_hyn_outage_sweep`, run by
+pg_cron) compares each paired server's last heartbeat with its threshold.
+`hyn-agent.service` beats every 24 seconds; after
 three minutes of silence — seven missed beats — the owner gets a `[HYN CRIT]`
-email, and another when the beats resume. Nothing to install and nothing to
+email, and another when the beats resume. The threshold follows the node's own
+`heartbeat_sec`: three missed beats, never less than three minutes. Nothing to install and nothing to
 configure but the one switch: the outage email goes out through **Incident
 alerts** on `/account`, which is off until you turn it on. The watchdog itself
 runs regardless, so the portal always knows a machine has gone quiet and shows it;
-the switch decides whether you are emailed about it.
+the switch decides whether you are emailed about it. Paused, suspended and demo
+servers are skipped. A server that was already quiet when it was first checked is
+recorded without an email.
 
 Seven missed beats rather than three is deliberate. The threshold is what makes
 the difference between "reports an outage" and "cries wolf": at a one-minute
@@ -839,10 +850,11 @@ weight, `MemoryMax=256M`, `OOMScoreAdjust=500` — with full filesystem write
 access so the agent can update and repair itself. There is no Node.js process at
 any point, and an npm update refreshes the units automatically.
 
-A seventh unit, `hyn-update.service`, is installed but never enabled. It has no
-timer and no `[Install]` section: it exists only to be started by name when an
-update is due, so neither a sixty-second check-in nor the heartbeat loop is ever
-the process holding an `npm install` open. It also has its own cgroup, which is
+A seventh unit, `hyn-update.service`, has no `[Install]` section: it is started
+by name when an update is due, so neither a sixty-second check-in nor the heartbeat
+loop is ever the process holding an `npm install` open. Its companion
+`hyn-update.timer` runs it a minute after boot and five minutes after each run to
+finish maintenance an interruption left pending. It also has its own cgroup, which is
 what lets an update restart the resident agent without killing the install doing
 it. See "Updates".
 
@@ -928,8 +940,10 @@ Keys worth knowing:
 | `cloud_url` | *(empty)* | optional direct-Supabase URL for self-hosters |
 | `cloud_anon_key` | *(empty)* | optional public anon key for direct-Supabase mode |
 | `cloud_portal_url` | `https://www.hyn-view.in` | prints the complete pairing URL |
-| `cloud_push_min` | `10` | minutes between full portal readings; heartbeat/config checks remain one minute |
-| `heartbeat_sec` | `24` | seconds between liveness beats from `hyn-agent.service`; clamped to 5–3600, local-only |
+| `cloud_push_min` | `1` | minutes between full portal readings; the check-in timer still wakes every minute |
+| `cloud_checkin_min` | `1` | minutes between settings/command checks (1–60); portal-manageable |
+| `heartbeat_sec` | `24` | seconds between liveness beats from `hyn-agent.service`; clamped to 5–3600, portal-manageable |
+| `record_interval_min` | `5` | minutes between local samples for the daily report |
 | `hide_mount` | `/snap,/var/lib/docker,…` | mount points kept out of the disk panel and alerts |
 
 Themes: `hiway` (default), `nord`, `gruvbox`, `dracula`, `solar`, `mono`. Drop a
