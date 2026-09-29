@@ -23,15 +23,22 @@ What 2.0.1 changes on a server:
   one-minute check-in and upload, five-minute local sampling.
 - Only `www.hyn-view.in` is contacted; the apex host is never probed.
 
-Release gates, in order (none of them has been run for 2.0.1):
+Release gates, in order:
 
-1. Apply the pending database migrations and deploy the portal first; the
-   agent's incident fields are ignored by an older portal but are what closes
-   alerts on the new one.
+1. Done on 2026-09-29: the database migrations are applied to production
+   (LIVE-1 to LIVE-4, see `selfhost-supabase-migration.md`), and the portal that
+   reads the new incident fields is deployed (Heroku v63).
 2. On one Ubuntu/systemd host: install 2.0.1 over 2.0.0 with the real updater,
    confirm `systemctl list-timers 'hyn-*'` shows a next run for every timer,
    and that a reading, a heartbeat and a resolved alert reach the portal.
-3. `npm publish` and move the `latest` dist-tag only after step 2.
+3. Publish. `.github/workflows/publish.yml` publishes automatically once CI
+   passes on a `main` commit whose `package.json` version is not yet on npm.
+   Merging to `main` is therefore the release: do it after step 2. It uses npm
+   trusted publishing, which needs a one-time setup on npmjs.com (Packages →
+   hyn-view → Settings → Trusted publishing → GitHub Actions: owner
+   `AryanVBW`, repository `HYN-view`, workflow `publish.yml`, environment `npm`).
+   Until then the job stops with `ENEEDAUTH` and nothing is published. Agents
+   with `auto_update=install` pick the new `latest` up by themselves.
 
 ## September 22 release bump
 
