@@ -9,7 +9,8 @@ name: Publish CLI to npm
 # GitHub. One-time setup on npmjs.com (Packages -> hyn-view -> Settings ->
 # Trusted publishing -> GitHub Actions): owner AryanVBW, repository HYN-view,
 # workflow file publish.yml, environment npm, allowed action npm publish.
-# Until that exists, this job fails with ENEEDAUTH and nothing is published.
+# Until that exists, this job fails (npm answers ENEEDAUTH or E404 Not Found)
+# and nothing is published.
 # After setting it up, publish without a new commit: Actions -> Publish CLI to
 # npm -> Run workflow (main). A manual run still requires passing checks.
 on:
@@ -84,7 +85,7 @@ jobs:
         if: steps.version.outputs.publish == 'true'
         run: |
           npm publish --access public || {
-            echo "::error::npm refused the publish. If the log shows ENEEDAUTH, npm trusted publishing is not set up for hyn-view yet (docs/cli-release-readiness.md, release gate 3)."
+            echo "::error::npm refused the publish. ENEEDAUTH, or E404 on PUT https://registry.npmjs.org/hyn-view, means npm trusted publishing is not set up for hyn-view yet (docs/cli-release-readiness.md, release gate 3)."
             exit 1
           }
       - name: Confirm the registry serves the new version
