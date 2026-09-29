@@ -37,7 +37,8 @@ Release gates, in order:
    trusted publishing, which needs a one-time setup on npmjs.com (Packages →
    hyn-view → Settings → Trusted publishing → GitHub Actions: owner
    `AryanVBW`, repository `HYN-view`, workflow `publish.yml`, environment `npm`).
-   Until then the job stops with `ENEEDAUTH` and nothing is published. Agents
+   Until then the job stops with `ENEEDAUTH` or `E404 Not Found - PUT
+   https://registry.npmjs.org/hyn-view` and nothing is published. Agents
    with `auto_update=install` pick the new `latest` up by themselves.
 
 ## September 22 release bump
