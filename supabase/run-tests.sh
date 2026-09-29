@@ -244,6 +244,8 @@ sed -n '/PASS /p' "$WORK/user-assignments-schema.log"
 printf 'PASS  legacy roles migrate once and reapply preserves restricted Admins\n'
 psql -f "$HERE/roles-test.sql" >"$WORK/roles-test.log" 2>&1 || { cat "$WORK/roles-test.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/roles-test.log"
+psql -f "$HERE/admin-grants-test.sql" >"$WORK/admin-grants.log" 2>&1 || { cat "$WORK/admin-grants.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/admin-grants.log"
 psql -f "$HERE/maintainer-visibility-test.sql" >"$WORK/maintainer-visibility.log" 2>&1 || { cat "$WORK/maintainer-visibility.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/maintainer-visibility.log"
 psql -f "$HERE/maintainer-resolve-alert-test.sql" >"$WORK/maintainer-resolve.log" 2>&1 || { cat "$WORK/maintainer-resolve.log"; exit 1; }
@@ -292,7 +294,7 @@ printf 'PASS  privilege check detects a restore that re-grants every object\n'
 psql -f "$HERE/migrations/20260928110000_reassert_role_privileges.sql" >"$WORK/privilege-repair.log" 2>&1 || { cat "$WORK/privilege-repair.log"; exit 1; }
 psql -f "$HERE/privilege-check.sql" >"$WORK/privilege-check.log" 2>&1 || { cat "$WORK/privilege-check.log"; exit 1; }
 printf 'PASS  the privilege repair migration restores the floor\n'
-for suite in roles-test owner-linking-test maintainer-visibility-test server-access-bandwidth-test delivery-controls-test; do
+for suite in roles-test admin-grants-test owner-linking-test maintainer-visibility-test server-access-bandwidth-test delivery-controls-test; do
   psql -f "$HERE/$suite.sql" >"$WORK/repaired-$suite.log" 2>&1 || { cat "$WORK/repaired-$suite.log"; exit 1; }
 done
 printf 'PASS  authorized access paths still work after the privilege repair\n'

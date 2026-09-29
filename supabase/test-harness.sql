@@ -37,6 +37,8 @@ create table if not exists auth.users (
   id uuid primary key default gen_random_uuid(),
   email text unique
 );
+-- GoTrue sets this when the address is confirmed (at once while auto-confirm is on).
+alter table auth.users add column if not exists email_confirmed_at timestamptz default now();
 
 -- Supabase derives auth.uid() from the request JWT. Here it comes from a session
 -- GUC so a test can act as a given user, or as nobody.

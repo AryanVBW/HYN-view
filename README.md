@@ -400,7 +400,8 @@ update public.profiles set role = 'super_admin' where email = 'you@example.com';
 
 After that, Admins can add other Admins from `/admin`; Super admins can assign
 any role. The database-only bootstrap allowlist grants Super admin on the next
-sign-in and consumes the entry once:
+sign-in and consumes the entry once. Both grants by email address (this list,
+and an Admin promoting by address) need an account whose address is confirmed:
 
 ```sql
 insert into public.admin_allowlist (email) values ('you@example.com');
