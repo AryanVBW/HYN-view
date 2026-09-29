@@ -228,6 +228,13 @@ migrations fail with `permission denied for schema public`.
   `postgres`), so scheduling can be checked only on live. The apply script
   asserts the three jobs before `COMMIT`.
 
+**2026-09-29 06:50 UTC — LIVE-3** (one transaction, 0.01 s):
+`20260929160000_fleet_latest_readings` adds `hyn_fleet_latest_readings()` for the
+fleet monitor. It takes 2.5 ms and returns 6.5 KB; the old page read 7.5 MB in
+409 ms. Backups: `pre-live3-20260929T065026Z.dump` (rehearsed) and
+`pre-live3-apply-20260929T065041Z.dump`. `privilege-check.sql` passes, and Envoy
+logged only 2xx responses afterwards.
+
 ## Residual risk
 
 Auth and all data now live on one self-hosted box. If that server or its connectivity
