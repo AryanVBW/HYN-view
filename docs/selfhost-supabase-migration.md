@@ -206,6 +206,28 @@ migrations fail with `permission denied for schema public`.
 - Rollback: `pg_restore --clean` from the second backup. Rows written after
   05:54 UTC would be lost.
 
+**2026-09-29 06:27 UTC — LIVE-2** (one transaction, 0.02 s)
+
+| Migration | Effect on live |
+| --- | --- |
+| `20260929100000_web_jobs_end` | 930 email jobs that had cycled since 2026-09-13 were closed, each with its reason |
+| `20260929110000_schedule_maintenance` | pg_cron job `hyn-telemetry-retention` (every 5 minutes) |
+| `20260929120000_delivery_retention` | pg_cron job `hyn-delivery-retention` (hourly); nothing old enough to delete yet |
+| `20260929130000_confirmed_email_grants` | admin grants by email need a confirmed address (all 17 accounts are confirmed) |
+| `20260929140000_fast_metric_history` | chart history 122 ms → 12 ms (one server), 408 ms → 7 ms (fleet) |
+| `20260929150000_outage_sweep` | pg_cron job `hyn-outage-sweep` (every minute); all 10 watchdogs `running`, none were before |
+
+- Backups on `server02`: `~/supabase-migration/pre-live2-20260929T062646Z.dump`
+  (restored and rehearsed) and `pre-live2-apply-20260929T062732Z.dump`, each with a
+  `.sha256` file.
+- Verified afterwards: `privilege-check.sql` passes, and the portal/agent access
+  check gave the same results before and after. `cron.job_run_details` shows the
+  sweep and the retention job succeeding. All 10 nodes kept heartbeating, and
+  Envoy logged only 2xx responses.
+- The rehearsal copy has no `cron` schema (pg_cron is installed only in
+  `postgres`), so scheduling can be checked only on live. The apply script
+  asserts the three jobs before `COMMIT`.
+
 ## Residual risk
 
 Auth and all data now live on one self-hosted box. If that server or its connectivity
