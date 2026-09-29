@@ -235,6 +235,14 @@ fleet monitor. It takes 2.5 ms and returns 6.5 KB; the old page read 7.5 MB in
 `pre-live3-apply-20260929T065041Z.dump`. `privilege-check.sql` passes, and Envoy
 logged only 2xx responses afterwards.
 
+**2026-09-29 10:07 UTC — LIVE-4** (one transaction, 0.01 s):
+`20260929170000_keep_one_time_email_keys`. Delivery retention now keeps each
+server's `first-system:` and `device-linked:` keys; 7 keys existed, none was yet
+old enough to be deleted. The same session also set a password on
+`supabase_read_only_user` (from `POSTGRES_PASSWORD`, as Studio expects), so the
+read-only SQL of the Supabase MCP works; see `ssh-over-cloudflare-tunnel.md`.
+Backup: `pre-live4-20260929T100708Z.dump` (restored and rehearsed first).
+
 ## Residual risk
 
 Auth and all data now live on one self-hosted box. If that server or its connectivity
