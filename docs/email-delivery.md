@@ -40,3 +40,11 @@ After changing any of the settings above:
 
 The monitored servers hold no email configuration at all; they queue events
 with the portal using their node token, and the portal sends them.
+
+A queued email always ends. The database closes a job that was not delivered
+within 24 hours, and also closes one whose server has no recipient or whose kind
+the owner switched off (incident alerts, daily email). A job a stopped worker
+left in `sending` is offered again after 15 minutes. A job the portal deferred is
+offered again after 10 minutes. A closed job keeps its row and the reason in
+`web_notification_jobs.error`
+(`supabase/migrations/20260929100000_web_jobs_end.sql`).
