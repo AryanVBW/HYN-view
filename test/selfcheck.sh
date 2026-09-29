@@ -2895,6 +2895,31 @@ if [[ -r $_inst ]]; then
   # design, so "npm exited 0" is not evidence that monitoring is running.
   contains 'the installer verifies the resident agent' 'is-active hyn-agent.service' "$_instsrc"
   contains 'the installer repairs a failed setup' 'doctor --fix' "$_instsrc"
+  # verify() runs against a fake systemd on which a paired machine's upload timer
+  # is active but elapsed (the server02 failure) until `doctor --fix` re-arms it.
+  # It must report the configured heartbeat, repair the timer and say so.
+  _vdir=$(mktemp -d)
+  cat >"$_vdir/hyn" <<'EOS'
+#!/usr/bin/env bash
+case "$*" in
+  --version) echo 'hyn-view 2.0.1' ;;
+  'config get heartbeat_sec') echo 45 ;;
+  'config get cloud_enabled') echo on ;;
+  'doctor --fix') : >"${0%/*}/repaired" ;;
+esac
+EOS
+  cat >"$_vdir/systemctl" <<'EOS'
+#!/usr/bin/env bash
+[[ $1 == is-active ]] && { echo active; exit 0; }
+if [[ $* == *hyn-push.timer* && ! -e ${0%/*}/repaired ]]; then echo elapsed; else echo waiting; fi
+EOS
+  chmod +x "$_vdir/hyn" "$_vdir/systemctl"
+  _vout=$(PATH="$_vdir:$PATH" bash -c 'vdir=$2; source <(sed "\$d" "$1"); hyn_bin() { printf "%s\n" "$vdir/hyn"; }; verify' _ "$_inst" "$_vdir" 2>&1)
+  contains 'the installer reports the configured heartbeat' 'heartbeat every 45s' "$_vout"
+  contains 'the installer repairs an elapsed upload timer' 'will not fire; repairing' "$_vout"
+  contains 'the installer confirms a paired machine uploads' 'hyn-push.timer will upload readings' "$_vout"
+  contains 'the installer counts the upload timer of a paired machine' '5 of 5 scheduled timers armed' "$_vout"
+  rm -rf "$_vdir"
   # The command shown on the site and the script it fetches must agree. Drift
   # here is a 404 in the one place a new user starts.
   _installui="$ROOT/web-portal/components/product-sections.tsx"
