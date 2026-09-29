@@ -40,6 +40,9 @@ begin
   if not exists(select 1 from cron.job where jobname = 'hyn-delivery-retention' and schedule = '17 * * * *') then
     raise exception 'delivery history retention is not scheduled hourly';
   end if;
+  if not exists(select 1 from cron.job where jobname = 'hyn-outage-sweep' and schedule = '* * * * *') then
+    raise exception 'the outage sweep is not scheduled every minute';
+  end if;
   insert into auth.users(id,email) values (v_owner,'retention@maintenance.test');
   insert into public.nodes(id,owner,name) values (v_node, v_owner, 'retention node');
   insert into public.web_notification_jobs(node_id,fingerprint,status,attempts,subject,text_body,created_at,updated_at) values

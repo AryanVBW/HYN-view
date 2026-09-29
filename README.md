@@ -511,15 +511,19 @@ Set any threshold to `0` to switch that rule off.
 **hyn cannot tell you the server went down.** If the box is off, so is hyn. Any
 tool claiming otherwise from inside the machine is lying to you.
 
-So the check that matters is made from outside it, and the portal makes it. Pairing
-starts a watchdog for that node. `hyn-agent.service` beats every 24 seconds; after
+So the check that matters is made from outside the machine, by the portal's
+database. Every minute, a scheduled database job (`_hyn_outage_sweep`, run by
+pg_cron) compares each paired server's last heartbeat with its threshold.
+`hyn-agent.service` beats every 24 seconds; after
 three minutes of silence — seven missed beats — the owner gets a `[HYN CRIT]`
 email, and another when the beats resume. The threshold follows the node's own
 `heartbeat_sec`: three missed beats, never less than three minutes. Nothing to install and nothing to
 configure but the one switch: the outage email goes out through **Incident
 alerts** on `/account`, which is off until you turn it on. The watchdog itself
 runs regardless, so the portal always knows a machine has gone quiet and shows it;
-the switch decides whether you are emailed about it.
+the switch decides whether you are emailed about it. Paused, suspended and demo
+servers are skipped. A server that was already quiet when it was first checked is
+recorded without an email.
 
 Seven missed beats rather than three is deliberate. The threshold is what makes
 the difference between "reports an outage" and "cries wolf": at a one-minute
