@@ -38,7 +38,11 @@ network failures do not erase that secondary copy.
 Cloud metrics, speed tests and alert events are hidden from user queries after
 48 hours. Bounded cleanup removes expired rows in batches of 5,000 per table.
 When enabled, `pg_cron` runs cleanup every five minutes even while the portal is
-offline. A service-only portal endpoint `/api/cron/telemetry`, protected by
+offline. The database creates its jobs with `public._hyn_schedule_jobs()`, which
+creates or updates each job by name. Migrations that add a job run it again. If
+you enable pg_cron on an existing database, run
+`select public._hyn_schedule_jobs();` once yourself. A service-only portal
+endpoint, `/api/cron/telemetry`, protected by
 `CRON_SECRET`, is available as a fallback; scheduled email maintenance also
 attempts cleanup. Schedule the fallback every five minutes if database Cron is
 unavailable. Physical deletion may lag the exact 48-hour boundary by a scheduler
