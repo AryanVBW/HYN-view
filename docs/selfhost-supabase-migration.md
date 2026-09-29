@@ -174,6 +174,38 @@ Self-hosted `SITE_URL` and `ADDITIONAL_REDIRECT_URLS` already include
 **HYN CLI agents:** keep `cloud_api_url = https://www.hyn-view.in/api/agent/v1`
 (hosted-gateway mode) and no agent needs reconfiguring.
 
+## Schema changes applied to the live database
+
+The live database has no `supabase_migrations` table, so this list is the record
+of what production runs. Each change is applied over SSH (`server02`, then
+`lxc exec supabase -- docker exec -i supabase-db psql -U postgres -d postgres`) in
+this order: take a `pg_dump -Fc` backup, restore it into a scratch database and
+apply there first, apply to `postgres` in one transaction (`lock_timeout` 3 s,
+assertions and `supabase/privilege-check.sql` before `COMMIT`), then check that
+agents keep reporting. The scratch copy must be owned by `postgres`
+(`alter database <copy> owner to postgres`), as the live database is, or the
+migrations fail with `permission denied for schema public`.
+
+**2026-09-29 05:54 UTC — LIVE-1** (one transaction, 0.16 s)
+
+| Migration | Effect on live |
+| --- | --- |
+| `20260913120000_five_minute_monitoring_cadence` | the portal can save `heartbeat_sec` and `cloud_checkin_min` |
+| `20260922070000_maintainer_resolve_alert` | maintainers can resolve alerts (the function was missing) |
+| `20260928100000_restore_shared_node_visibility` | shared servers are visible again (a test user saw 5 servers, was 1) |
+| `20260928110000_reassert_role_privileges` | anon can execute 48 functions instead of 101 and use no tables instead of 28 |
+| `20260928120000_alert_incidents` | `alert_events` 23,521 per-upload rows → 85 incidents (20 open) |
+| `20260928130000_fast_cadence_policy` | node configs unchanged; telemetry policy v3 |
+
+- Backups on `server02`: `~/supabase-migration/pre-live1-20260929T055137Z.dump`
+  (restored and rehearsed) and `pre-live1-apply-20260929T055427Z.dump` (taken
+  seconds before the apply), each with a `.sha256` file.
+- Verified afterwards: `privilege-check.sql` passes, a read-only access check of
+  every portal and agent query matches the rehearsal, all 10 nodes kept
+  heartbeating, and Envoy logged only 2xx responses.
+- Rollback: `pg_restore --clean` from the second backup. Rows written after
+  05:54 UTC would be lost.
+
 ## Residual risk
 
 Auth and all data now live on one self-hosted box. If that server or its connectivity
