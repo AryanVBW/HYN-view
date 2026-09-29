@@ -64,6 +64,7 @@ escaped_body='{"config":{},"reason":"brace } and quote \" accepted"}'
 check 'escaped quotes and braces are nonstructural' '_cloud_complete_object "$escaped_body"'
 
 alerts_collect() { :; }
+alerts_state_load() { :; }
 alerts_evaluate() { :; }
 net_link() { :; }
 net_identity() { :; }
