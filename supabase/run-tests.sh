@@ -222,6 +222,8 @@ psql -f "$HERE/outage-sweep-test.sql" >"$WORK/outage-sweep-upgrade.log" 2>&1 || 
 sed -n '/PASS /p' "$WORK/outage-sweep-upgrade.log"
 psql -f "$HERE/fleet-latest-test.sql" >"$WORK/fleet-latest-upgrade.log" 2>&1 || { cat "$WORK/fleet-latest-upgrade.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/fleet-latest-upgrade.log"
+psql -f "$HERE/billing-test.sql" >"$WORK/billing-upgrade.log" 2>&1 || { cat "$WORK/billing-upgrade.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/billing-upgrade.log"
 sed -n '/PASS /p' "$WORK/telemetry-upgrade.log"
 psql -f "$HERE/rolling-telemetry-detail-test.sql" >"$WORK/telemetry-detail-upgrade.log" 2>&1 || { cat "$WORK/telemetry-detail-upgrade.log"; exit 1; }
 sed -n '/PASS /p; /storage bytes/p' "$WORK/telemetry-detail-upgrade.log"
@@ -243,6 +245,8 @@ psql -f "$HERE/outage-sweep-test.sql" >"$WORK/outage-sweep-schema.log" 2>&1 || {
 sed -n '/PASS /p' "$WORK/outage-sweep-schema.log"
 psql -f "$HERE/fleet-latest-test.sql" >"$WORK/fleet-latest-schema.log" 2>&1 || { cat "$WORK/fleet-latest-schema.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/fleet-latest-schema.log"
+psql -f "$HERE/billing-test.sql" >"$WORK/billing-schema.log" 2>&1 || { cat "$WORK/billing-schema.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/billing-schema.log"
 sed -n '/PASS /p' "$WORK/telemetry-schema.log"
 psql -f "$HERE/rolling-telemetry-detail-test.sql" >"$WORK/telemetry-detail-schema.log" 2>&1 || { cat "$WORK/telemetry-detail-schema.log"; exit 1; }
 sed -n '/PASS /p; /storage bytes/p' "$WORK/telemetry-detail-schema.log"
@@ -275,6 +279,8 @@ psql -f "$HERE/shared-observability-test.sql" >"$WORK/shared-test.log" 2>&1 || {
 sed -n '/PASS /p' "$WORK/shared-test.log"
 psql -f "$HERE/delivery-controls-test.sql" >"$WORK/delivery-test.log" 2>&1 || { cat "$WORK/delivery-test.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/delivery-test.log"
+psql -f "$HERE/billing-test.sql" >"$WORK/billing-migrations.log" 2>&1 || { cat "$WORK/billing-migrations.log"; exit 1; }
+sed -n '/PASS /p' "$WORK/billing-migrations.log"
 psql -f "$HERE/relayer-shared-access-test.sql" >"$WORK/shared-relayer-test.log" 2>&1 || { cat "$WORK/shared-relayer-test.log"; exit 1; }
 sed -n '/PASS /p' "$WORK/shared-relayer-test.log"
 
@@ -306,7 +312,7 @@ printf 'PASS  privilege check detects a restore that re-grants every object\n'
 psql -f "$HERE/migrations/20260928110000_reassert_role_privileges.sql" >"$WORK/privilege-repair.log" 2>&1 || { cat "$WORK/privilege-repair.log"; exit 1; }
 psql -f "$HERE/privilege-check.sql" >"$WORK/privilege-check.log" 2>&1 || { cat "$WORK/privilege-check.log"; exit 1; }
 printf 'PASS  the privilege repair migration restores the floor\n'
-for suite in roles-test admin-grants-test owner-linking-test maintainer-visibility-test server-access-bandwidth-test delivery-controls-test; do
+for suite in roles-test admin-grants-test owner-linking-test maintainer-visibility-test server-access-bandwidth-test delivery-controls-test billing-test; do
   psql -f "$HERE/$suite.sql" >"$WORK/repaired-$suite.log" 2>&1 || { cat "$WORK/repaired-$suite.log"; exit 1; }
 done
 printf 'PASS  authorized access paths still work after the privilege repair\n'
