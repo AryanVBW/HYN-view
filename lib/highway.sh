@@ -25,7 +25,25 @@ HW_NEBULA='' HW_QDISC='' HW_QDISC_DROPS=''
 declare -a HW_UNITS=() HW_JOURNAL_TAIL=()
 declare -A HW_STATE=() HW_SUB=() HW_RESTARTS=() HW_MEM=() HW_SINCE=()
 
-HW_LATEST_URL='https://install.hiwaynetwork.io/hw-os/latest.txt'
+# Where Highway publishes the current release pointer. This is the host its own
+# installer (`curl -fsSL get.highway.space | sudo -H bash`) resolves against, and it
+# names the release as `mainnet-vX.Y.Z`. The previous host, install.hiwaynetwork.io,
+# now answers 503 and published a different scheme (`v0.1.x`); it is kept only as a
+# fallback so a box that still reaches it keeps working. The pointer is read for
+# display only: nothing here downloads or runs what it names, so the signature
+# check the installer performs on it is not needed.
+HW_LATEST_URL='https://get.highway.space/hw-os/latest.txt'
+HW_LATEST_URL_LEGACY='https://install.hiwaynetwork.io/hw-os/latest.txt'
+
+# `mainnet-v1.0.10` and `v1.0.10` both normalise to `v1.0.10`, which is the shape
+# every other version in this file uses. Anything else yields '' so a changed or
+# hostile response is dropped instead of cached.
+HW_LATEST_NORM=''
+hw_latest_normalize_v() {
+  local s=${1//[[:space:]]/}
+  s=${s#mainnet-}
+  if [[ $s =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then HW_LATEST_NORM=$s; else HW_LATEST_NORM=''; fi
+}
 
 # ---------------------------------------------------------------------------
 # binary
@@ -73,11 +91,15 @@ hw_version() {
 
   # On-disk version files, cheapest and safest. Ordered most specific first: the
   # relayer OS keeps the running agent's version at
-  # /opt/hway-agent/current/VERSION, and reading it is the difference between
+  # /opt/hway-agent/current/VERSION (older images) or
+  # /etc/hway-relayer/hw-os-version (current ones, written by the installer, e.g.
+  # `v1.0.8`; the relayer binary's own version is a separate track in
+  # binary-swap-state.json and is not what the release pointer describes), and
+  # reading it is the difference between
   # reporting v0.1.95 (correct) and scraping "v0.3.1" out of an unrelated unit's
   # metadata further down this function.
   for f in /opt/hway-agent/current/VERSION /opt/hway-agent/VERSION \
-           /var/lib/highway/version /var/lib/highway/VERSION /etc/highway/version \
+           /etc/hway-relayer/hw-os-version /var/lib/highway/version /var/lib/highway/VERSION /etc/highway/version \
            /opt/highway/VERSION /var/lib/hw-os/version /etc/hway/version; do
     [[ -r $f ]] || continue
     readval v "$f" || continue
@@ -158,12 +180,16 @@ hw_latest_check() {
   if ((_HW_FETCH_PID > 0)) && kill -0 "$_HW_FETCH_PID" 2>/dev/null; then hw_update_flag; return 0; fi
   _HW_FETCH_AT=$now
   {
-    local out
-    out=$(curl -fsSL --max-time 10 --proto '=https' "$HW_LATEST_URL" 2>/dev/null) || out=''
-    out=${out//[[:space:]]/}
-    if [[ $out =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-      printf '%s\n%s\n' "${EPOCHSECONDS:-0}" "$out" >"$file.tmp" && mv -f "$file.tmp" "$file"
-    fi
+    local out url
+    for url in "$HW_LATEST_URL" "${HW_LATEST_URL_LEGACY:-}"; do
+      [[ -n $url ]] || continue
+      out=$(curl -fsSL --max-time 10 --proto '=https' "$url" 2>/dev/null) || out=''
+      hw_latest_normalize_v "$out"
+      if [[ -n $HW_LATEST_NORM ]]; then
+        printf '%s\n%s\n' "${EPOCHSECONDS:-0}" "$HW_LATEST_NORM" >"$file.tmp" && mv -f "$file.tmp" "$file"
+        break
+      fi
+    done
   } &
   _HW_FETCH_PID=$!
   hw_update_flag

@@ -2923,6 +2923,31 @@ truthy 'the relayer agent VERSION path is searched' \
 truthy 'the version file scan runs before the journal scan' \
   '[[ $(grep -n "^  for f in /opt/hway-agent" "$HYN_LIB/highway.sh" | cut -d: -f1) -lt $(grep -n "VERSION_SRC=journal" "$HYN_LIB/highway.sh" | cut -d: -f1) ]]'
 
+# Highway's own installer resolves releases from get.highway.space and names them
+# mainnet-vX.Y.Z; the host HYN used before now answers 503. Without the new host
+# and the new shape, the "latest release" froze at an old value and an update was
+# never offered (a box two releases behind reported update_available: 0).
+eq 'the release pointer is read from the host Highway publishes to' \
+  'https://get.highway.space/hw-os/latest.txt' "$(grep -oE "^HW_LATEST_URL='[^']+'" "$HYN_LIB/highway.sh" | head -1 | sed "s/^HW_LATEST_URL='//; s/'$//")"
+for _case in 'mainnet-v1.0.10:v1.0.10' 'v0.1.127:v0.1.127' $'  mainnet-v2.3.4\n:v2.3.4' \
+             'mainnet-1.0.10:' 'testnet-v1.0.10:' 'mainnet-v1.0:' '<html>503</html>:' ':' 'v1.0.10; rm -rf /:'; do
+  hw_latest_normalize_v "${_case%:*}"
+  eq "release pointer normalises [${_case%:*}]" "${_case##*:}" "$HW_LATEST_NORM"
+done
+truthy 'the version file Highway writes (hw-os-version) is searched' \
+  'grep  "/etc/hway-relayer/hw-os-version" "$HYN_LIB/highway.sh"'
+truthy 'that file is read before the journal scan can scrape something else' \
+  '[[ $(grep -n "/etc/hway-relayer/hw-os-version" "$HYN_LIB/highway.sh" | tail -1 | cut -d: -f1) -lt $(grep -n "VERSION_SRC=journal" "$HYN_LIB/highway.sh" | cut -d: -f1) ]]'
+# A new pointer against the version the box reports must flag an update.
+(
+  HW_VERSION='v1.0.8' HW_LATEST=''
+  hw_latest_normalize_v 'mainnet-v1.0.10'; HW_LATEST=$HW_LATEST_NORM
+  hw_update_flag
+  [[ $HW_UPDATE == 1 ]] || exit 1
+  HW_VERSION='v1.0.10'; hw_update_flag
+  [[ $HW_UPDATE == 0 ]]
+) && ok || bad 'v1.0.8 against mainnet-v1.0.10 must be an update, v1.0.10 must not'
+
 # A process that exits between the glob and the read is completely normal. It
 # must not print to stderr: on a busy relayer that was one line per snapshot.
 _stray=$(
