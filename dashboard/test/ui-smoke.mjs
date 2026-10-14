@@ -23,7 +23,11 @@ class El {
   append(...k) { this.children.push(...k); }
   replaceChildren(...k) { this._text = ''; this.children = k; }
   setAttribute(k, v) { if (k === 'id') els[v] = this; } addEventListener() {} getBoundingClientRect() { return { left: 0 }; } getContext() { return ctx; }
-  querySelector() { return this._q ??= new El('x'); }
+  querySelector(sel) {                 // resolves a real descendant by class so KPI rendering is actually checked
+    const cls = sel.replace(/^\./, '');
+    const walk = (n) => { for (const c of n.children || []) { if (c.className && c.className.split(/\s+/).includes(cls)) return c; const f = walk(c); if (f) return f; } return null; };
+    return walk(this) || new El('x');
+  }
 }
 var els = Object.fromEntries(ids.map((id) => [id, new El(id === 'svc' || id === 'timers' || id === 'procs' || id === 'collectors' ? 'table' : 'div')]));
 const listeners = {};
@@ -49,7 +53,7 @@ await new Promise((r) => setTimeout(r, 2500));      // history + logs fetches
 const checks = [
   ['no exceptions', () => errors.length === 0, () => errors.map((e) => e.stack || e).join('\n')],
   ['overall pill', () => /OK|WARNING|CRITICAL/.test(els.overall.textContent)],
-  ['cpu kpi filled', () => /%/.test(els['k-cpu']?.textContent ?? '') || els['k-cpu'].querySelector('.v').textContent !== '–'],
+  ['cpu kpi filled', () => /^\d+%$/.test(els['k-cpu'].querySelector('.v').textContent)],
   ['service rows', () => els.svc.tBodies[0].children.length > 5],
   ['timer rows', () => els.timers.tBodies[0].children.length > 3],
   ['process rows', () => els.procs.tBodies[0].children.length > 0],
@@ -58,7 +62,9 @@ const checks = [
   ['deploy checks', () => els.deploy.children.length > 2],
   ['highway panel', () => els.highway.textContent.includes('Health')],
   ['charts drew lines', () => draws.stroke > 20, () => JSON.stringify(draws)],
-  ['kpi values', () => els['k-mem'].querySelector('.v').textContent !== '–'],
+  ['kpi values and subtext', () => /^\d+%$/.test(els['k-mem'].querySelector('.v').textContent) && /of .+iB/.test(els['k-mem'].querySelector('.s').textContent)],
+  ['alert badge counts hyn alerts too', () => Number(els.alertCount.textContent) >= state.alerts.active.length],
+  ['speed test shown in real units', () => { const st = state.hyn.speedtests.slice(-1)[0]; if (!st) return true; const mbit = (st.down * 8) / 1e6; return mbit >= 1000 || els.hyn.textContent.includes(`${Math.round(mbit)} Mbit/s`); }],
   ['log lines', () => els.logs.children.length > 0],
   ['collectors table', () => els.collectors.tBodies[0].children.length >= 10],
 ];

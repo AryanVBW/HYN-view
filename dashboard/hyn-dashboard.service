@@ -6,7 +6,8 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/node /opt/hyn-dashboard/server.mjs
+# @NODE@ is replaced by install.sh with the node that is actually installed.
+ExecStart=@NODE@ /opt/hyn-dashboard/server.mjs
 # Optional overrides: DASH_PORT, DASH_HOST, DASH_TOKEN, DASH_WEBHOOK_URL, HYN_REPO
 EnvironmentFile=-/etc/hyn-dashboard.env
 Environment=NODE_ENV=production
@@ -25,7 +26,9 @@ TasksMax=64
 
 # Read-only observer. Writes only to /var/lib/hyn-dashboard.
 User=root
-CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_SYS_PTRACE CAP_NET_ADMIN
+# Only the ability to read root-owned files. No network admin, no ptrace: the HTTP-facing process
+# must not be able to reconfigure the host even if it were compromised.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
 AmbientCapabilities=
 NoNewPrivileges=yes
 ProtectSystem=strict

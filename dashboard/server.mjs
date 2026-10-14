@@ -1,5 +1,6 @@
 // HTTP + SSE server for the VPS dashboard. Zero dependencies, read-only API.
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -8,6 +9,8 @@ import { state, start, history, logs, overall } from './collector.mjs';
 
 const HOST = process.env.DASH_HOST || '127.0.0.1';
 const PORT = Number(process.env.DASH_PORT || 8787);
+const TLS_CERT = process.env.DASH_TLS_CERT || '', TLS_KEY = process.env.DASH_TLS_KEY || '';
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) { console.error(`invalid DASH_PORT: ${process.env.DASH_PORT}`); process.exit(1); }
 const TOKEN = process.env.DASH_TOKEN || '';
 const PUB = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
 const loopback = ['127.0.0.1', '::1', 'localhost'].includes(HOST);
@@ -16,6 +19,12 @@ if (!loopback && !TOKEN) {
   console.error('refusing to listen on a non-loopback address without DASH_TOKEN');
   process.exit(1);
 }
+// A token over plain HTTP can be sniffed. Off-loopback needs TLS here, or a TLS proxy plus an explicit opt-in.
+if (!loopback && !(TLS_CERT && TLS_KEY) && process.env.DASH_ALLOW_PLAINTEXT !== '1') {
+  console.error('refusing plain HTTP on a non-loopback address: set DASH_TLS_CERT and DASH_TLS_KEY, or put a TLS proxy in front and set DASH_ALLOW_PLAINTEXT=1 (bind the dashboard to loopback behind it)');
+  process.exit(1);
+}
+const useTls = !!(TLS_CERT && TLS_KEY);
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 const SEC = {
@@ -48,19 +57,18 @@ function fullPayload() {
 }
 
 const clients = new Set();
-setInterval(() => {
-  if (!clients.size) return;
-  const data = `event: fast\ndata: ${JSON.stringify(fastPayload())}\n\n`;
-  for (const c of clients) c.write(data);
-}, 2000);
-setInterval(() => {
-  if (!clients.size) return;
-  const data = `event: full\ndata: ${JSON.stringify(fullPayload())}\n\n`;
-  for (const c of clients) c.write(data);
-}, 10000);
-setInterval(() => { for (const c of clients) c.write(': keepalive\n\n'); }, 25000);
+const MAX_BUFFERED = 512 * 1024;   // a client that stops reading is dropped instead of buffered without limit
+function broadcast(data) {
+  for (const c of clients) {
+    if (c.destroyed || c.writableLength > MAX_BUFFERED) { clients.delete(c); c.destroy(); continue; }
+    c.write(data);
+  }
+}
+setInterval(() => { if (clients.size) broadcast(`event: fast\ndata: ${JSON.stringify(fastPayload())}\n\n`); }, 2000);
+setInterval(() => { if (clients.size) broadcast(`event: full\ndata: ${JSON.stringify(fullPayload())}\n\n`); }, 10000);
+setInterval(() => broadcast(': keepalive\n\n'), 25000);
 
-const server = http.createServer(async (req, res) => {
+const handler = async (req, res) => {
   try {
     const url = new URL(req.url, 'http://x');
     if (!hostOk(req)) { res.writeHead(403, SEC); return res.end('forbidden host'); }
@@ -69,7 +77,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, age < 15000 ? 200 : 503, { ok: age < 15000, sampleAgeMs: age, uptimeS: Math.round((Date.now() - state.startedAt) / 1000) });
     }
     if (TOKEN && url.searchParams.get('token') && eq(url.searchParams.get('token'), TOKEN)) {
-      res.writeHead(302, { 'Set-Cookie': `dash=${encodeURIComponent(TOKEN)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`, Location: '/', ...SEC });
+      res.writeHead(302, { 'Set-Cookie': `dash=${encodeURIComponent(TOKEN)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000${useTls ? '; Secure' : ''}`, Location: '/', ...SEC });
       return res.end();
     }
     if (!authed(req, url)) { res.writeHead(401, { 'WWW-Authenticate': 'Bearer', ...SEC }); return res.end('token required: open /?token=...'); }
@@ -97,10 +105,16 @@ const server = http.createServer(async (req, res) => {
     console.error('request error', e);
     if (!res.headersSent) json(res, 500, { error: 'internal' }); else res.end();
   }
-});
+};
+const server = useTls
+  ? https.createServer({ cert: fs.readFileSync(TLS_CERT), key: fs.readFileSync(TLS_KEY), minVersion: 'TLSv1.2' }, handler)
+  : http.createServer(handler);
 
-process.on('uncaughtException', (e) => console.error('uncaught', e));
-process.on('unhandledRejection', (e) => console.error('unhandled', e));
+// A fatal error must end the process so systemd (Restart=always) brings back a clean one.
+const die = (label) => (e) => { console.error(label, e); process.exit(1); };
+process.on('uncaughtException', die('uncaught'));
+process.on('unhandledRejection', die('unhandled'));
+server.on('error', die('listen error'));
 const stop = await start();
-server.listen(PORT, HOST, () => console.log(`hyn-dashboard listening on http://${HOST}:${PORT} (auth ${TOKEN ? 'token' : 'none, loopback only'})`));
+server.listen(PORT, HOST, () => console.log(`hyn-dashboard listening on ${useTls ? 'https' : 'http'}://${HOST}:${PORT} (auth ${TOKEN ? 'token' : 'none, loopback only'})`));
 for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { stop(); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 2000).unref(); });

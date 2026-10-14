@@ -27,7 +27,7 @@ const KPI = [
   { id: 'load', label: 'Load (1/5/15)', val: (f) => f.load1.toFixed(2), sub: (f) => `${f.load1} · ${f.load5} · ${f.load15} on ${f.cores} cores`, p: (f) => (100 * f.load1) / f.cores, lvl: (f) => lvl(f.load5 / f.cores, 1, 2) },
   { id: 'net', label: 'Network', val: (f) => '↓ ' + bits(f.rx), sub: (f) => `↑ ${bits(f.tx)} · ${f.iface || '?'} · ${f.tcpInuse} tcp · ${f.retrans.toFixed(1)} retrans/s`, p: null },
   { id: 'up', label: 'Uptime', val: (f) => dur(f.uptime), sub: (f) => `${f.procsTotal} tasks, ${f.procsRun} running · fds ${f.fdOpen}`, p: null },
-  { id: 'psi', label: 'Pressure (10 s)', val: (f) => (f.psiCpu == null ? 'n/a' : `${f.psiCpu}/${f.psiMem}/${f.psiIo}`), sub: () => 'cpu / memory / io stall %', p: (f) => Math.max(f.psiCpu || 0, f.psiMem || 0, f.psiIo || 0), lvl: (f) => lvl(Math.max(f.psiCpu || 0, f.psiMem || 0, f.psiIo || 0), 10, 30) },
+  { id: 'psi', label: 'Pressure (10 s)', val: (f) => ([f.psiCpu, f.psiMem, f.psiIo].some((v) => v == null) ? 'n/a' : `${f.psiCpu}/${f.psiMem}/${f.psiIo}`), sub: () => 'cpu / memory / io stall %', p: (f) => Math.max(f.psiCpu || 0, f.psiMem || 0, f.psiIo || 0), lvl: (f) => lvl(Math.max(f.psiCpu || 0, f.psiMem || 0, f.psiIo || 0), 10, 30) },
 ];
 for (const k of KPI) $('kpis').append(h('div', { class: 'card kpi', id: 'k-' + k.id }, h('div', { class: 'l', text: k.label }), h('div', { class: 'v', text: '–' }), h('div', { class: 's' }), k.p ? h('div', { class: 'meter' }, h('i')) : null));
 function drawKpis(f) {
@@ -110,8 +110,9 @@ addEventListener('resize', () => { for (const c of Object.values(charts)) drawCh
 let S = null, F = null, svcGroup = 'Highway', procKey = 'cpu', lastMsg = 0;
 const sevPill = (sev) => h('span', { class: 'sev ' + sev, text: sev });
 function drawAlerts() {
-  const a = S.alerts.active; $('alertCount').textContent = a.length;
+  const a = S.alerts.active;
   const hynFire = (S.hyn.firing || []).filter((x) => !a.some((y) => y.id === x.rule));
+  $('alertCount').textContent = a.length + hynFire.length;
   fill($('alerts'), a.length || hynFire.length ? [
     ...a.map((x) => h('div', { class: 'row' }, sevPill(x.sev), h('div', { class: 'grow' }, h('b', { text: x.title }), h('div', { class: 'muted small', text: x.detail })), h('span', { class: 't', text: 'since ' + when(x.since * 1000) }))),
     ...hynFire.map((x) => h('div', { class: 'row' }, sevPill('info'), h('div', { class: 'grow' }, h('b', { text: 'hyn-view: ' + x.rule })), h('span', { class: 't', text: 'since ' + when(x.since * 1000) }))),
@@ -139,7 +140,7 @@ function drawServices() {
   $('svcCount').textContent = `${S.services.filter((s) => s.running).length} running · ${failed} failed`;
   fill($('svc').tBodies[0], rows.map((s) => h('tr', {}, h('td', {}, s.name), h('td', {}, stateCell(s)),
     h('td', { class: 'n' }, s.mem ? bytes(s.mem) + (s.memMax && s.memMax < 1e15 ? ` / ${bytes(s.memMax)}` : '') : '–'), h('td', { class: 'n s-' + (s.restarts > 3 ? 'warn' : 'off'), text: String(s.restarts) }),
-    h('td', {}, s.since ? ago(parseSd(s.since)) : '–'), h('td', { class: 'hide-sm muted', text: s.desc || '' }))));
+    h('td', {}, parseSd(s.since) ? ago(parseSd(s.since)) : '–'), h('td', { class: 'hide-sm muted', text: s.desc || '' }))));
   const sel = $('logUnit'), cur = sel.value, units = ['', ...S.services.filter((s) => s.group !== 'System' || s.running).map((s) => s.name).sort()];
   if (sel.options.length !== units.length) fill(sel, units.map((u) => h('option', { value: u, text: u || 'all units' }))), (sel.value = cur);
 }
@@ -159,7 +160,7 @@ function drawHighway() {
   const st = (S.hyn.speedtests || []).slice(-1)[0];
   fill($('hyn'), kv([['Linked to portal', y.linked ? 'yes' : 'no'], ['Last heartbeat', hb ? `${hb.status} · ${ago(hb.ts * 1000)}${hb.msg ? ' · ' + hb.msg : ''}` : '–', hb && hb.status !== 'ok' ? 's-crit' : 's-ok'],
     ['Last push', pu ? `${pu.status} · ${ago(pu.ts * 1000)}${pu.msg ? ' · ' + pu.msg : ''}` : '–', pu && pu.status !== 'ok' ? 's-warn' : ''],
-    ['Last speed test', st ? `↓ ${bits(st.down / 8)} ↑ ${bits(st.up / 8)} · ${st.lat.toFixed(0)} ms · ${ago(st.t * 1000)}` : '–'], ['Local metric rows', y.metricsRows]]));
+    ['Last speed test', st ? `↓ ${bits(st.down)} ↑ ${bits(st.up)} · ${st.lat.toFixed(0)} ms · ${ago(st.t * 1000)}` : '–'], ['Local metric rows', y.metricsRows]]));
 }
 function drawProcs() {
   const rows = [...S.procs].sort((a, b) => b[procKey] - a[procKey]).slice(0, 12);

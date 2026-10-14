@@ -13,7 +13,7 @@ const CFG = {
   hynBin: process.env.HYN_BIN || '/usr/local/bin/hyn',
   repoDir: process.env.HYN_REPO || '',
   webhook: process.env.DASH_WEBHOOK_URL || '',
-  unitGlobs: (process.env.DASH_UNIT_PREFIXES || 'hway,hyn,nebula,highway,mosaic').split(','),
+  unitGlobs: (process.env.DASH_UNIT_PREFIXES || 'hway,hw-,hyn,nebula,highway,mosaic').split(','),
 };
 const RING_MAX = 900;           // 30 min at 2 s
 const HIST_MAX = 10080;         // 7 days at 1 min
@@ -38,6 +38,12 @@ export const state = {
 };
 const ring = [];
 let hist = [];
+let histFileLines = 0, eventFileLines = 0;
+function compact(file, keep) {          // keep the newest `keep` lines of a jsonl file
+  const lines = rd(file).split('\n').filter(Boolean).slice(-keep);
+  try { fs.writeFileSync(file + '.tmp', lines.length ? lines.join('\n') + '\n' : '', { mode: 0o600 }); fs.renameSync(file + '.tmp', file); } catch { /* retry later */ }
+  return lines.length;
+}
 let acc = { n: 0, sum: {}, t0: now() };
 
 // ---------------------------------------------------------------- fast metrics
@@ -158,7 +164,8 @@ function accumulate(f) {
     const p = { t: Math.round(now() / 1000) };
     for (const k of HIST_KEYS) p[k] = acc.sum[k] === undefined ? null : Math.round((acc.sum[k] / acc.n) * 100) / 100;
     hist.push(p);
-    try { fs.appendFileSync(HIST_FILE, JSON.stringify(p) + '\n', { mode: 0o600 }); } catch { /* disk full etc: keep running */ }
+    try { fs.appendFileSync(HIST_FILE, JSON.stringify(p) + '\n', { mode: 0o600 }); histFileLines++; } catch { /* disk full etc: keep running */ }
+    if (histFileLines > HIST_MAX + 1440) histFileLines = compact(HIST_FILE, HIST_MAX);
     if (hist.length > HIST_MAX + 500) hist = hist.slice(-HIST_MAX);
     acc = { n: 0, sum: {}, t0: now() };
   }
@@ -166,11 +173,10 @@ function accumulate(f) {
 function loadHistory() {
   fs.mkdirSync(CFG.stateDir, { recursive: true, mode: 0o700 });
   const lines = rd(HIST_FILE).split('\n').filter(Boolean);
-  const keep = lines.slice(-HIST_MAX);
-  hist = keep.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-  if (lines.length > HIST_MAX + 1000) {
-    try { fs.writeFileSync(HIST_FILE + '.tmp', keep.join('\n') + '\n', { mode: 0o600 }); fs.renameSync(HIST_FILE + '.tmp', HIST_FILE); } catch { /* ignore */ }
-  }
+  hist = lines.slice(-HIST_MAX).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  histFileLines = lines.length > HIST_MAX ? compact(HIST_FILE, HIST_MAX) : lines.length;
+  eventFileLines = rd(EVENT_FILE).split('\n').filter(Boolean).length;
+  if (eventFileLines > 1000) eventFileLines = compact(EVENT_FILE, 500);
 }
 const RANGES = { '30m': 1800, '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800 };
 export function history(range = '30m') {
@@ -253,7 +259,7 @@ function sampleFs() {
 
 // ---------------------------------------------------------------- services
 const isOurs = (n) => CFG.unitGlobs.some((p) => n.startsWith(p));
-const GROUP = (n) => (/^(hway|highway|nebula|mosaic)/.test(n) ? 'Highway' : n.startsWith('hyn') ? 'HYN-view' : 'System');
+const GROUP = (n) => (/^(hway|hw-|highway|nebula|mosaic)/.test(n) ? 'Highway' : n.startsWith('hyn') ? 'HYN-view' : 'System');
 async function sampleServices() {
   const lu = await run('systemctl', ['list-units', '--type=service,timer', '--all', '--plain', '--no-legend', '--no-pager']);
   if (!lu.ok) throw new Error('systemctl list-units failed');
@@ -334,8 +340,12 @@ async function sampleSnapshot() {
 }
 
 async function sampleNebula() {
-  const r = await fetch(process.env.NEBULA_METRICS || 'http://127.0.0.1:9101/metrics', { signal: AbortSignal.timeout(4000) });
+  let r;
+  try { r = await fetch(process.env.NEBULA_METRICS || 'http://127.0.0.1:9101/metrics', { signal: AbortSignal.timeout(4000) }); }
+  catch (e) { state.nebula = null; throw e; }
+  if (!r.ok) { state.nebula = null; throw new Error(`nebula-guard metrics answered HTTP ${r.status}`); }
   const txt = await r.text(), g = (k) => { const m = txt.match(new RegExp('^' + k + ' ([0-9.e+-]+)', 'm')); return m ? Number(m[1]) : null; };
+  if (g('nebula_guard_connected') === null) { state.nebula = null; throw new Error('nebula_guard_connected metric missing'); }
   state.nebula = { connected: g('nebula_guard_connected'), blocklist: g('nebula_guard_blocklist_entries'), version: g('nebula_guard_blocklist_version'), lastUpdate: g('nebula_guard_last_update_timestamp'), takenAt: now() };
 }
 
@@ -377,9 +387,10 @@ async function sampleSecurity() {
   const sshd = await run('sshd', ['-T']);
   const g = (k) => (sshd.out.match(new RegExp('^' + k + ' (.+)$', 'm')) || [])[1] || '';
   s.sshPort = g('port'); s.rootLogin = g('permitrootlogin'); s.passwordAuth = g('passwordauthentication');
-  const ipt = await run('iptables', ['-S']);
-  const ufw = await run('ufw', ['status']);
-  s.firewall = /Status: active/.test(ufw.out) ? 'ufw active' : (ipt.out.split('\n').filter((l) => l.startsWith('-A')).length ? 'iptables rules' : 'none (all ports open to host rules)');
+  // No privileged rule listing: the service has no CAP_NET_ADMIN. Look for a firewall manager instead.
+  const up = (n) => state.services.some((x) => x.name === n && x.active === 'active');
+  s.firewall = /^ENABLED=yes/m.test(rd('/etc/ufw/ufw.conf')) ? 'ufw enabled' : up('firewalld.service') ? 'firewalld active' : up('nftables.service') ? 'nftables service active'
+    : 'none detected (ufw, firewalld, nftables; hand-written iptables rules are not checked)';
   const j = await run('journalctl', ['-u', 'ssh', '--since', '24 hours ago', '-o', 'cat', '-q', '--no-pager'], 20000);
   s.sshFailures24h = j.out.split('\n').filter((l) => /Failed password|Invalid user|authentication failure|Connection closed by invalid user/.test(l)).length;
   s.sshAccepted24h = j.out.split('\n').filter((l) => /^Accepted /.test(l)).length;
@@ -506,7 +517,8 @@ function evalAlerts() {
 }
 function recordEvent(e) {
   state.alerts.recent.unshift(e); state.alerts.recent = state.alerts.recent.slice(0, 100);
-  try { fs.appendFileSync(EVENT_FILE, JSON.stringify(e) + '\n', { mode: 0o600 }); } catch { /* ignore */ }
+  try { fs.appendFileSync(EVENT_FILE, JSON.stringify(e) + '\n', { mode: 0o600 }); eventFileLines++; } catch { /* ignore */ }
+  if (eventFileLines > 1000) eventFileLines = compact(EVENT_FILE, 500);
   if (CFG.webhook && e.sev === 'crit') {
     fetch(CFG.webhook, { method: 'POST', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(8000),
       body: JSON.stringify({ text: `[${state.sys.host || 'vps'}] ${e.type.toUpperCase()} ${e.sev}: ${e.title} ${e.detail}` }) }).catch(() => {});
@@ -529,7 +541,8 @@ export async function start() {
   loadHistory();
   state.alerts.recent = rd(EVENT_FILE).split('\n').filter(Boolean).slice(-100).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean).reverse();
   sampleFast(); sampleFs();
-  await Promise.allSettled([sampleServices(), sampleSys(), sampleSecurity(), samplePorts()]);
+  await Promise.allSettled([sampleServices()]);          // security checks look at the service list
+  await Promise.allSettled([sampleSys(), sampleSecurity(), samplePorts()]);
   sampleHyn();
   const timers = [
     job('fast', 2000, sampleFast, { immediate: false }),

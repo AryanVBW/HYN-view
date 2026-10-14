@@ -15,6 +15,7 @@ umask 077
 
 DEST=${HYN_BACKUP_DIR:-/var/backups/hyn-system}
 KEEP=${HYN_BACKUP_KEEP:-7}
+[[ $KEEP =~ ^[1-9][0-9]*$ ]] || { echo "HYN_BACKUP_KEEP must be a positive integer, using 7" >&2; KEEP=7; }
 REMOTE=${HYN_BACKUP_REMOTE:-}         # optional rsync target, e.g. user@host:/path/ (ssh key auth, no passwords)
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 host=$(hostname)
@@ -46,8 +47,8 @@ set +e
 tar --create --gzip --file "$work/$name" --warning=no-file-changed --ignore-failed-read \
   --exclude='*.key' --exclude='*_key' --exclude='*.env' --exclude='*secret*' --exclude='*token*' \
   --exclude='shadow*' --exclude='gshadow*' --exclude='ssh_host_*' --exclude='*.pem' --exclude='device.key.file' \
-  --exclude='/var/lib/hyn-view/local' --exclude='/var/lib/hyn-view/*.lock' \
-  --exclude='/etc/ssl/private' --exclude='/etc/hway-relayer/relayers/*/data' \
+  --exclude='var/lib/hyn-view/local' --exclude='var/lib/hyn-view/*.lock' \
+  --exclude='etc/ssl/private' --exclude='etc/hway-relayer/relayers/*/data' \
   -C / \
   etc \
   var/lib/hyn-view \
@@ -59,12 +60,22 @@ tar --create --gzip --file "$work/$name" --warning=no-file-changed --ignore-fail
   -C "$work" inventory 2>"$work/tar.err"
 rc=$?
 set -e
-# tar exits 1 for "some files differ/unreadable"; only 2+ means the archive itself is bad.
+# tar exits 1 when a file changed or vanished while it was read (normal for live state);
+# only 2+ means the archive itself is bad. Say what was skipped instead of hiding it.
 if [ "$rc" -ge 2 ]; then cat "$work/tar.err" >&2; echo "tar failed (rc=$rc)" >&2; exit 1; fi
+[ -s "$work/tar.err" ] && echo "note: $(wc -l <"$work/tar.err") file warning(s), e.g. $(head -1 "$work/tar.err")" >&2
 
 tar --list --gzip --file "$work/$name" >/dev/null                       # archive must read back
 if tar --list --gzip --file "$work/$name" | grep -Eq '(^|/)(shadow|gshadow|host\.key|p2p_key|secrets|ssh_host_[a-z0-9_]+_key)$'; then
   echo "refusing: a secret slipped into the archive" >&2; exit 1
+fi
+# Filenames are not enough: also refuse an archive whose content holds a PEM private key.
+if tar --extract --to-stdout --gzip --file "$work/$name" 2>/dev/null | grep -aqE -- '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----'; then
+  echo "refusing: archive content contains a private key" >&2; exit 1
+fi
+# Excluded paths must really be absent (a wrong pattern once let 27k files through).
+if tar --list --gzip --file "$work/$name" | grep -Eq '^(var/lib/hyn-view/local/|etc/hway-relayer/relayers/[^/]+/data/)'; then
+  echo "refusing: an excluded directory is inside the archive" >&2; exit 1
 fi
 
 mv "$work/$name" "$DEST/$name"
@@ -75,8 +86,13 @@ date +%s >"$DEST/last-success"
 ls -1t "$DEST"/*.tar.gz 2>/dev/null | tail -n +"$((KEEP + 1))" | while read -r old; do rm -f "$old" "$old.sha256"; done
 
 if [ -n "$REMOTE" ]; then
-  rsync -a --timeout=60 -e 'ssh -o BatchMode=yes -o StrictHostKeyChecking=yes' "$DEST/$name" "$DEST/$name.sha256" "$REMOTE" \
-    && date +%s >"$DEST/last-offsite" \
-    || echo "offsite copy failed (local backup is fine)" >&2
+  sent=0
+  for attempt in 1 2 3; do      # the network may still be coming up after a catch-up run
+    if rsync -a --timeout=60 -e 'ssh -o BatchMode=yes -o StrictHostKeyChecking=yes' "$DEST/$name" "$DEST/$name.sha256" "$REMOTE"; then
+      date +%s >"$DEST/last-offsite"; sent=1; break
+    fi
+    sleep 30
+  done
+  [ "$sent" = 1 ] || echo "offsite copy failed after 3 tries (local backup is fine)" >&2
 fi
 echo "backup ok: $DEST/$name ($(du -h "$DEST/$name" | cut -f1))"
