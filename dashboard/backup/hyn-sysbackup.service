@@ -1,0 +1,12 @@
+[Unit]
+Description=VPS configuration and state backup
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hyn-sysbackup.sh
+EnvironmentFile=-/etc/hyn-sysbackup.env
+Nice=19
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+TimeoutStartSec=30min
