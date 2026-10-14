@@ -5934,6 +5934,7 @@ begin
     ('speedtest', array['ts','down_bps','up_bps','latency_us','note']),
     ('power', array['input_w','input_src','cpu_w','dram_w','ac_online','battery_pct','battery_status','battery_w']),
     ('highway', array['present','health','version','units_active','units_failed','journal_err_1h','tracked','health_why','version_src','latest','update_available','bin_size','bin_mtime','units_total','journal_warn_1h','pid','cpu_tenths','rss','threads','fds','proc_uptime_s','mesh_iface','mesh_rx_bps','mesh_tx_bps','mesh_rx_total','mesh_tx_total','mesh_drops','qdisc','qdisc_drops','congestion','nft_tables']),
+    ('system', array['tracked','units_total','units_active','units_failed']),
     ('platform', array['provider','provider_source','provider_confidence','virtualization','environment','metrics_scope','host_cpu_count','host_memory_bytes','cgroup_version','cpu_limit_cores','memory_limit_bytes','memory_current_bytes','cpu_throttled_usec','cpu_throttled_periods'])
   ) as groups(name, keys) loop
     if jsonb_typeof(p_payload->g.name) = 'object' then
@@ -5985,8 +5986,24 @@ begin
   if jsonb_typeof(p_payload#>'{highway,units}') = 'array' then
     select coalesce(jsonb_agg(public._hyn_monitoring_fields(value, array['name','state','sub','restarts','memory','active_s'])),'[]'::jsonb)
       into items from (select value from jsonb_array_elements(p_payload#>'{highway,units}') with ordinality
-        where ordinality <= 32 and jsonb_typeof(value)='object') a;
+        where ordinality <= 48 and jsonb_typeof(value)='object') a;
     v := jsonb_set(v,'{highway,units}',items);
+  end if;
+  -- Base-system services (sshd, cron, network, time sync, journal): same bounded
+  -- scalar fields as the Highway units, kept in their own section.
+  if jsonb_typeof(p_payload#>'{system,units}') = 'array' then
+    select coalesce(jsonb_agg(public._hyn_monitoring_fields(value, array['name','state','sub','restarts','memory','active_s'])),'[]'::jsonb)
+      into items from (select value from jsonb_array_elements(p_payload#>'{system,units}') with ordinality
+        where ordinality <= 48 and jsonb_typeof(value)='object') a;
+    v := jsonb_set(v,'{system,units}',items);
+  end if;
+  -- Names of every unit systemd reports as failed, listed or not. Strings only,
+  -- truncated, capped; never log text.
+  if jsonb_typeof(p_payload#>'{system,failed_units}') = 'array' then
+    select coalesce(jsonb_agg(to_jsonb(left(value #>> '{}', 128))),'[]'::jsonb)
+      into items from (select value from jsonb_array_elements(p_payload#>'{system,failed_units}') with ordinality
+        where ordinality <= 16 and jsonb_typeof(value)='string') a;
+    v := jsonb_set(v,'{system,failed_units}',items);
   end if;
   if jsonb_typeof(p_payload->'alerts') = 'array' then
     select coalesce(jsonb_agg(public._hyn_monitoring_fields(value,array['ts','rule','severity','message','resolved'])),'[]'::jsonb)

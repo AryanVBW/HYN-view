@@ -176,6 +176,7 @@ alerts_collect() {
   cfg_on tcp_states && net_tcp_states
   sys_failed_units
   cfg_on highway_track && hw_sample "$elapsed"
+  bs_units
   st_history_read 1
   net_retrans_permille
   sys_whoami

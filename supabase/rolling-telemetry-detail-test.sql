@@ -58,6 +58,29 @@ do $$ declare m public.metrics; begin
  raise notice 'PASS  large inventories degrade supplemental payload without losing headline data or alert events';
 end $$;
 
+-- The base-system service section (sshd, cron, network, time sync, journal and
+-- the names of failed units) survives sanitising, bounded and without extras.
+-- A current relayer box also sends 27 Highway units, so that cap must clear it.
+set local role anon;
+select public.hyn_ingest('detail-token',jsonb_build_object('ts',now()-interval '30 seconds','cpu',jsonb_build_object('pct',44),
+ 'highway',jsonb_build_object('present',1,'units',(select jsonb_agg(jsonb_build_object('name','hway-'||n||'.service','state','active','sub','running')) from generate_series(1,40) n)),
+ 'system',jsonb_build_object('tracked',true,'units_total',12,'units_active',11,'units_failed',1,'extra','sekrit-value',
+  'units',(select jsonb_agg(jsonb_build_object('name','svc'||n||'.service','state','active','sub','running','args','sekrit-value')) from generate_series(1,60) n),
+  'failed_units',(select jsonb_agg('f'||n||'.service') from generate_series(1,30) n))));
+reset role;
+do $$ declare m public.metrics; begin
+ select * into m from public.metrics where node_id='48000000-0000-4000-8000-000000000031' and cpu_pct=44 limit 1;
+ if m.payload#>>'{system,units_failed}' is distinct from '1' or (m.payload#>>'{system,tracked}') is distinct from 'true' then
+   raise exception 'system summary dropped by the payload sanitiser'; end if;
+ if jsonb_array_length(m.payload#>'{system,units}')<>48 or jsonb_array_length(m.payload#>'{system,failed_units}')<>16 then
+   raise exception 'system units or failed unit names are not bounded'; end if;
+ if jsonb_array_length(m.payload#>'{highway,units}')<>40 then
+   raise exception 'a relayer-sized Highway unit list was truncated'; end if;
+ if m.payload::text like '%sekrit-value%' or m.payload ? 'monitoring_truncated' then
+   raise exception 'system section kept unknown fields or degraded a normal payload'; end if;
+ raise notice 'PASS  base-system services and failed unit names are kept, bounded and free of unknown fields';
+end $$;
+
 -- More than 5,000 readings still produce the full 24-hour fleet chart.
 insert into public.nodes(id,owner,name,is_demo)
  select ('48000000-0000-4000-8000-00000000004'||n)::uuid,'48000000-0000-4000-8000-000000000022','fleet'||n,n=5 from generate_series(1,5) n;

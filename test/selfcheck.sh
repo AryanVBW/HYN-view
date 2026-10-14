@@ -2738,6 +2738,14 @@ _hway_units=(
   hway-otel-mtls-shim.service hway-traffic-shaper.service hway-logrotate.service
   hway-binary-watch.timer hway-killswitch-watch.timer
   nebula-hway.service nebula-guard.service nebula-hway-renew.timer
+  # The set a current Ubuntu 24.04 relayer box runs (checked October 2026): the
+  # otel units above are gone, and every watcher below is a timer plus a one-shot.
+  hway-agent-watch.service hway-agent-watch.timer hway-binary-watch.service
+  hway-box-heal.service hway-box-heal.timer hway-config-refresh.service
+  hway-config-refresh.timer hway-config-watch.service hway-config-watch.timer
+  hway-disk-guard.service hway-disk-guard.timer hway-killswitch-watch.service
+  hway-logrotate.timer hway-supervisor-watch.service hway-supervisor-watch.timer
+  hway-support-watch.service hway-support-watch.timer nebula-hway-renew.service
 )
 # The default pattern list must match every one of them. `hw-*` needs the hyphen
 # straight after "hw" and `highway*` needs an "i", so neither matches "hway-".
@@ -2756,6 +2764,115 @@ eq 'every unit on a real relayer OS is tracked' '' "${_unmatched[*]}"
 # The specific regression: without hway* the relayer itself is invisible.
 falsy 'hw-* does not match hway-relayer.service' '[[ hway-relayer.service == hw-* ]]'
 falsy 'highway* does not match hway-relayer.service' '[[ hway-relayer.service == highway* ]]'
+
+# ---------------------------------------------------------------------------
+section 'base system services'
+# ---------------------------------------------------------------------------
+# sshd, cron, the network stack, time sync and the journal are reported apart from
+# the Highway units. Fixture: what `systemctl list-units --all` prints when the
+# patterns name units that exist (ssh, cron, rsyslog), one that failed, and units
+# that do not exist (sshd is an alias that is absent here, NetworkManager is not
+# installed) -- those come back as `not-found` and must not be reported.
+_bs_systemctl() {
+  case $1 in
+    list-units)
+      printf '%s\n' \
+        'cron.service loaded active running Regular background program processing daemon' \
+        'ssh.service loaded active running OpenBSD Secure Shell server' \
+        'rsyslog.service loaded failed failed System Logging Service' \
+        'sshd.service not-found inactive dead sshd.service' \
+        'NetworkManager.service not-found inactive dead NetworkManager.service' \
+        'ufw.service loaded active exited Uncomplicated firewall' \
+        'systemd-timesyncd.timer loaded active waiting not a service'
+      ;;
+    show)
+      local u=${*: -1}
+      case $u in
+        rsyslog.service) printf 'ActiveState=failed\nSubState=failed\nNRestarts=3\nMemoryCurrent=[not set]\nExecMainStartTimestampMonotonic=0\n' ;;
+        ufw.service) printf 'ActiveState=active\nSubState=exited\nNRestarts=0\nMemoryCurrent=[not set]\nExecMainStartTimestampMonotonic=0\n' ;;
+        *) printf 'ActiveState=active\nSubState=running\nNRestarts=0\nMemoryCurrent=2097152\nExecMainStartTimestampMonotonic=5000000\n' ;;
+      esac
+      ;;
+  esac
+}
+(
+  systemctl() { _bs_systemctl "$@"; }
+  _HAVE[systemctl]=1
+  CFG[base_track]=on
+  bs_units 1
+  [[ $BS_UNIT_COUNT == 4 && $BS_ACTIVE == 3 && $BS_FAILED == 1 ]] || exit 1
+  [[ " ${BS_UNITS[*]} " == *' ssh.service '* ]] || exit 1
+  [[ ${BS_STATE[rsyslog.service]} == failed && ${BS_RESTARTS[rsyslog.service]} == 3 ]] || exit 1
+  [[ ${BS_SUB[ufw.service]} == exited && ${BS_STATE[ufw.service]} == active ]] || exit 1
+  # not-found units and non-services never appear
+  [[ " ${BS_UNITS[*]} " != *sshd.service* && " ${BS_UNITS[*]} " != *NetworkManager* && " ${BS_UNITS[*]} " != *timesyncd.timer* ]]
+) && ok || bad 'base services: wrong units, counts or states from systemctl'
+
+(
+  called=0
+  systemctl() { called=1; _bs_systemctl "$@"; }
+  _HAVE[systemctl]=1
+  CFG[base_track]=off
+  bs_units 1
+  [[ $BS_UNIT_COUNT == 0 && ${#BS_UNITS[@]} == 0 && $called == 0 ]]
+) && ok || bad 'base_track=off must collect nothing and never call systemctl'
+
+# Every unit a plain Ubuntu 24.04 server runs that matters must be matched by the
+# shipped patterns, by exact name.
+_bs_missing=()
+for _u in ssh.service cron.service rsyslog.service dbus.service systemd-networkd.service \
+          systemd-resolved.service systemd-timesyncd.service systemd-journald.service \
+          systemd-logind.service unattended-upgrades.service qemu-guest-agent.service; do
+  _bs_hit=0
+  _oIFS=$IFS; IFS=,
+  for _p in ${CFG[base_units]}; do
+    # shellcheck disable=SC2053
+    [[ $_u == $_p ]] && { _bs_hit=1; break; }
+  done
+  IFS=$_oIFS
+  ((_bs_hit)) || _bs_missing+=("$_u")
+done
+eq 'the default base_units cover a plain Ubuntu server' '' "${_bs_missing[*]}"
+eq 'base service tracking is on by default' 'on' "$(_default_of base_track)"
+falsy 'base_units never names a Highway unit (those stay in their own section)' \
+  '[[ ${CFG[base_units]} == *hway* || ${CFG[base_units]} == *nebula* ]]'
+
+# The payload carries it as its own `system` object, with failed unit names even
+# for units nobody listed, and stays valid JSON when a name needs escaping.
+(
+  systemctl() { _bs_systemctl "$@"; }
+  _HAVE[systemctl]=1
+  CFG[base_track]=on
+  bs_units 1
+  FAILED_UNITS=(rsyslog.service 'odd"name.service')
+  UPTIME_S=100
+  cloud_payload_v
+  printf '%s' "$CLOUD_PAYLOAD" | python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+s = p["system"]
+assert s["tracked"] is True and s["units_total"] == 4 and s["units_active"] == 3 and s["units_failed"] == 1, s
+u = {x["name"]: x for x in s["units"]}
+assert u["rsyslog.service"]["state"] == "failed" and u["rsyslog.service"]["restarts"] == 3, u
+assert u["rsyslog.service"]["memory"] is None, "an unset MemoryCurrent must be null, not a number"
+assert u["ssh.service"]["memory"] == 2097152 and u["ssh.service"]["active_s"] == 95, u["ssh.service"]
+assert s["failed_units"] == ["rsyslog.service", "odd\"name.service"], s["failed_units"]
+assert "highway" in p and "units" in p["highway"], "the Highway section must be unchanged"
+'
+) && ok || bad 'the payload does not carry a valid system section'
+(
+  systemctl() { _bs_systemctl "$@"; }
+  _HAVE[systemctl]=1
+  CFG[base_track]=off
+  bs_units 1
+  FAILED_UNITS=()
+  cloud_payload_v
+  printf '%s' "$CLOUD_PAYLOAD" | python3 -c '
+import json, sys
+s = json.load(sys.stdin)["system"]
+assert s["tracked"] is False and s["units"] == [] and s["units_total"] == 0, s
+'
+) && ok || bad 'with base_track=off the payload must say so and carry no units'
 
 # The node process comes from the relayer unit's MainPID, not from a comm scan.
 # /proc/<pid>/comm is capped at 15 chars, so hway-relayer-supervise shows up as

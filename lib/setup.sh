@@ -339,6 +339,13 @@ highway_units=${CFG[highway_units]}
 # metadata and the journal.
 highway_version_probe=${CFG[highway_version_probe]}
 
+# --- Base system services ----------------------------------------------------
+# sshd, cron, the network stack, time sync and the journal, reported to the portal
+# as their own section. Read-only, like the Highway tracking above. Only units that
+# exist on this box are reported.
+base_track=${CFG[base_track]}
+base_units=${CFG[base_units]}
+
 # --- notifications -----------------------------------------------------------
 # There is nothing to configure here. Recipients, the provider account, the
 # schedule and the message templates all live in the web portal; pair this machine

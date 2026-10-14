@@ -925,6 +925,35 @@ opt into running `highway --version`.
 
 Turn the whole thing off with `highway_track=off`.
 
+## Base system services
+
+A relay box that cannot be reached over ssh, has no time sync or has lost its journal
+is unhealthy whatever the node is doing, so the agent reports the base Ubuntu services
+as their own section, apart from the Highway units, whether or not a Highway node is
+installed.
+
+Default list (`base_units`, exact names, only units that exist are reported):
+`ssh`, `sshd`, `cron`, `rsyslog`, `dbus`, `systemd-networkd`, `NetworkManager`,
+`systemd-resolved`, `systemd-timesyncd`, `chrony`, `systemd-journald`,
+`systemd-logind`, `unattended-upgrades`, `qemu-guest-agent`, `ufw` and `fail2ban`.
+Both `ssh` and `sshd` can be listed because a name that does not exist (`not-found`)
+is skipped, which is how an alias or an uninstalled service stays out of the report.
+A unit that is stopped on purpose, such as `systemd-timesyncd` on a box that runs
+`chrony`, shows as muted rather than as an alarm. Only `failed` is red.
+
+The push also carries `failed_units`: the name of **every** unit systemd reports as
+failed, listed or not, capped at 16. A service nobody thought to track therefore shows
+up on the dashboard the moment it fails. Names only, never log text. Turn the section
+off with `base_track=off`. It is read-only, like the Highway tracking, and the
+self-check enforces that.
+
+**Rollout order matters.** The database keeps only the payload keys it knows, so an
+agent that sends `system` to a database that has not been upgraded has the section
+silently dropped. Apply `supabase/migrations/20261014120000_system_units.sql` first
+(it also raises the Highway unit cap from 32 to 48; a current relayer box already
+sends 27), then deploy the portal, then roll out the agent. The migration replaces one
+function and is safe to re-run.
+
 ## Configuration
 
 `/etc/hyn-view/config`, or `~/.config/hyn-view/config` for a single user. Run
@@ -950,6 +979,8 @@ Keys worth knowing:
 | `speedtest_provider` | `auto` | prefers Ookla `speedtest`, then `speedtest-cli`, then `curl` |
 | `power_track` | `on` | RAPL, hwmon power rails and mains/battery state |
 | `highway_track` | `on` | node panel |
+| `base_track` | `on` | report the base Ubuntu services (ssh, cron, network, time sync, journal) to the portal as their own section |
+| `base_units` | `ssh.service,cron.service,…` | exact unit names, comma separated; only units that exist on the box are reported |
 | `profile` | `best` | `best` or `performance` |
 | `notify_access_details` | `off` | set `on` only to include run-as/session usernames, session source IPs and the worst rejected-login IP in notifications |
 | `alert_min_severity` | `warn` | `crit`, `warn` or `info` |

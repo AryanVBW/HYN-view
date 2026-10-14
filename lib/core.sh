@@ -122,6 +122,12 @@ declare -A CFG=(
   # units active" while hway-logrotate.service sat in `failed` and the relayer
   # itself was not being watched at all.
   [highway_units]='highway*,hway*,hw-*,nebula*,mosaic*'
+  # The base Ubuntu services a server needs to be reachable, correctly timed and
+  # loggable, reported to the portal apart from the Highway units. Only units that
+  # exist on the box are reported, so listing both systemd-timesyncd and chrony is
+  # fine. Exact unit names, not globs, so `ssh` does not drag in `ssh@.service`.
+  [base_track]=on
+  [base_units]='ssh.service,sshd.service,cron.service,rsyslog.service,dbus.service,systemd-networkd.service,NetworkManager.service,systemd-resolved.service,systemd-timesyncd.service,chrony.service,systemd-journald.service,systemd-logind.service,unattended-upgrades.service,qemu-guest-agent.service,ufw.service,fail2ban.service'
 
   # --- notification delivery -------------------------------------------------
   # There is nothing to configure here, and that is the point.
