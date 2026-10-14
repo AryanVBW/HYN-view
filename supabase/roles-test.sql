@@ -30,7 +30,7 @@ begin
   foreach uid in array array['10000000-0000-4000-8000-000000000004','10000000-0000-4000-8000-000000000002'] loop
     perform set_config('test.uid',uid,true);
     for r in select p.* from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public'
-      and p.proname like 'hyn_admin_%' and p.proname not in ('hyn_admin_overview','hyn_admin_nodes','hyn_admin_clients','hyn_admin_notifications','hyn_admin_audit','hyn_admin_templates','hyn_admin_delivery_dashboard','hyn_admin_set_role','hyn_admin_promote_by_email') loop
+      and p.proname like 'hyn_admin_%' and p.proname not in ('hyn_admin_overview','hyn_admin_nodes','hyn_admin_clients','hyn_admin_notifications','hyn_admin_audit','hyn_admin_templates','hyn_admin_delivery_dashboard','hyn_admin_billing_dashboard','hyn_admin_billing_user','hyn_admin_set_role','hyn_admin_promote_by_email') loop
       select string_agg('null::'||format_type(t,null),',') into args from unnest(r.proargtypes::oid[]) t;
       denied:=false;
       begin execute format('select public.%I(%s)',r.proname,coalesce(args,''));

@@ -12,7 +12,10 @@ declare
   v_internal text[] := array[
     'admin_allowlist', 'admin_report_jobs', 'cloud_email_dispatches', 'delivery_attempts',
     'delivery_digest_settings', 'delivery_events', 'delivery_rules', 'device_codes',
-    'node_watchdogs', 'notification_templates', 'web_notification_jobs'];
+    'node_watchdogs', 'notification_templates', 'web_notification_jobs',
+    'billing_settings', 'billing_subscriptions', 'billing_mandates', 'billing_invoices',
+    'billing_charges', 'billing_manual_payments', 'billing_pending_items', 'billing_coupons',
+    'billing_discounts', 'billing_events'];
   v_service_only text[] := array[
     'hyn_claim_web_notification', 'hyn_complete_web_notification', 'hyn_defer_web_delivery',
     'hyn_reserve_delivery', 'hyn_complete_delivery', 'hyn_due_user_digests',
@@ -63,7 +66,8 @@ begin
   for r in
     select p.oid::regprocedure as sig from pg_proc p join pg_namespace n on n.oid = p.pronamespace
      where n.nspname = 'public'
-       and ((p.proname like '\_hyn\_%' and p.proname <> '_hyn_portal_config_valid') or p.proname = any(v_service_only))
+       and ((p.proname like '\_hyn\_%' and p.proname <> '_hyn_portal_config_valid') or p.proname = any(v_service_only)
+            or p.proname like 'hyn\_billing\_svc\_%')
        and (has_function_privilege('anon', p.oid, 'EXECUTE') or has_function_privilege('authenticated', p.oid, 'EXECUTE'))
   loop
     v_problems := v_problems || format('anon/authenticated can execute %s', r.sig);
