@@ -873,12 +873,34 @@ the currently published one.
 **Unit discovery is by name pattern, and the default list is
 `highway*,hway*,hw-*,nebula*,mosaic*`.** `hway*` is not redundant. Highway
 Relayer OS names its units `hway-relayer.service`, `hway-monitor.service`,
-`hway-otel-agent.service` and so on — `highway*` needs an "i" and `hw-*` needs the
+`hway-traffic-shaper.service` and so on — `highway*` needs an "i" and `hw-*` needs the
 hyphen straight after "hw", so without `hway*` the only units that matched on a
 production relay node were the Nebula ones. The panel reported "ok, 3 units
 active" while the relayer itself was untracked and `hway-logrotate.service` sat in
 `failed`. Add your own patterns to `highway_units` if your node names units
 differently.
+
+**What a current relay node runs.** Checked against an Ubuntu 24.04 Highway
+relayer box (October 2026). Every unit below is matched by the default patterns;
+nothing needs configuring. `hway-otel-agent` and `hway-otel-mtls-shim`, which older
+releases shipped, are gone, and a number of timer-driven watchers are new.
+
+| Role | Units | Kind |
+| --- | --- | --- |
+| Relayer | `hway-relayer.service` | long-running |
+| Network and traffic | `hway-monitor.service`, `hway-traffic-shaper.service` | long-running; the shaper is a one-shot that stays `active (exited)` |
+| Mesh tunnel | `nebula-hway.service`, `nebula-guard.service`, `nebula-hway-renew.{service,timer}` | long-running, plus a daily certificate renewal |
+| Self-heal and maintenance | `hway-agent-watch`, `hway-binary-watch`, `hway-box-heal`, `hway-config-refresh`, `hway-config-watch`, `hway-disk-guard`, `hway-killswitch-watch`, `hway-logrotate`, `hway-supervisor-watch`, `hway-support-watch` (each a `.timer` plus a one-shot `.service`) | scheduled |
+
+Services and timers are told apart because they mean opposite things when idle. A
+**service** is meant to stay up, so `inactive` is a problem. A **timer** is meant to
+stay scheduled, and the one-shot service it triggers rests at `inactive (dead)`
+between runs, which is its normal state. The portal therefore counts running
+*services* separately from *scheduled jobs*, groups the table by the roles above,
+shows a resting one-shot as "idle between runs", and marks a timer that is no longer
+scheduled amber. Counting timers as services is how a box with five services and
+eleven timers once read as "16 services running", and how a stopped relayer could
+still read as "Running".
 
 The node process is identified from the relayer unit's own `MainPID` rather than
 by scanning `/proc` for a command name. `/proc/<pid>/comm` is capped at 15
