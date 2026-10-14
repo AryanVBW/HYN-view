@@ -332,6 +332,7 @@ speedtest_history=${CFG[speedtest_history]}
 # All of this is read-only. hyn never starts, stops or reconfigures the node.
 highway_track=${CFG[highway_track]}
 highway_update_check=${CFG[highway_update_check]}
+hw_maint_grace_min=${CFG[hw_maint_grace_min]}
 highway_units=${CFG[highway_units]}
 # off (default) | exec. 'exec' allows running \`highway --version\` to identify
 # the build. Left off because that means executing a validator's own binary
@@ -391,6 +392,7 @@ alert_loss_pct=${CFG[alert_loss_pct]}
 alert_speed_min_pct=${CFG[alert_speed_min_pct]}
 alert_fd_pct=${CFG[alert_fd_pct]}
 alert_hw_restarts=${CFG[alert_hw_restarts]}
+alert_hw_cert_days=${CFG[alert_hw_cert_days]}
 alert_hw_journal_err=${CFG[alert_hw_journal_err]}
 
 # --- daily report ------------------------------------------------------------

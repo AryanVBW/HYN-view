@@ -113,6 +113,7 @@ declare -A CFG=(
   [speedtest_history]=90
   [highway_track]=on
   [highway_update_check]=on
+  [hw_maint_grace_min]=30
   [highway_version_probe]=off
   # `hway*` is not redundant with `highway*` or `hw-*`, and leaving it out was a
   # real blind spot: Highway Relayer OS names its units hway-relayer.service,
@@ -179,6 +180,7 @@ declare -A CFG=(
   [alert_speed_min_pct]=50
   [alert_fd_pct]=80
   [alert_hw_restarts]=3
+  [alert_hw_cert_days]=14
   [alert_hw_journal_err]=5
 
   # --- daily report ----------------------------------------------------------

@@ -5935,6 +5935,7 @@ begin
     ('power', array['input_w','input_src','cpu_w','dram_w','ac_online','battery_pct','battery_status','battery_w']),
     ('highway', array['present','health','version','units_active','units_failed','journal_err_1h','tracked','health_why','version_src','latest','update_available','bin_size','bin_mtime','units_total','journal_warn_1h','pid','cpu_tenths','rss','threads','fds','proc_uptime_s','mesh_iface','mesh_rx_bps','mesh_tx_bps','mesh_rx_total','mesh_tx_total','mesh_drops','qdisc','qdisc_drops','congestion','nft_tables']),
     ('system', array['tracked','units_total','units_active','units_failed']),
+    ('operations', array['box_state','action','action_why','renew_gate','overlay_left_s','cert_days','killswitch','held_down','network','os_version','relayer_version','config_version','backup_present','backup_age_s','backup_size','backup_stale','backup_perms_ok','backup_magic_ok','maintenance','maintenance_why']),
     ('platform', array['provider','provider_source','provider_confidence','virtualization','environment','metrics_scope','host_cpu_count','host_memory_bytes','cgroup_version','cpu_limit_cores','memory_limit_bytes','memory_current_bytes','cpu_throttled_usec','cpu_throttled_periods'])
   ) as groups(name, keys) loop
     if jsonb_typeof(p_payload->g.name) = 'object' then

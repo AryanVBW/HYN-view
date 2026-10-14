@@ -81,6 +81,28 @@ do $$ declare m public.metrics; begin
  raise notice 'PASS  base-system services and failed unit names are kept, bounded and free of unknown fields';
 end $$;
 
+-- Highway operations (the installer-menu recommendation and the local backup
+-- file state) survive sanitising as scalars; unknown fields and nested values do not.
+set local role anon;
+select public.hyn_ingest('detail-token',jsonb_build_object('ts',now()-interval '20 seconds','cpu',jsonb_build_object('pct',45),
+ 'operations',jsonb_build_object('box_state','certs-expired','action','REPAIR CONNECT','action_why','the overlay certificate lapsed',
+  'renew_gate','','overlay_left_s',-4000,'cert_days',77,'killswitch',false,'held_down',false,'network','mainnet',
+  'os_version','v1.0.8','relayer_version','v1.0.0','config_version',1,
+  'backup_present',true,'backup_age_s',962557,'backup_size',5344,'backup_stale',false,'backup_perms_ok',true,'backup_magic_ok',true,
+  'maintenance',false,'maintenance_why','','extra','sekrit-value','nested',jsonb_build_object('a',1))));
+reset role;
+do $$ declare m public.metrics; begin
+ select * into m from public.metrics where node_id='48000000-0000-4000-8000-000000000031' and cpu_pct=45 limit 1;
+ if m.payload#>>'{operations,action}' is distinct from 'REPAIR CONNECT' or m.payload#>>'{operations,box_state}' is distinct from 'certs-expired' then
+   raise exception 'operations recommendation dropped by the payload sanitiser'; end if;
+ if (m.payload#>>'{operations,backup_present}') is distinct from 'true' or (m.payload#>>'{operations,backup_size}') is distinct from '5344'
+    or (m.payload#>>'{operations,overlay_left_s}') is distinct from '-4000' or (m.payload#>>'{operations,cert_days}') is distinct from '77' then
+   raise exception 'operations backup or certificate fields dropped'; end if;
+ if m.payload::text like '%sekrit-value%' or m.payload#>'{operations}' ? 'nested' then
+   raise exception 'operations kept unknown fields'; end if;
+ raise notice 'PASS  Highway operations and backup state are kept as scalars, without unknown fields';
+end $$;
+
 -- More than 5,000 readings still produce the full 24-hour fleet chart.
 insert into public.nodes(id,owner,name,is_demo)
  select ('48000000-0000-4000-8000-00000000004'||n)::uuid,'48000000-0000-4000-8000-000000000022','fleet'||n,n=5 from generate_series(1,5) n;

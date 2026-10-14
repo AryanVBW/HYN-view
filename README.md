@@ -925,6 +925,42 @@ opt into running `highway --version`.
 
 Turn the whole thing off with `highway_track=off`.
 
+### Highway installer menu, backup and repair
+
+`curl -fsSL get.highway.space | sudo -H bash` installs the `highway` tool, and on a
+box that already has a relayer it opens a menu. The agent works out which entry
+applies from files Highway leaves behind, so the portal can say "choose X" before
+anyone logs in. It is read-only: it never opens a key, never runs the installer and
+never restarts a unit.
+
+| Menu entry | What it does | The agent reports it when |
+|---|---|---|
+| `UPDATE & REPAIR` | refreshes the agent stack and timers; refuses without a valid overlay certificate | a newer `hw-os` release exists and nothing more urgent does |
+| `REPAIR CONNECT` | signs in again and issues new network credentials | the overlay certificate lapsed, the platform rejects it (`key_mismatch_401`), or the device is gone (`terminal_410`, `retired_403`) |
+| `REACTIVATE` | brings the box back with its existing registration | the certificate lapsed beyond the grace window (`beyond_grace_403`) |
+| `CREATE BACKUP` | seals the relayer keys with the manager mnemonic into `/root/highway-recovery-<name>.hrb` and uploads it to the account | no backup file exists, or a key file changed after it was made |
+| `START RELAYER` | undoes `STOP RELAYER`, which also writes `/etc/hway-relayer/relayer-held-down` | the relayer is not running |
+| `RESUME SETUP` | finishes an interrupted install | registration is pending, the unit is missing, or no keys exist |
+
+The recovery file is `HWRB` + version, then AES-256-GCM with a key derived from the
+mnemonic (scrypt), so it is useless without that phrase. What the agent checks is the
+**local file only**: present, age, size, owner-only mode, header, and whether
+`p2p_key` or `.env` are newer than it. Highway's account copy can only be queried
+with its own client certificate, so the dashboard says "local file" and does not
+claim to know about the account copy. Nothing from the file is ever sent; the
+payload carries those scalars and nothing else.
+
+While the `highway` installer process is open, `UPDATE & REPAIR` is restarting the
+very units that are watched. Unit alerts (`hw_failed`, `hw_inactive`,
+`hw_restarts`, `hw_tunnel_down`, `hw_not_running`, `hw_repair_needed`) are paused for
+`hw_maint_grace_min` minutes (default 30), then come back, so a terminal left open
+on a broken box still alerts. A relayer stopped with `STOP RELAYER` is reported as
+an info note (`hw_held_down`) rather than a critical outage.
+
+The overlay certificate lifetime is estimated from `host.crt`'s modification time
+(24h issue, renewed every 12h, one hour of margin) because the agent does not run
+the mesh tools.
+
 ## Base system services
 
 A relay box that cannot be reached over ssh, has no time sync or has lost its journal
@@ -979,6 +1015,8 @@ Keys worth knowing:
 | `speedtest_provider` | `auto` | prefers Ookla `speedtest`, then `speedtest-cli`, then `curl` |
 | `power_track` | `on` | RAPL, hwmon power rails and mains/battery state |
 | `highway_track` | `on` | node panel |
+| `hw_maint_grace_min` | `30` | minutes unit alerts stay paused while the Highway installer is open |
+| `alert_hw_cert_days` | `14` | warn when the Highway API certificate has this many days left and is not renewing |
 | `base_track` | `on` | report the base Ubuntu services (ssh, cron, network, time sync, journal) to the portal as their own section |
 | `base_units` | `ssh.service,cron.service,…` | exact unit names, comma separated; only units that exist on the box are reported |
 | `profile` | `best` | `best` or `performance` |

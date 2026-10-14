@@ -636,6 +636,33 @@ cloud_payload_v() {
   done
   p+=']}'
 
+  # What Highway's installer menu would recommend, worked out from files the box
+  # already keeps (lib/highway.sh hw_operations). Scalars only. The backup block
+  # describes the local file: Highway's account copy can only be queried with its
+  # own mTLS client, so the portal must not claim to know about it.
+  if ((HW_PRESENT)); then
+    p+=", \"operations\": {\"box_state\": \"$(_jstr "${HW_OPS_STATE:-}")\""
+    p+=", \"action\": \"$(_jstr "${HW_OPS_ACTION:-none}")\""
+    p+=", \"action_why\": \"$(_jstr "${HW_OPS_WHY:-}")\""
+    p+=", \"renew_gate\": \"$(_jstr "${HW_OPS_GATE:-}")\""
+    p+=", \"overlay_left_s\": $(_jnum "${HW_OVERLAY_LEFT:-}")"
+    p+=", \"cert_days\": $(_jnum "${HW_CERT_DAYS:-}")"
+    p+=", \"killswitch\": $( ((HW_KILLSWITCH)) && printf true || printf false)"
+    p+=", \"held_down\": $( ((HW_HELD)) && printf true || printf false)"
+    p+=", \"network\": \"$(_jstr "${HW_NETWORK:-}")\""
+    p+=", \"os_version\": \"$(_jstr "${HW_OS_VERSION:-}")\""
+    p+=", \"relayer_version\": \"$(_jstr "${HW_RELAYER_VERSION:-}")\""
+    p+=", \"config_version\": $(_jnum "${HW_CONFIG_VERSION:-}")"
+    p+=", \"backup_present\": $( ((HW_BK_PRESENT)) && printf true || printf false)"
+    p+=", \"backup_age_s\": $(_jnum "${HW_BK_AGE:-}")"
+    p+=", \"backup_size\": $(_jnum "${HW_BK_SIZE:-}")"
+    p+=", \"backup_stale\": $( ((HW_BK_STALE)) && printf true || printf false)"
+    p+=", \"backup_perms_ok\": $( ((HW_BK_PERMS_OK)) && printf true || printf false)"
+    p+=", \"backup_magic_ok\": $( ((HW_BK_MAGIC_OK)) && printf true || printf false)"
+    p+=", \"maintenance\": $( ((HW_MAINT)) && printf true || printf false)"
+    p+=", \"maintenance_why\": \"$(_jstr "${HW_MAINT_WHY:-}")\"}"
+  fi
+
   # Every rule firing now, plus the ones the alert timer last recorded as firing
   # that are clear now, so the portal's event log is the same truth the email
   # alerts are built from rather than a second, drifting judgement. The list of

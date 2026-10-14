@@ -533,6 +533,259 @@ hw_health() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# operations: what Highway's own installer menu would tell the operator to do
+# ---------------------------------------------------------------------------
+# `sudo highway` opens a menu whose options map onto the state of the box:
+#
+#   UPDATE & REPAIR   refresh the agent stack and timers; needs a valid overlay
+#                     certificate and refuses without one
+#   REPAIR CONNECT    re-register after the certificate lapsed, was revoked or
+#                     does not match; needs a browser sign-in
+#   REACTIVATE        like repair but keeps the registration (beyond grace)
+#   CREATE BACKUP     seal the relayer keys with the manager mnemonic into
+#                     /root/highway-recovery-<name>.hrb and upload that to the
+#                     account
+#   START RELAYER     undo STOP RELAYER (which also writes a held-down marker)
+#
+# The menu only appears when someone is at the terminal. Everything it decides
+# from is already on disk, and this reads it without touching it: it never opens
+# a key, never reads the backup past its four-byte header, and never runs or
+# restarts anything. The answer goes to the dashboard as "choose X", so the
+# person looking at the portal knows which option to pick before they SSH in.
+: "${HW_ETC:=/etc/hway-relayer}"
+: "${HW_NEBULA_DIR:=/etc/nebula-hway}"
+: "${HW_BK_DIR:=/root}"
+: "${HW_UNIT_FILE:=/etc/systemd/system/hway-relayer.service}"
+HW_OPS_STATE='absent' HW_OPS_ACTION='none' HW_OPS_WHY='' HW_OPS_GATE=''
+HW_OVERLAY_LEFT='' HW_CERT_DAYS='' HW_KILLSWITCH=0 HW_HELD=0
+HW_NETWORK='' HW_OS_VERSION='' HW_RELAYER_VERSION='' HW_CONFIG_VERSION=''
+HW_BK_PRESENT=0 HW_BK_AGE='' HW_BK_SIZE='' HW_BK_STALE=0 HW_BK_PERMS_OK=1 HW_BK_MAGIC_OK=1
+HW_MAINT=0 HW_MAINT_QUIET=0 HW_MAINT_WHY=''
+HW_OPS_LAST=0 HW_BK_LAST=0 HW_BK_MTIME=0
+
+# _hw_json <file> <key>: a flat JSON scalar into REPLY. These state files are
+# written by Highway's own scripts as one flat object, so a pattern is enough and
+# there is no jq to depend on. Bounded read; an absent key returns 1.
+_hw_json() {
+  REPLY=''
+  [[ -r $1 ]] || return 1
+  local c=''
+  IFS= read -r -d '' -N 65536 c <"$1" 2>/dev/null
+  if [[ $c =~ \"$2\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]]; then
+    REPLY=${BASH_REMATCH[1]}
+  elif [[ $c =~ \"$2\"[[:space:]]*:[[:space:]]*(-?[0-9]+|true|false) ]]; then
+    REPLY=${BASH_REMATCH[1]}
+  else
+    return 1
+  fi
+  return 0
+}
+
+# _hw_line <file>: first line of a one-value file, capped, into REPLY.
+_hw_line() {
+  REPLY=''
+  [[ -r $1 ]] || return 1
+  IFS= read -r -N 64 REPLY <"$1" 2>/dev/null
+  REPLY=${REPLY%%$'\n'*}
+  REPLY=${REPLY//[[:space:]]/}
+  [[ -n $REPLY ]]
+}
+
+# Seconds until the overlay (Nebula) certificate lapses; negative once it has.
+# This is an estimate, and deliberately so: the agent never runs the mesh tools
+# (see the read-only guard in the self-check), so it does not decode the
+# certificate. Highway issues it for 24 hours (its own docs and installer say so)
+# and renews every 12, writing host.crt each time, which makes the file's
+# modification time the issue time. A box that renews normally never has a
+# certificate older than about 12.5 hours; the caller only treats it as lapsed
+# an hour past the 24h mark, so a changed lifetime cannot raise a false alarm.
+: "${HW_OVERLAY_LIFETIME:=86400}"
+hw_overlay_left() {
+  local now=${EPOCHSECONDS:-0} crt=$HW_NEBULA_DIR/host.crt m
+  HW_OVERLAY_LEFT=''
+  [[ -f $crt && ! -L $crt ]] || return 1
+  have stat || return 1
+  m=$(stat -c %Y "$crt" 2>/dev/null) || return 1
+  [[ $m =~ ^[0-9]+$ ]] || return 1
+  HW_OVERLAY_LEFT=$((m + HW_OVERLAY_LIFETIME - now))
+  return 0
+}
+
+# The recovery backup, judged from the file alone. Highway keeps the account copy
+# in the platform; only its mTLS client can ask whether that exists, so what is
+# reported here is the local file, and the dashboard says so.
+hw_backup() {
+  local now=${EPOCHSECONDS:-0} f m sz mode name best='' bm=0 bsz='' bmode=''
+  if ((HW_BK_LAST > 0 && now - HW_BK_LAST < 300)); then
+    ((HW_BK_PRESENT)) && HW_BK_AGE=$((now - HW_BK_MTIME))
+    return 0
+  fi
+  HW_BK_LAST=$now
+  HW_BK_PRESENT=0 HW_BK_AGE='' HW_BK_SIZE='' HW_BK_STALE=0 HW_BK_PERMS_OK=1 HW_BK_MAGIC_OK=1
+  have stat || return 0
+  while IFS=' ' read -r m sz mode name; do
+    [[ $m =~ ^[0-9]+$ && $name == */highway-recovery-*.hrb ]] || continue
+    ((m > bm)) && { bm=$m; bsz=$sz; bmode=$mode; best=$name; }
+  done < <(stat -c '%Y %s %a %n' "$HW_BK_DIR"/highway-recovery-*.hrb 2>/dev/null)
+  [[ -n $best && ! -L $best ]] || return 0
+  HW_BK_PRESENT=1
+  HW_BK_MTIME=$bm
+  HW_BK_AGE=$((now - bm))
+  ((HW_BK_AGE < 0)) && HW_BK_AGE=0
+  HW_BK_SIZE=$bsz
+  # The bundle holds the relayer keys, so anything but owner-only is a leak.
+  [[ $bmode == 600 || $bmode == 400 ]] || HW_BK_PERMS_OK=0
+  local magic=''
+  IFS= read -r -N 4 magic <"$best" 2>/dev/null
+  [[ $magic == HWRB ]] || HW_BK_MAGIC_OK=0
+  # Stale once a key file changed after the backup was sealed: a restore would
+  # bring back the old identity. default.toml is left out on purpose, because
+  # the config-refresh timer rewrites it routinely.
+  local cfg k km
+  for cfg in "$HW_ETC"/relayers/*/config; do
+    [[ -d $cfg ]] || continue
+    for k in p2p_key .env; do
+      [[ -f $cfg/$k && ! -L $cfg/$k ]] || continue
+      km=$(stat -c %Y "$cfg/$k" 2>/dev/null) || continue
+      [[ $km =~ ^[0-9]+$ ]] && ((km > bm + 60)) && HW_BK_STALE=1
+    done
+    break
+  done
+  return 0
+}
+
+# Is somebody running the Highway installer right now? Its update and repair
+# restart the very units this agent watches, so while it is open a failing unit
+# is the operator's own work, not an incident. Suppression is bounded
+# (hw_maint_grace_min) so a terminal left open on a broken box still alerts.
+hw_maintenance() {
+  local now=${EPOCHSECONDS:-0} d c f since grace
+  HW_MAINT=0 HW_MAINT_QUIET=0 HW_MAINT_WHY=''
+  for d in "${HYN_PROC:-/proc}"/[0-9]*; do
+    [[ -r $d/comm ]] || continue
+    c=''
+    read -r c <"$d/comm" 2>/dev/null || continue
+    [[ $c == highway ]] && { HW_MAINT=1; HW_MAINT_WHY='the Highway installer is open on this machine'; break; }
+  done
+  state_dir_v
+  f="$STATE_DIR/hw-maint-since"
+  if ((HW_MAINT == 0)); then
+    [[ -e $f ]] && rm -f "$f" 2>/dev/null
+    return 0
+  fi
+  [[ -d $STATE_DIR ]] || mkdir -p "$STATE_DIR" 2>/dev/null
+  since=''
+  [[ -r $f ]] && read -r since <"$f" 2>/dev/null
+  if [[ ! $since =~ ^[0-9]+$ ]]; then
+    since=$now
+    printf '%s\n' "$now" >"$f" 2>/dev/null
+  fi
+  grace=${CFG[hw_maint_grace_min]:-30}
+  [[ $grace =~ ^[0-9]+$ ]] || grace=30
+  if ((now - since < grace * 60)); then
+    HW_MAINT_QUIET=1
+  else
+    HW_MAINT_WHY="the Highway installer has been open for over ${grace}m"
+  fi
+  return 0
+}
+
+hw_operations() {
+  local force=${1:-0} now=${EPOCHSECONDS:-0}
+  ((force == 0 && HW_OPS_LAST > 0 && now - HW_OPS_LAST < 30)) && return 0
+  HW_OPS_LAST=$now
+  HW_OPS_STATE='absent' HW_OPS_ACTION='none' HW_OPS_WHY='' HW_OPS_GATE=''
+  HW_CERT_DAYS='' HW_KILLSWITCH=0 HW_HELD=0
+  HW_NETWORK='' HW_OS_VERSION='' HW_RELAYER_VERSION='' HW_CONFIG_VERSION=''
+  hw_maintenance
+  ((HW_PRESENT)) || return 0
+
+  _hw_line "$HW_ETC/hw-os-version" && HW_OS_VERSION=$REPLY
+  _hw_line "$HW_ETC/network" && HW_NETWORK=$REPLY
+  _hw_line "$HW_ETC/applied-config-version" && [[ $REPLY =~ ^[0-9]+$ ]] && HW_CONFIG_VERSION=$REPLY
+  _hw_json "$HW_ETC/binary-swap-state.json" version && HW_RELAYER_VERSION=$REPLY
+  _hw_json "$HW_ETC/api-cert-state.json" days_left && [[ $REPLY =~ ^-?[0-9]+$ ]] && HW_CERT_DAYS=$REPLY
+  _hw_json "$HW_ETC/killswitch-state.json" engaged && [[ $REPLY == true ]] && HW_KILLSWITCH=1
+  _hw_json "$HW_ETC/renew-state.json" gate && HW_OPS_GATE=$REPLY
+  [[ -e $HW_ETC/relayer-held-down ]] && HW_HELD=1
+  hw_overlay_left
+  hw_backup
+
+  # The same decision tree the installer uses to pick its menu (computeBoxStatus).
+  local has_identity=0 enrolled=0 cfg reg=''
+  for cfg in "$HW_ETC"/relayers/*/config; do
+    [[ -f $cfg/p2p_key ]] && { has_identity=1; break; }
+  done
+  [[ -e $HW_ETC/api.crt || -e $HW_NEBULA_DIR/host.crt ]] && enrolled=1
+  _hw_line "$HW_ETC/registration-state" && reg=$REPLY
+  local relayer_up=0
+  [[ ${HW_STATE[hway-relayer.service]:-} == active ]] && relayer_up=1
+  local lapsed=0
+  [[ $HW_OVERLAY_LEFT =~ ^-?[0-9]+$ ]] && ((HW_OVERLAY_LEFT <= -3600)) && lapsed=1
+
+  if ((!has_identity && !enrolled)); then
+    HW_OPS_STATE='fresh'
+  elif ((!has_identity)); then
+    HW_OPS_STATE='enrolled-no-relayer'
+  elif [[ $reg == pending ]]; then
+    HW_OPS_STATE='relayer-unregistered'
+  elif [[ ! -e $HW_UNIT_FILE ]]; then
+    HW_OPS_STATE='install-incomplete'
+  elif [[ $HW_OPS_GATE == key_mismatch_401 ]]; then
+    HW_OPS_STATE='key-mismatch'
+  elif ((lapsed)); then
+    case $HW_OPS_GATE in
+      terminal_410 | retired_403) HW_OPS_STATE='deregistered' ;;
+      beyond_grace_403) HW_OPS_STATE='awaiting-reactivation' ;;
+      *) HW_OPS_STATE='certs-expired' ;;
+    esac
+  elif ((!relayer_up)); then
+    HW_OPS_STATE='installed-stopped'
+  else
+    HW_OPS_STATE='installed'
+  fi
+
+  case $HW_OPS_STATE in
+    certs-expired)
+      HW_OPS_ACTION='REPAIR CONNECT'
+      HW_OPS_WHY='the overlay certificate lapsed; the relayer cannot reach the network' ;;
+    key-mismatch)
+      HW_OPS_ACTION='REPAIR CONNECT'
+      HW_OPS_WHY="the platform rejects this machine's certificate; renewal keeps failing" ;;
+    deregistered)
+      HW_OPS_ACTION='REPAIR CONNECT'
+      HW_OPS_WHY='the platform no longer has this device; repair registers it again (the address may change)' ;;
+    awaiting-reactivation)
+      HW_OPS_ACTION='REACTIVATE'
+      HW_OPS_WHY='the certificate lapsed beyond the grace window; reactivation keeps the registration' ;;
+    relayer-unregistered | install-incomplete | enrolled-no-relayer)
+      HW_OPS_ACTION='RESUME SETUP'
+      HW_OPS_WHY='setup never finished on this machine' ;;
+    installed-stopped)
+      HW_OPS_ACTION='START RELAYER'
+      if ((HW_HELD)); then
+        HW_OPS_WHY='the relayer was stopped on purpose and is held down'
+      else
+        HW_OPS_WHY='the relayer service is not running'
+      fi ;;
+    installed)
+      # Healthy box: pick the most valuable housekeeping. Losing the keys is
+      # permanent while a late update arrives on its own, so backup goes first.
+      if ((HW_BK_PRESENT == 0)); then
+        HW_OPS_ACTION='CREATE BACKUP'
+        HW_OPS_WHY='no recovery backup of the relayer keys exists on this machine'
+      elif ((HW_BK_STALE)); then
+        HW_OPS_ACTION='CREATE BACKUP'
+        HW_OPS_WHY='the relayer keys changed after the last backup was made'
+      elif ((HW_UPDATE)); then
+        HW_OPS_ACTION='UPDATE & REPAIR'
+        HW_OPS_WHY="${HW_LATEST:-a newer release} is available (installed: ${HW_OS_VERSION:-${HW_VERSION:-unknown}})"
+      fi ;;
+  esac
+  return 0
+}
+
 hw_sample() {
   local ms=$1
   cfg_on highway_track || return 0
@@ -546,5 +799,6 @@ hw_sample() {
   hw_version
   hw_latest_check
   hw_health
+  hw_operations
   return 0
 }

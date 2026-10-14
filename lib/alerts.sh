@@ -350,10 +350,19 @@ alerts_evaluate() {
 
   # --- Highway node ---
   if cfg_on highway_track && ((HW_PRESENT)); then
-    _check_num hw_failed crit "$HW_FAILED" 1 1 \
+    # While someone has the Highway installer open, UPDATE & REPAIR is restarting
+    # the units below on purpose. Those rules stand down for the grace window
+    # (hw_maint_grace_min) instead of paging for the operator's own work.
+    local q=$HW_MAINT_QUIET
+    local failed=$HW_FAILED
+    ((q)) && failed=0
+    _check_num hw_failed crit "$failed" 1 1 \
       "Highway: $HW_FAILED unit(s) in failed state"
     local inactive=0
-    ((HW_UNIT_COUNT > 0 && HW_ACTIVE == 0)) && inactive=1
+    ((HW_UNIT_COUNT > 0 && HW_ACTIVE == 0 && !q)) && inactive=1
+    # A relayer stopped with STOP RELAYER is held down deliberately: that is a
+    # fact worth one info line, not a critical "node is not relaying".
+    ((HW_HELD)) && inactive=0
     _check_bool hw_inactive crit "$inactive" \
       'Highway: no unit is active — the node is not relaying'
     local maxr=0 u r
@@ -361,20 +370,67 @@ alerts_evaluate() {
       r=${HW_RESTARTS[$u]:-0}
       [[ $r =~ ^[0-9]+$ ]] && ((r > maxr)) && maxr=$r
     done
+    ((q)) && maxr=0
     _check_num hw_restarts warn "$maxr" "${CFG[alert_hw_restarts]}" 1 \
       "Highway: unit has restarted ${maxr}x — likely crash-looping"
     _check_num hw_journal_err warn "$HW_JOURNAL_ERR" "${CFG[alert_hw_journal_err]}" 1 \
       "Highway: $HW_JOURNAL_ERR error(s) in the journal in the last hour"
     local notunnel=0
-    ((HW_ACTIVE > 0)) && [[ -z $HW_NEBULA ]] && notunnel=1
+    ((HW_ACTIVE > 0 && !q)) && [[ -z $HW_NEBULA ]] && notunnel=1
     _check_bool hw_tunnel_down warn "$notunnel" \
       'Highway: node is active but no Nebula mesh interface was found'
     _check_bool hw_update info "$HW_UPDATE" \
-      "Highway: ${HW_LATEST:-a newer version} is available (installed: ${HW_VERSION:-unknown})"
+      "Highway: ${HW_LATEST:-a newer version} is available (installed: ${HW_OS_VERSION:-${HW_VERSION:-unknown}}) — choose UPDATE & REPAIR in \`sudo highway\`"
     local pid_gone=0
-    ((HW_UNIT_COUNT == 0 && HW_PID == 0)) && pid_gone=1
+    ((HW_UNIT_COUNT == 0 && HW_PID == 0 && !q && !HW_HELD)) && pid_gone=1
     _check_bool hw_not_running warn "$pid_gone" \
       'Highway is installed but no process or unit is running'
+
+    # What the installer's menu would say. The connection states are the ones
+    # that stop the relayer earning and that UPDATE cannot fix, so they are
+    # critical and name the option that does.
+    local repair=0
+    case $HW_OPS_STATE in
+      certs-expired | key-mismatch | deregistered | awaiting-reactivation) ((q)) || repair=1 ;;
+    esac
+    _check_bool hw_repair_needed crit "$repair" \
+      "Highway: $HW_OPS_WHY — choose $HW_OPS_ACTION in \`sudo highway\`"
+    local setup=0
+    case $HW_OPS_STATE in
+      relayer-unregistered | install-incomplete | enrolled-no-relayer) ((q)) || setup=1 ;;
+    esac
+    _check_bool hw_setup_unfinished warn "$setup" \
+      "Highway: $HW_OPS_WHY — choose RESUME SETUP in \`sudo highway\`"
+    _check_bool hw_killswitch warn "$HW_KILLSWITCH" \
+      'Highway: the kill switch is engaged — the platform has told this relayer to stand down'
+    _check_bool hw_held_down info "$HW_HELD" \
+      'Highway: the relayer was stopped on purpose (STOP RELAYER) and stays down until START RELAYER'
+    local certdays=''
+    [[ $HW_CERT_DAYS =~ ^-?[0-9]+$ ]] && certdays=$((${CFG[alert_hw_cert_days]:-14} - HW_CERT_DAYS))
+    # Fires when days_left drops to the threshold: renewal starts at 30 days, so
+    # reaching 14 means it has been failing for two weeks.
+    local cd=0
+    [[ $certdays =~ ^-?[0-9]+$ ]] && ((certdays >= 0)) && cd=1
+    _check_bool hw_api_cert warn "$cd" \
+      "Highway: the API certificate has ${HW_CERT_DAYS:-?} day(s) left and is not renewing"
+    # Backup. Only a healthy, finished box is nagged: a half-installed one has
+    # nothing worth sealing yet.
+    local nb=0 sb=0 pb=0
+    if [[ $HW_OPS_STATE == installed || $HW_OPS_STATE == installed-stopped ]]; then
+      ((HW_BK_PRESENT == 0)) && nb=1
+      ((HW_BK_PRESENT && HW_BK_STALE)) && sb=1
+      ((HW_BK_PRESENT && (!HW_BK_PERMS_OK || !HW_BK_MAGIC_OK))) && pb=1
+    fi
+    _check_bool hw_no_backup info "$nb" \
+      'Highway: no recovery backup of the relayer keys exists — choose CREATE BACKUP in `sudo highway`; without it a lost machine means a lost relayer'
+    _check_bool hw_backup_stale info "$sb" \
+      'Highway: the relayer keys changed after the last backup — choose CREATE BACKUP to seal the current ones'
+    _check_bool hw_backup_unsafe warn "$pb" \
+      'Highway: the recovery backup file is readable by others or is not a valid bundle — it holds the relayer keys; fix with CREATE BACKUP and `chmod 600`'
+    local mtail="unit alerts are paused for up to ${CFG[hw_maint_grace_min]:-30}m"
+    ((HW_MAINT && !HW_MAINT_QUIET)) && mtail='unit alerts are live again'
+    _check_bool hw_maintenance info "$HW_MAINT" \
+      "Highway: ${HW_MAINT_WHY:-installer open} — $mtail"
   fi
   return 0
 }

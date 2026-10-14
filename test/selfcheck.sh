@@ -1367,6 +1367,208 @@ truthy 'missing mesh tunnel fires' 'frame_has_alert hw_tunnel_down'
 HW_NEBULA=nebula1
 CFG[highway_track]=off
 
+# ---------------------------------------------------------------------------
+section 'highway operations (installer menu, backup, maintenance)'
+# ---------------------------------------------------------------------------
+# `sudo highway` offers UPDATE & REPAIR, REPAIR CONNECT, REACTIVATE, CREATE BACKUP,
+# START RELAYER and RESUME SETUP depending on the state of the box. The agent works
+# out which one applies from the files Highway leaves behind, read-only, so the
+# portal can say "choose X" before anyone logs in. The fixture is a copy of what a
+# real relayer box holds (checked October 2026).
+_ops_saved=$(declare -p HW_UNITS HW_STATE HW_RESTARTS HYN_PROC HW_NEBULA HW_PRESENT HW_UPDATE HW_LATEST HW_VERSION HW_PID HW_FAILED HW_UNIT_COUNT HW_ACTIVE HW_JOURNAL_ERR 2>/dev/null)
+_ops_now=$EPOCHSECONDS
+_ops_root=$TMP/hwops
+_ops_build() {
+  rm -rf "$_ops_root"
+  mkdir -p "$_ops_root/etc/relayers/hway-relayer-0/config" "$_ops_root/nebula" "$_ops_root/root" "$_ops_root/proc"
+  printf 'k' >"$_ops_root/etc/relayers/hway-relayer-0/config/p2p_key"
+  printf 'e' >"$_ops_root/etc/relayers/hway-relayer-0/config/.env"
+  printf 'x' >"$_ops_root/etc/api.crt"
+  printf 'x' >"$_ops_root/nebula/host.crt"
+  touch -d "@$((_ops_now - 10800))" "$_ops_root/nebula/host.crt"
+  printf 'x' >"$_ops_root/unit.service"
+  printf 'v1.0.8\n' >"$_ops_root/etc/hw-os-version"
+  printf 'mainnet' >"$_ops_root/etc/network"
+  printf '1\n' >"$_ops_root/etc/applied-config-version"
+  printf 'registered\n' >"$_ops_root/etc/registration-state"
+  printf '%s' '{"version":"v1.0.0","source":"catchup","sha256":"aa"}' >"$_ops_root/etc/binary-swap-state.json"
+  printf '%s' '{"schema":1,"at":"2026-10-14T10:49:03Z","outcome":"valid","not_after":"2026-12-31T01:57:56Z","days_left":77,"http_code":""}' >"$_ops_root/etc/api-cert-state.json"
+  printf '%s' '{"schema":1,"at":"2026-10-14T12:22:38Z","engaged":false}' >"$_ops_root/etc/killswitch-state.json"
+  printf '%s' '{"schema":1,"at":"2026-10-14T03:30:14Z","exit_code":0,"http_code":"","gate":""}' >"$_ops_root/etc/renew-state.json"
+  # A sealed bundle starts with the magic HWRB and a version byte.
+  printf 'HWRB\001%s' 'ciphertext-would-follow' >"$_ops_root/root/highway-recovery-hway-alpha9.hrb"
+  chmod 600 "$_ops_root/root/highway-recovery-hway-alpha9.hrb"
+  touch -d "@$((_ops_now - 5000))" "$_ops_root/root/highway-recovery-hway-alpha9.hrb"
+  touch -d "@$((_ops_now - 9000))" "$_ops_root/etc/relayers/hway-relayer-0/config/p2p_key" "$_ops_root/etc/relayers/hway-relayer-0/config/.env"
+}
+_ops_run() {
+  HW_ETC=$_ops_root/etc HW_NEBULA_DIR=$_ops_root/nebula HW_BK_DIR=$_ops_root/root HW_UNIT_FILE=$_ops_root/unit.service
+  HW_PRESENT=1 HW_UPDATE=${1:-0} HW_LATEST=v1.0.10 HW_VERSION=v1.0.8
+  HW_STATE=([hway-relayer.service]=${2:-active})
+  HW_BK_LAST=0 HW_OPS_LAST=0
+  HYN_PROC=$_ops_root/proc
+  hw_operations 1
+}
+_ops_build; _ops_run 0
+eq 'a healthy, backed-up box needs nothing'      'installed:none' "$HW_OPS_STATE:$HW_OPS_ACTION"
+eq 'Highway os version is read from its own file' 'v1.0.8' "$HW_OS_VERSION"
+eq 'relayer version is the separate track'       'v1.0.0' "$HW_RELAYER_VERSION"
+eq 'network is read'                              'mainnet' "$HW_NETWORK"
+eq 'config version is read'                       '1' "$HW_CONFIG_VERSION"
+eq 'API certificate days left are read'           '77' "$HW_CERT_DAYS"
+eq 'kill switch off'                              '0' "$HW_KILLSWITCH"
+eq 'backup found'                                 '1' "$HW_BK_PRESENT"
+eq 'backup size is the file size'                 '28' "$HW_BK_SIZE"
+truthy 'backup age is measured from its mtime'    '((HW_BK_AGE >= 4990 && HW_BK_AGE <= 5100))'
+eq 'owner-only backup is fine'                    '1' "$HW_BK_PERMS_OK"
+eq 'backup has the bundle header'                 '1' "$HW_BK_MAGIC_OK"
+eq 'keys older than the backup are not stale'     '0' "$HW_BK_STALE"
+
+_ops_run 1
+eq 'a release is waiting: UPDATE & REPAIR'        'UPDATE & REPAIR' "$HW_OPS_ACTION"
+truthy 'and the reason names both versions'       '[[ $HW_OPS_WHY == *v1.0.10* && $HW_OPS_WHY == *v1.0.8* ]]'
+
+# Keys are permanent; a late update arrives by itself. Backup is recommended first.
+rm -f "$_ops_root"/root/highway-recovery-*.hrb
+_ops_run 1
+eq 'no backup file: CREATE BACKUP outranks update' 'CREATE BACKUP' "$HW_OPS_ACTION"
+eq 'no backup is reported as absent'               '0' "$HW_BK_PRESENT"
+
+_ops_build
+touch -d "@$((_ops_now - 100))" "$_ops_root/etc/relayers/hway-relayer-0/config/p2p_key"
+_ops_run 0
+eq 'a key changed after the backup: stale'        '1' "$HW_BK_STALE"
+eq 'stale backup recommends CREATE BACKUP'        'CREATE BACKUP' "$HW_OPS_ACTION"
+_ops_build
+touch -d "@$((_ops_now - 100))" "$_ops_root/etc/relayers/hway-relayer-0/config/default.toml" 2>/dev/null || printf 't' >"$_ops_root/etc/relayers/hway-relayer-0/config/default.toml"
+_ops_run 0
+eq 'a routine default.toml rewrite is not stale'  '0' "$HW_BK_STALE"
+
+_ops_build; chmod 644 "$_ops_root"/root/highway-recovery-*.hrb; _ops_run 0
+eq 'a world-readable backup is flagged'           '0' "$HW_BK_PERMS_OK"
+_ops_build; printf 'NOPE-not-a-bundle' >"$_ops_root/root/highway-recovery-hway-alpha9.hrb"; chmod 600 "$_ops_root"/root/*.hrb; _ops_run 0
+eq 'a file without the header is flagged'         '0' "$HW_BK_MAGIC_OK"
+_ops_build; mv "$_ops_root/root/highway-recovery-hway-alpha9.hrb" "$_ops_root/root/other.hrb"; _ops_run 0
+eq 'only highway-recovery-*.hrb counts as a backup' '0' "$HW_BK_PRESENT"
+_ops_build; ln -s /etc/passwd "$_ops_root/root/highway-recovery-zz.hrb"; rm "$_ops_root/root/highway-recovery-hway-alpha9.hrb"; _ops_run 0
+eq 'a symlink is never read as a backup'          '0' "$HW_BK_PRESENT"
+
+# Connection states: the ones UPDATE cannot fix. The overlay certificate is valid
+# for 24h and renewed every 12h; its issue time is host.crt's mtime.
+_ops_issued() { touch -d "@$((_ops_now - $1))" "$_ops_root/nebula/host.crt"; HW_OPS_LAST=0; hw_operations 1; }
+_ops_build; _ops_run 0
+truthy 'a fresh certificate has hours left'       '((HW_OVERLAY_LEFT > 3600 && HW_OVERLAY_LEFT < 86400))'
+_ops_issued $((86400 + 4000))
+eq 'lapsed overlay certificate'                   'certs-expired:REPAIR CONNECT' "$HW_OPS_STATE:$HW_OPS_ACTION"
+truthy 'and it reports how long ago'              '((HW_OVERLAY_LEFT < -3600))'
+_ops_issued $((86400 + 100))
+eq 'minutes past 24h is not yet a lapse (margin)' 'installed' "$HW_OPS_STATE"
+printf '%s' '{"gate":"terminal_410"}' >"$_ops_root/etc/renew-state.json"
+_ops_issued $((86400 + 4000))
+eq 'device gone from the platform'                'deregistered:REPAIR CONNECT' "$HW_OPS_STATE:$HW_OPS_ACTION"
+printf '%s' '{"gate":"beyond_grace_403"}' >"$_ops_root/etc/renew-state.json"
+_ops_issued $((86400 + 4000))
+eq 'beyond the grace window keeps its registration' 'awaiting-reactivation:REACTIVATE' "$HW_OPS_STATE:$HW_OPS_ACTION"
+printf '%s' '{"gate":"key_mismatch_401"}' >"$_ops_root/etc/renew-state.json"
+_ops_issued 3600
+eq 'a rejected certificate needs repair even before it lapses' 'key-mismatch:REPAIR CONNECT' "$HW_OPS_STATE:$HW_OPS_ACTION"
+printf '%s' '{"gate":"terminal_410"}' >"$_ops_root/etc/renew-state.json"
+_ops_issued 3600
+eq 'a stale gate on a live certificate does not trigger repair' 'installed' "$HW_OPS_STATE"
+_ops_build; rm "$_ops_root/nebula/host.crt"; _ops_run 0
+eq 'no certificate file means no lapse is claimed' 'installed' "$HW_OPS_STATE"
+
+# Setup states.
+_ops_build; printf 'pending\n' >"$_ops_root/etc/registration-state"; _ops_run 0
+eq 'registration pending'                         'relayer-unregistered:RESUME SETUP' "$HW_OPS_STATE:$HW_OPS_ACTION"
+_ops_build; rm "$_ops_root/unit.service"; _ops_run 0
+eq 'no relayer unit installed'                    'install-incomplete:RESUME SETUP' "$HW_OPS_STATE:$HW_OPS_ACTION"
+_ops_build; rm "$_ops_root/etc/relayers/hway-relayer-0/config/p2p_key"; _ops_run 0
+eq 'enrolled but no keys'                         'enrolled-no-relayer:RESUME SETUP' "$HW_OPS_STATE:$HW_OPS_ACTION"
+_ops_build; rm -rf "$_ops_root/etc/relayers" "$_ops_root/etc/api.crt" "$_ops_root/nebula/host.crt"; _ops_run 0
+eq 'nothing installed yet'                        'fresh:none' "$HW_OPS_STATE:$HW_OPS_ACTION"
+
+# STOP RELAYER stops AND holds the relayer down; START RELAYER is the way back.
+_ops_build; _ops_run 0 inactive
+eq 'stopped relayer: START RELAYER'               'installed-stopped:START RELAYER' "$HW_OPS_STATE:$HW_OPS_ACTION"
+eq 'not held unless the marker exists'            '0' "$HW_HELD"
+: >"$_ops_root/etc/relayer-held-down"; _ops_run 0 inactive
+eq 'the held-down marker is honoured'             '1' "$HW_HELD"
+truthy 'and the reason says it was on purpose'    '[[ $HW_OPS_WHY == *on\ purpose* ]]'
+
+# Highway's other state files.
+_ops_build; printf '%s' '{"schema":1,"engaged":true}' >"$_ops_root/etc/killswitch-state.json"; _ops_run 0
+eq 'kill switch engaged'                          '1' "$HW_KILLSWITCH"
+_ops_build; printf '%s' '{"outcome":"valid","days_left":9}' >"$_ops_root/etc/api-cert-state.json"; _ops_run 0
+eq 'API certificate nearly out'                   '9' "$HW_CERT_DAYS"
+_ops_build; printf '%s' '{"days_left":"evil; rm -rf /"}' >"$_ops_root/etc/api-cert-state.json"; _ops_run 0
+eq 'a non-numeric days_left is ignored'           '' "$HW_CERT_DAYS"
+_ops_build; printf 'v1.0.8 $(touch /tmp/hwops-pwned)\n' >"$_ops_root/etc/hw-os-version"; _ops_run 0
+truthy 'a hostile version file is only ever data' '[[ ! -e /tmp/hwops-pwned ]]'
+
+# Absent Highway: nothing is reported and nothing is read.
+HW_PRESENT=0 HW_OPS_LAST=0; hw_operations 1
+eq 'no Highway binary: state is absent'           'absent:none' "$HW_OPS_STATE:$HW_OPS_ACTION"
+
+# The installer being open is the operator's own work.
+_ops_build; _ops_run 0
+mkdir -p "$_ops_root/proc/4242"; printf 'highway\n' >"$_ops_root/proc/4242/comm"
+CFG[hw_maint_grace_min]=30; rm -f "$STATE_DIR/hw-maint-since" 2>/dev/null
+_ops_run 0
+eq 'installer open: maintenance'                  '1:1' "$HW_MAINT:$HW_MAINT_QUIET"
+printf '%s\n' "$((_ops_now - 3600))" >"$STATE_DIR/hw-maint-since"
+_ops_run 0
+eq 'open past the grace window: alerts come back' '1:0' "$HW_MAINT:$HW_MAINT_QUIET"
+rm -rf "$_ops_root/proc/4242"
+_ops_run 0
+eq 'installer closed: maintenance ends'           '0:0' "$HW_MAINT:$HW_MAINT_QUIET"
+truthy 'and the since-marker is removed'          '[[ ! -e $STATE_DIR/hw-maint-since ]]'
+mkdir -p "$_ops_root/proc/77"; printf 'hway-relayer\n' >"$_ops_root/proc/77/comm"; _ops_run 0
+eq 'the relayer process itself is not maintenance' '0' "$HW_MAINT"
+
+# Alert rules. Fixture values are set directly, as the Highway rules above do.
+CFG[highway_track]=on
+_ops_alert() {
+  HW_PRESENT=1 HW_FAILED=0 HW_UNIT_COUNT=1 HW_ACTIVE=1 HW_JOURNAL_ERR=0
+  HW_UNITS=(hway-relayer.service) HW_RESTARTS=([hway-relayer.service]=0) HW_NEBULA=nebula1
+  HW_UPDATE=0 HW_PID=1000 HW_HELD=0 HW_KILLSWITCH=0 HW_CERT_DAYS=77
+  HW_MAINT=0 HW_MAINT_QUIET=0 HW_MAINT_WHY=''
+  HW_OPS_STATE=installed HW_OPS_ACTION=none HW_OPS_WHY=''
+  HW_BK_PRESENT=1 HW_BK_STALE=0 HW_BK_PERMS_OK=1 HW_BK_MAGIC_OK=1
+}
+_ops_alert; _AL_PREV_STATE=(); alerts_evaluate
+eq 'a healthy, backed-up relayer fires nothing' '0' "$AL_FIRING"
+_ops_alert; HW_OPS_STATE=certs-expired HW_OPS_ACTION='REPAIR CONNECT' HW_OPS_WHY='the overlay certificate lapsed'
+_AL_PREV_STATE=(); alerts_evaluate
+truthy 'a lapsed certificate raises hw_repair_needed' 'frame_has_alert hw_repair_needed'
+truthy 'and the message names the menu option'        '[[ ${AL_MSG[*]} == *"choose REPAIR CONNECT"* ]]'
+HW_MAINT=1 HW_MAINT_QUIET=1; _AL_PREV_STATE=(); alerts_evaluate
+truthy 'while the installer is open, repair alert waits' '! frame_has_alert hw_repair_needed'
+truthy 'but the maintenance note is shown'              'frame_has_alert hw_maintenance'
+_ops_alert; HW_FAILED=2 HW_ACTIVE=0 HW_MAINT=1 HW_MAINT_QUIET=1; _AL_PREV_STATE=(); alerts_evaluate
+truthy 'failed units are quiet during maintenance'    '! frame_has_alert hw_failed && ! frame_has_alert hw_inactive'
+HW_MAINT_QUIET=0; _AL_PREV_STATE=(); alerts_evaluate
+truthy 'after the grace window they fire again'       'frame_has_alert hw_failed && frame_has_alert hw_inactive'
+_ops_alert; HW_ACTIVE=0 HW_HELD=1 HW_OPS_STATE=installed-stopped HW_OPS_ACTION='START RELAYER'
+_AL_PREV_STATE=(); alerts_evaluate
+truthy 'STOP RELAYER is a note, not a critical'       '! frame_has_alert hw_inactive && frame_has_alert hw_held_down'
+_ops_alert; HW_BK_PRESENT=0; _AL_PREV_STATE=(); alerts_evaluate
+truthy 'no backup raises hw_no_backup'                'frame_has_alert hw_no_backup'
+_ops_alert; HW_BK_PRESENT=0 HW_OPS_STATE=install-incomplete; _AL_PREV_STATE=(); alerts_evaluate
+truthy 'a half-installed box is not nagged for a backup' '! frame_has_alert hw_no_backup'
+_ops_alert; HW_BK_STALE=1; _AL_PREV_STATE=(); alerts_evaluate
+truthy 'stale backup raises hw_backup_stale'          'frame_has_alert hw_backup_stale'
+_ops_alert; HW_BK_PERMS_OK=0; _AL_PREV_STATE=(); alerts_evaluate
+truthy 'a leaky backup file is a warning'             'frame_has_alert hw_backup_unsafe'
+_ops_alert; HW_KILLSWITCH=1; _AL_PREV_STATE=(); alerts_evaluate
+truthy 'kill switch raises hw_killswitch'             'frame_has_alert hw_killswitch'
+_ops_alert; HW_CERT_DAYS=10; _AL_PREV_STATE=(); alerts_evaluate
+truthy 'API certificate under 14 days raises hw_api_cert' 'frame_has_alert hw_api_cert'
+_ops_alert; HW_CERT_DAYS=30; _AL_PREV_STATE=(); alerts_evaluate
+truthy 'renewal window (30 days) alone is quiet'      '! frame_has_alert hw_api_cert'
+CFG[highway_track]=off
+eval "$_ops_saved"
+
 # Notification gating: below min severity nothing goes out.
 #
 # There is one delivery path now and it is an HTTPS call to the portal, so the
@@ -2873,6 +3075,45 @@ s = json.load(sys.stdin)["system"]
 assert s["tracked"] is False and s["units"] == [] and s["units_total"] == 0, s
 '
 ) && ok || bad 'with base_track=off the payload must say so and carry no units'
+
+# The payload carries the installer-menu recommendation and the backup file state
+# as an `operations` object of scalars, and omits it when Highway is not installed.
+(
+  _ops_build; _ops_run 1
+  printf 'x' >"$_ops_root/etc/relayer-held-down"; _ops_run 1 inactive
+  FAILED_UNITS=()
+  UPTIME_S=100
+  cloud_payload_v
+  printf '%s' "$CLOUD_PAYLOAD" | python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+o = p["operations"]
+assert o["box_state"] == "installed-stopped" and o["action"] == "START RELAYER", o
+assert o["held_down"] is True and o["killswitch"] is False, o
+assert o["os_version"] == "v1.0.8" and o["relayer_version"] == "v1.0.0" and o["network"] == "mainnet", o
+assert o["cert_days"] == 77 and o["config_version"] == 1, o
+assert o["backup_present"] is True and o["backup_size"] == 28 and o["backup_stale"] is False, o
+assert o["backup_perms_ok"] is True and o["backup_magic_ok"] is True, o
+assert o["backup_age_s"] >= 4990 and o["overlay_left_s"] > 3600, o
+assert o["maintenance"] is False and o["maintenance_why"] == "", o
+for k, v in o.items():
+    assert not isinstance(v, (dict, list)), "operations must be scalars only: " + k
+# the files themselves never travel
+txt = json.dumps(p)
+assert "ciphertext-would-follow" not in txt and "p2p_key" not in txt, "backup or key material leaked"
+assert "highway-recovery" not in txt, "the backup path/name must not be sent"
+'
+) && ok || bad 'the payload does not carry a valid operations section'
+(
+  HW_PRESENT=0 HW_OPS_LAST=0; hw_operations 1
+  FAILED_UNITS=()
+  cloud_payload_v
+  printf '%s' "$CLOUD_PAYLOAD" | python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+assert "operations" not in p, "no Highway: no operations section"
+'
+) && ok || bad 'without Highway the payload must not carry operations'
 
 # The node process comes from the relayer unit's MainPID, not from a comm scan.
 # /proc/<pid>/comm is capped at 15 chars, so hway-relayer-supervise shows up as
