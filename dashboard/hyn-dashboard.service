@@ -1,0 +1,47 @@
+[Unit]
+Description=VPS dashboard (live metrics, services, deployments, alerts)
+After=network.target
+# Never let a bad few seconds permanently abandon the dashboard.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /opt/hyn-dashboard/server.mjs
+# Optional overrides: DASH_PORT, DASH_HOST, DASH_TOKEN, DASH_WEBHOOK_URL, HYN_REPO
+EnvironmentFile=-/etc/hyn-dashboard.env
+Environment=NODE_ENV=production
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+
+# Lowest priority: this box runs a relayer, the dashboard must never compete with it.
+Nice=10
+CPUWeight=20
+IOWeight=20
+MemoryHigh=120M
+MemoryMax=160M
+OOMScoreAdjust=300
+TasksMax=64
+
+# Read-only observer. Writes only to /var/lib/hyn-dashboard.
+User=root
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_SYS_PTRACE CAP_NET_ADMIN
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+StateDirectory=hyn-dashboard
+StateDirectoryMode=0700
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

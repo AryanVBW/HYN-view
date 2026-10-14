@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VPS dashboard</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2322c55e'/%3E%3C/svg%3E">
+</head>
+<body>
+<header id="top">
+  <div class="brand"><span id="dot" class="dot off"></span><div><h1 id="host">VPS</h1><div id="sub" class="muted">connecting…</div></div></div>
+  <div id="overall" class="pill off">…</div>
+  <div class="tools">
+    <span id="age" class="muted"></span>
+    <select id="range" aria-label="Chart range">
+      <option value="30m">Live 30 min</option><option value="1h">1 hour</option><option value="6h">6 hours</option>
+      <option value="24h">24 hours</option><option value="7d">7 days</option>
+    </select>
+  </div>
+</header>
+<main>
+  <section id="kpis" class="grid kpis"></section>
+  <section class="grid charts" id="charts"></section>
+  <section class="grid two">
+    <div class="card"><h2>Alerts <span id="alertCount" class="badge"></span></h2><div id="alerts"></div>
+      <h3>Recent changes</h3><div id="events" class="list small"></div></div>
+    <div class="card"><h2>Deployment checks</h2><div id="deploy"></div><h3>Key artifacts</h3><div id="files" class="list small"></div></div>
+  </section>
+  <section class="card"><h2>Services <span id="svcCount" class="badge"></span></h2>
+    <div class="bar"><div id="svcTabs" class="tabs"></div><input id="svcFilter" type="search" placeholder="filter units…" aria-label="Filter units"></div>
+    <div class="scroll"><table id="svc"><thead><tr><th>Unit</th><th>State</th><th>Memory</th><th>Restarts</th><th>Since</th><th class="hide-sm">Description</th></tr></thead><tbody></tbody></table></div>
+  </section>
+  <section class="grid two">
+    <div class="card"><h2>Scheduled jobs (timers)</h2><div class="scroll short"><table id="timers"><thead><tr><th>Timer</th><th>State</th><th>Next</th><th>Last</th></tr></thead><tbody></tbody></table></div></div>
+    <div class="card"><h2>Highway node</h2><div id="highway"></div><h2 class="gap">Portal / agent</h2><div id="hyn"></div></div>
+  </section>
+  <section class="grid two">
+    <div class="card"><h2>Top processes <span class="seg" id="procSort"><button data-k="cpu" class="on">CPU</button><button data-k="rss">Memory</button></span></h2>
+      <div class="scroll short"><table id="procs"><thead><tr><th>PID</th><th>Name</th><th>User</th><th>CPU</th><th>RSS</th><th class="hide-sm">Command</th></tr></thead><tbody></tbody></table></div></div>
+    <div class="card"><h2>Storage &amp; network</h2><div id="fs"></div><h3>Interfaces</h3><div id="ifaces" class="list small"></div><h3>Listening ports</h3><div id="ports" class="list small"></div></div>
+  </section>
+  <section class="grid two">
+    <div class="card"><h2>Security posture</h2><div id="security"></div><h3>Sessions</h3><div id="sessions" class="list small"></div></div>
+    <div class="card"><h2>Warnings &amp; errors (24 h)</h2><canvas id="jchart" class="mini"></canvas><div id="jbyunit" class="list small"></div></div>
+  </section>
+  <section class="card"><h2>Logs</h2>
+    <div class="bar">
+      <select id="logUnit" aria-label="Unit"></select>
+      <select id="logPrio" aria-label="Priority"><option value="3">errors</option><option value="4">warnings+</option><option value="6" selected>info+</option></select>
+      <input id="logQ" type="search" placeholder="search text…" aria-label="Search logs">
+      <label class="chk"><input type="checkbox" id="logLive" checked> auto-refresh</label>
+    </div>
+    <pre id="logs" class="logs">loading…</pre>
+  </section>
+  <section class="grid two">
+    <div class="card"><h2>System</h2><div id="sys"></div></div>
+    <div class="card"><h2>Dashboard self-check</h2><div class="scroll short"><table id="collectors"><thead><tr><th>Collector</th><th>Every</th><th>Last ok</th><th>Errors</th></tr></thead><tbody></tbody></table></div></div>
+  </section>
+</main>
+<script src="/app.js" type="module"></script>
+</body>
+</html>
