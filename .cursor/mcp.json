@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "cashfree": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote@latest", "https://mcp.cashfree.com/mcp"]
+    }
+  }
+}
