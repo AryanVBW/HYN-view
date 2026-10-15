@@ -71,6 +71,10 @@ so access ends on time even if no job runs:
    - a refundable verification amount (`auth_amount`, default ₹2; eNACH is
      always ₹0)
    - `plan_max_amount = greatest(mandate_max_amount, 2 × monthly subtotal)`
+   - payment methods: UPI, card and eNACH, **except** when `plan_max_amount`
+     is above ₹15,000: UPI AutoPay and Indian cards then need the customer to
+     approve every debit (AFA), which cannot work for unattended renewals, so
+     only eNACH is offered.
 3. The browser opens Cashfree checkout (JS SDK v3, `subscriptionsCheckout`).
 4. Cashfree form-POSTs to `/api/billing/return`, which fetches the real status
    from Cashfree (never trusting the redirect) and applies it. Webhooks report

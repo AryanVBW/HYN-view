@@ -38,7 +38,7 @@ A network-first terminal monitor and unattended agent for Ubuntu Server boxes
 that run 24/7.
 
 It covers what `htop` and `btop` cover, but inverts the priority: the network is
-the headline, not the CPU. It also tracks a [Highway](https://highwayp2p.com)
+the headline, not the CPU. It also tracks a [Highway](https://hiwaynetwork.com)
 relay node (`hw-os`) if one is installed — strictly read-only.
 
 ```
@@ -1098,7 +1098,7 @@ Supabase project or the network.
 
 **Independent tool, no affiliation.** hyn-view is an independent system monitor.
 It is **not affiliated with, endorsed by, sponsored by or partnered with**
-Highway P2P (`highwayp2p.com`), Hiway Network, or any other node, relay,
+Highway P2P (formerly `highwayp2p.com`), Hiway Network (`hiwaynetwork.com`), or any other node, relay,
 bandwidth-sharing or infrastructure platform. Where such software is named, it is
 named only to describe what this tool can *observe* — trademarks belong to their
 owners and no endorsement is implied.
