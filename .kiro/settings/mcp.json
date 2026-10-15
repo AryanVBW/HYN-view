@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "supabase": {
+      "command": "/bin/bash",
+      "args": ["/Volumes/DATA_vivek/GITHUB/HYN-view/supabase/mcp-over-ssh.sh"]
+    }
+  }
+}

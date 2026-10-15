@@ -751,10 +751,17 @@ zombie) — cpu/mem only breaks ties inside a group, so the panel always reads a
 
 The simple view (`0`) is the one to leave on a screen nobody is actively working
 at: a single glanceable verdict for the node (running / degraded / not running),
+a **backups** block under it (when taken, how long ago, how big, and how many
+are kept, for the Highway recovery bundle, the system backup with its off-site
+copy, and the local history snapshots; a source the machine does not have is
+left out, and a Highway box with no recovery backup says so),
 current throughput next to today's fastest recorded speed test with a braille
 sparkline of the day's tests, CPU temperature against fixed thresholds, what the
 machine is drawing and whether it is on mains or battery, and one line each for
-memory, the tightest disk and load. Set `dashboard_view=simple` to
+memory, the tightest disk and load. The system backup is read from
+`/var/backups/hyn-system` (override with `HYN_BACKUP_DIR`), which only root can
+read, so an unprivileged operator sees the recovery and local rows but not that
+one. Set `dashboard_view=simple` to
 open there by default; `hyn net`/`hyn proc`/`hyn node` still override it. On a
 linked machine an administrator can set this from the portal instead.
 

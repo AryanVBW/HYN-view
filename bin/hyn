@@ -252,7 +252,7 @@ render_help() {
   local -a P=()
   frame_open "$w"
   panel_open P "$w" 'KEYS' 'h to return'
-  panel_row P "$w" "$(kv '0' 'simple dashboard -- node, speed, temp, essentials only' 14)"
+  panel_row P "$w" "$(kv '0' 'simple dashboard -- node, backups, speed, temp, essentials' 14)"
   panel_row P "$w" "$(kv '1 2 3 4' 'dashboard / network / processes / node' 14)"
   panel_row P "$w" "$(kv 't' "cycle theme (now: $THEME_NAME)" 14)"
   panel_row P "$w" "$(kv 'p' "visual profile (now: ${CFG[profile]}, graph ${CFG[graph]})" 14)"
