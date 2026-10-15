@@ -1106,6 +1106,77 @@ _simple_node_line() {
   return 0
 }
 
+# _simple_backup_row <label> <level> <text...> -- one aligned backup row: a dim
+# label, a dot coloured by the level, then the text. The most important words
+# come first, because panel_row truncates from the right on a narrow terminal.
+_simple_backup_row() {
+  local w=$1 label=$2 level=$3 text=$4 pad
+  printf -v pad '%-8s' "$label"
+  panel_row P_SIMPLE "$w" "${C[dim]}$pad${C[reset]}  ${C[$level]}$G_DOT${C[reset]} $text"
+}
+
+# _simple_backup_lines -- what has been backed up on this machine and when, under
+# the node verdict: the Highway recovery bundle, the system backup with its
+# off-site copy, and the local history snapshots. A source this machine does not
+# have is left out rather than shown as "none" -- except the recovery bundle on a
+# Highway box, where "no backup yet" is the single most important thing here.
+# Returns 1, drawing nothing, when there is nothing to report.
+_simple_backup_lines() {
+  local w=$1 now=${EPOCHSECONDS:-0}
+  ((HW_PRESENT || BK_SYS_PRESENT || BK_LOC_PRESENT)) || return 1
+  panel_row P_SIMPLE "$w" "${C[dim]}backups${C[reset]}"
+  local when age size level note line
+
+  if ((HW_PRESENT)); then
+    if ((HW_BK_PRESENT)); then
+      printf -v when '%(%d %b %H:%M)T' "$HW_BK_MTIME"
+      age=$((now - HW_BK_MTIME)); ((age < 0)) && age=0
+      fmt_dur_v "$age"; local agetxt=$FMT_OUT
+      fmt_size_v "${HW_BK_SIZE:-0}"; size=$FMT_OUT
+      level=ok note='local file'
+      if ((!HW_BK_MAGIC_OK)); then level=warn note='not a Highway bundle'
+      elif ((!HW_BK_PERMS_OK)); then level=warn note='readable by others'
+      elif ((HW_BK_STALE)); then level=warn note='keys changed since — make a new one'; fi
+      line="taken $when · $agetxt ago · $size · ${C[$level]}$note${C[reset]}"
+      [[ $level == ok ]] && line="taken $when · $agetxt ago · $size · ${C[dim]}$note${C[reset]}"
+      _simple_backup_row "$w" recovery "$level" "$line"
+    else
+      _simple_backup_row "$w" recovery warn \
+        "${C[warn]}no backup yet${C[reset]} ${C[dim]}· choose CREATE BACKUP in 'sudo highway'${C[reset]}"
+    fi
+  fi
+
+  if ((BK_SYS_PRESENT)); then
+    printf -v when '%(%d %b %H:%M)T' "$BK_SYS_TS"
+    age=$((now - BK_SYS_TS)); ((age < 0)) && age=0
+    fmt_dur_v "$age"; local sysage=$FMT_OUT
+    # A daily job: late by half a day is a warning, late by two days is not a
+    # one-off hiccup any more.
+    bk_level_v "$age" 129600 259200; level=$BK_LEVEL
+    line="taken $when · $sysage ago"
+    if [[ -n $BK_SYS_SIZE ]]; then fmt_size_v "$BK_SYS_SIZE"; line+=" · $FMT_OUT"; fi
+    ((BK_SYS_COUNT > 0)) && line+=" · ${C[dim]}$BK_SYS_COUNT kept${C[reset]}"
+    if ((BK_SYS_OFFSITE_TS > 0)); then
+      printf -v when '%(%d %b %H:%M)T' "$BK_SYS_OFFSITE_TS"
+      age=$((now - BK_SYS_OFFSITE_TS)); ((age < 0)) && age=0
+      bk_level_v "$age" 129600 259200
+      line+=" · ${C[$BK_LEVEL]}off-site $when${C[reset]}"
+    fi
+    _simple_backup_row "$w" system "$level" "$line"
+  fi
+
+  if ((BK_LOC_PRESENT)); then
+    printf -v when '%(%d %b %H:%M)T' "$BK_LOC_TS"
+    age=$((now - BK_LOC_TS)); ((age < 0)) && age=0
+    fmt_dur_v "$age"
+    bk_level_v "$age" 7200 86400; level=$BK_LEVEL
+    line="snapshot $when · $FMT_OUT ago"
+    ((BK_LOC_COUNT > 0)) && line+=" · ${C[dim]}$BK_LOC_COUNT kept${C[reset]}"
+    _simple_backup_row "$w" local "$level" "$line"
+  fi
+  return 0
+}
+
 # _simple_speed_lines -- current throughput, today's fastest result, and a
 # braille sparkline of the day's tests so "the high" has a shape, not just a
 # number. Falls back to a plain sentence when there is no history yet, rather
@@ -1248,6 +1319,7 @@ render_simple() {
   P_SIMPLE=()
   panel_open P_SIMPLE "$w" 'HYN' "$HOSTNAME_S" "${C[title]}"
   _simple_node_line "$w"
+  _simple_backup_lines "$w" || true
   panel_row P_SIMPLE "$w" ''
   _simple_speed_lines "$w" "$inner"
   panel_row P_SIMPLE "$w" ''

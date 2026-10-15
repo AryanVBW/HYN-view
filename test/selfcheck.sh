@@ -2395,6 +2395,132 @@ render_dash
 missing 'the cpu panel omits the power row when unmeasurable' \
   'power' "$(printf '%s\n' "${FB[@]}")"
 
+# ---------------------------------------------------------------------------
+# Backups on the simple view: the Highway recovery bundle, the system backup
+# (with its off-site copy) and the local snapshots, under the node verdict.
+# ---------------------------------------------------------------------------
+section 'backup rows (simple view)'
+
+# Severity is one pure function so the colour rules are testable without
+# parsing escape codes out of a frame.
+eq 'a fresh backup is ok'                 'ok'   "$(bk_level 3600 129600 259200)"
+eq 'past the warn age is warn'            'warn' "$(bk_level 140000 129600 259200)"
+eq 'past the crit age is crit'            'crit' "$(bk_level 300000 129600 259200)"
+eq 'exactly the warn age is still ok'     'ok'   "$(bk_level 129600 129600 259200)"
+eq 'an unknown age is never called ok'    'warn' "$(bk_level '' 129600 259200)"
+
+_bk_now=$EPOCHSECONDS
+state_dir_v
+HYN_BACKUP_DIR=$TMP/sysbk
+_bk_snaps=$STATE_DIR/local/snapshots
+rm -rf "$HYN_BACKUP_DIR" "$_bk_snaps"
+mkdir -p "$HYN_BACKUP_DIR" "$_bk_snaps"
+printf '%s\n' $((_bk_now - 64800)) >"$HYN_BACKUP_DIR/last-success"
+printf '%s\n' $((_bk_now - 64680)) >"$HYN_BACKUP_DIR/last-offsite"
+head -c 2048 /dev/zero >"$HYN_BACKUP_DIR/box-20261013T210000Z.tar.gz"
+head -c 4096 /dev/zero >"$HYN_BACKUP_DIR/box-20261014T210000Z.tar.gz"
+printf '{}' >"$_bk_snaps/2026-10-15-205900-111-aaaa.json"
+printf '{}' >"$_bk_snaps/2026-10-15-215900-222-bbbb.json"
+touch -d "@$((_bk_now - 7200))" "$_bk_snaps/2026-10-15-205900-111-aaaa.json"
+touch -d "@$((_bk_now - 180))" "$_bk_snaps/2026-10-15-215900-222-bbbb.json"
+BK_LAST=0
+bk_local_sample 1
+eq 'system backup is found'                '1' "$BK_SYS_PRESENT"
+eq 'its time is the last-success stamp'    "$((_bk_now - 64800))" "$BK_SYS_TS"
+eq 'its size is the newest archive'        '4096' "$BK_SYS_SIZE"
+eq 'every archive on disk is counted'      '2' "$BK_SYS_COUNT"
+eq 'the off-site time is read'             "$((_bk_now - 64680))" "$BK_SYS_OFFSITE_TS"
+eq 'local snapshots are found'             '1' "$BK_LOC_PRESENT"
+eq 'every snapshot on disk is counted'     '2' "$BK_LOC_COUNT"
+truthy 'the newest snapshot time is its mtime' '((BK_LOC_TS >= _bk_now - 185 && BK_LOC_TS <= _bk_now - 175))'
+
+# Reads are cached: the TUI asks every frame, the disk is touched once a minute.
+printf '%s\n' "$((_bk_now - 60))" >"$HYN_BACKUP_DIR/last-success"
+bk_local_sample
+eq 'a repeat call inside the window does not re-read' "$((_bk_now - 64800))" "$BK_SYS_TS"
+bk_local_sample 1
+eq 'a forced call does'                    "$((_bk_now - 60))" "$BK_SYS_TS"
+
+# Untrusted input: a stamp file is just a file.
+printf 'not-a-number\n' >"$HYN_BACKUP_DIR/last-success"
+bk_local_sample 1
+eq 'a garbled stamp falls back to the archive mtime' '1' "$BK_SYS_PRESENT"
+truthy 'the fallback time is a real epoch'  '[[ $BK_SYS_TS =~ ^[0-9]+$ ]] && ((BK_SYS_TS > 1000000000))'
+rm -f "$HYN_BACKUP_DIR/last-offsite"
+bk_local_sample 1
+eq 'no off-site stamp leaves it unset'     '0' "$BK_SYS_OFFSITE_TS"
+rm -rf "$HYN_BACKUP_DIR" "$_bk_snaps"
+bk_local_sample 1
+eq 'no system backup dir: absent'          '0' "$BK_SYS_PRESENT"
+eq 'no snapshot dir: absent'               '0' "$BK_LOC_PRESENT"
+
+# Rendering. Strip colour so assertions read the words, and keep every fixture
+# value explicit instead of leaning on whatever the earlier sections left behind.
+_bk_plain() { printf '%s\n' "${FB[@]}" | sed 's/\x1b\[[0-9;]*m//g'; }
+_bk_fixture() {
+  HW_PRESENT=1 HW_BK_PRESENT=1 HW_BK_MTIME=$((_bk_now - 100000)) HW_BK_AGE=100000
+  HW_BK_SIZE=28 HW_BK_STALE=0 HW_BK_PERMS_OK=1 HW_BK_MAGIC_OK=1
+  BK_SYS_PRESENT=1 BK_SYS_TS=$((_bk_now - 64800)) BK_SYS_SIZE=3145728 BK_SYS_COUNT=7
+  BK_SYS_OFFSITE_TS=$((_bk_now - 64680))
+  BK_LOC_PRESENT=1 BK_LOC_TS=$((_bk_now - 180)) BK_LOC_COUNT=24
+  BK_LAST=$_bk_now HW_BK_LAST=$_bk_now
+}
+TERM_COLS=140 TERM_ROWS=45
+panels_enabled
+_bk_fixture
+render_simple
+_bk=$(_bk_plain)
+contains 'a backups heading appears'          'backups'                 "$_bk"
+contains 'the recovery bundle row appears'    'recovery'                "$_bk"
+contains 'the recovery row says it was taken' 'taken'                   "$_bk"
+printf -v _bk_when '%(%d %b %H:%M)T' $((_bk_now - 100000))
+contains 'the recovery row shows the time'    "$_bk_when"               "$_bk"
+contains 'the recovery row shows its age'     'ago'                     "$_bk"
+contains 'the recovery row says it is a local file' 'local file'        "$_bk"
+contains 'the system backup row appears'      'system'                  "$_bk"
+printf -v _bk_when '%(%d %b %H:%M)T' $((_bk_now - 64800))
+contains 'the system row shows its time'      "$_bk_when"               "$_bk"
+contains 'the system row shows the size'      '3.0 MiB'                 "$_bk"
+contains 'the system row counts kept copies'  '7 kept'                  "$_bk"
+contains 'the off-site copy is shown'         'off-site'                "$_bk"
+contains 'the local snapshot row appears'     'snapshot'                "$_bk"
+contains 'local snapshots are counted'        '24 kept'                 "$_bk"
+
+HW_BK_STALE=1; render_simple; _bk=$(_bk_plain)
+contains 'stale keys are called out'          'keys changed since'      "$_bk"
+HW_BK_STALE=0 HW_BK_PERMS_OK=0; render_simple; _bk=$(_bk_plain)
+contains 'a leaky bundle is called out'       'readable by others'      "$_bk"
+HW_BK_PERMS_OK=1 HW_BK_MAGIC_OK=0; render_simple; _bk=$(_bk_plain)
+contains 'a non-bundle file is called out'    'not a Highway bundle'    "$_bk"
+HW_BK_MAGIC_OK=1 HW_BK_PRESENT=0; render_simple; _bk=$(_bk_plain)
+contains 'no recovery backup says so'         'no backup yet'           "$_bk"
+HW_PRESENT=0; render_simple; _bk=$(_bk_plain)
+missing 'no Highway means no recovery row'    'recovery'                "$_bk"
+contains 'the other backups still show'       'system'                  "$_bk"
+_bk_fixture
+BK_SYS_OFFSITE_TS=0; render_simple; _bk=$(_bk_plain)
+missing 'no off-site stamp: no off-site text' 'off-site'                "$_bk"
+BK_SYS_PRESENT=0 BK_LOC_PRESENT=0 HW_PRESENT=0 HW_BK_PRESENT=0
+render_simple; _bk=$(_bk_plain)
+missing 'nothing to report: no backups block' 'backups'                 "$_bk"
+
+# Every row has to fit, at the widths the rest of this view is held to.
+for _bw in 140 100 80; do
+  TERM_COLS=$_bw TERM_ROWS=45
+  panels_enabled
+  _bk_fixture
+  HW_BK_STALE=1
+  render_simple
+  _over=0
+  for _i in "${!FB[@]}"; do
+    vlen "${FB[_i]}"
+    ((VLEN > TERM_COLS)) && _over=$((_over + 1))
+  done
+  eq "simple view with backups fits $_bw cols" '0' "$_over"
+done
+TERM_COLS=140 TERM_ROWS=45
+panels_enabled
+
 # A machine with no power interfaces at all is a normal outcome -- every VM -- and
 # must leave every field unavailable rather than reporting a box drawing 0 W.
 (
@@ -3285,7 +3411,7 @@ if [[ -r $_inst ]]; then
   cat >"$_vdir/hyn" <<'EOS'
 #!/usr/bin/env bash
 case "$*" in
-  --version) echo 'hyn-view 2.0.1' ;;
+  --version) echo 'hyn-view 2.1.0' ;;
   'config get heartbeat_sec') echo 45 ;;
   'config get cloud_enabled') echo on ;;
   'doctor --fix') : >"${0%/*}/repaired" ;;

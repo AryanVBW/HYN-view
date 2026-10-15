@@ -655,6 +655,94 @@ hw_backup() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# Other backups on this machine, for the simple view's "backups" block.
+#
+#   system   dashboard/backup/hyn-sysbackup.sh writes <host>-<stamp>.tar.gz plus
+#            last-success and last-offsite (epoch seconds) into HYN_BACKUP_DIR.
+#   local    hyn's own history snapshots, one JSON file per snapshot.
+#
+# Both are read-only and cheap: one directory glob each, one stat for the pair of
+# newest files, and a re-read at most once a minute however often the TUI asks.
+# A directory the caller cannot read simply reads as "no backup here" -- the same
+# answer as a box that has none -- so an unprivileged operator sees fewer rows,
+# never an error.
+# ---------------------------------------------------------------------------
+: "${HYN_BACKUP_DIR:=/var/backups/hyn-system}"
+BK_SYS_PRESENT=0 BK_SYS_TS=0 BK_SYS_SIZE='' BK_SYS_COUNT=0 BK_SYS_OFFSITE_TS=0
+BK_LOC_PRESENT=0 BK_LOC_TS=0 BK_LOC_COUNT=0
+BK_LAST=0 BK_LEVEL=ok
+
+# bk_level_v <age-seconds> <warn-after> <crit-after> -> BK_LEVEL (ok|warn|crit).
+# An age that is not a number is never reported as healthy: "we cannot tell" is
+# the one answer a backup status must not round up to "fine".
+bk_level_v() {
+  local age=$1 warn=$2 crit=$3
+  if [[ ! $age =~ ^[0-9]+$ ]]; then BK_LEVEL=warn
+  elif ((age > crit)); then BK_LEVEL=crit
+  elif ((age > warn)); then BK_LEVEL=warn
+  else BK_LEVEL=ok; fi
+  return 0
+}
+bk_level() { bk_level_v "$@"; printf '%s' "$BK_LEVEL"; }
+
+# _bk_stamp <file>: an epoch-seconds stamp file into REPLY; fails on anything
+# else. These files are written by a script, but a stamp is still just a file.
+_bk_stamp() {
+  REPLY=''
+  [[ -f $1 && ! -L $1 ]] || return 1
+  _hw_line "$1" || return 1
+  [[ $REPLY =~ ^[0-9]{9,11}$ ]]
+}
+
+bk_local_sample() {
+  local force=${1:-0} now=${EPOCHSECONDS:-0}
+  ((force == 0 && BK_LAST > 0 && now - BK_LAST < 60)) && return 0
+  BK_LAST=$now
+  BK_SYS_PRESENT=0 BK_SYS_TS=0 BK_SYS_SIZE='' BK_SYS_COUNT=0 BK_SYS_OFFSITE_TS=0
+  BK_LOC_PRESENT=0 BK_LOC_TS=0 BK_LOC_COUNT=0
+
+  local sysdir=$HYN_BACKUP_DIR snapdir arc='' snap='' stamp=0
+  local -a arcs=() snaps=()
+  state_dir_v
+  snapdir=$STATE_DIR/local/snapshots
+
+  # Names sort by their timestamp, so the last glob entry is the newest.
+  if [[ -d $sysdir ]]; then
+    arcs=("$sysdir"/*.tar.gz)
+    [[ -f ${arcs[0]} ]] && arc=${arcs[${#arcs[@]} - 1]} || arcs=()
+    _bk_stamp "$sysdir/last-success" && stamp=$REPLY
+    _bk_stamp "$sysdir/last-offsite" && BK_SYS_OFFSITE_TS=$REPLY
+  fi
+  if [[ -d $snapdir ]]; then
+    snaps=("$snapdir"/*.json)
+    [[ -f ${snaps[0]} ]] && snap=${snaps[${#snaps[@]} - 1]} || snaps=()
+  fi
+
+  local -a targets=()
+  [[ -n $arc ]] && targets+=("$arc")
+  [[ -n $snap ]] && targets+=("$snap")
+  local m sz name am=0 asz='' sm=0
+  if ((${#targets[@]} > 0)) && have stat; then
+    while IFS=' ' read -r m sz name; do
+      [[ $m =~ ^[0-9]+$ ]] || continue
+      if [[ $name == "$arc" ]]; then am=$m asz=$sz
+      elif [[ $name == "$snap" ]]; then sm=$m; fi
+    done < <(stat -c '%Y %s %n' "${targets[@]}" 2>/dev/null)
+  fi
+
+  # The script's own stamp is the truth about when it last succeeded; the
+  # archive's mtime only stands in when the stamp is missing or unreadable.
+  ((stamp > 0)) || stamp=$am
+  if ((stamp > 0)); then
+    BK_SYS_PRESENT=1 BK_SYS_TS=$stamp BK_SYS_SIZE=$asz BK_SYS_COUNT=${#arcs[@]}
+  fi
+  if ((sm > 0)); then
+    BK_LOC_PRESENT=1 BK_LOC_TS=$sm BK_LOC_COUNT=${#snaps[@]}
+  fi
+  return 0
+}
+
 # Is somebody running the Highway installer right now? Its update and repair
 # restart the very units this agent watches, so while it is open a failing unit
 # is the operator's own work, not an incident. Suppression is bounded
@@ -788,6 +876,8 @@ hw_operations() {
 
 hw_sample() {
   local ms=$1
+  # Backups are worth showing whether or not this box tracks a Highway node.
+  bk_local_sample
   cfg_on highway_track || return 0
   hw_binary
   hw_units
