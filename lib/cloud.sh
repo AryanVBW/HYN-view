@@ -597,6 +597,71 @@ cloud_payload_v() {
   # receives the warning/error counts above, which are sufficient for health
   # monitoring without copying arbitrary log content off the server.
   p+='}'
+  # Base system services (sshd, cron, network, time sync, journal), reported
+  # apart from the Highway units: a relay box with a dead sshd or no time sync is
+  # unhealthy whatever the node is doing. `failed_units` is every unit systemd
+  # reports as failed, listed or not, so a service nobody thought to track still
+  # shows up the moment it fails. Names only, capped, never log text.
+  p+=", \"system\": {\"tracked\": $(cfg_on base_track && printf true || printf false)"
+  p+=", \"units_total\": $(_jnum "${BS_UNIT_COUNT:-0}" 0)"
+  p+=", \"units_active\": $(_jnum "${BS_ACTIVE:-0}" 0)"
+  p+=", \"units_failed\": $(_jnum "${BS_FAILED:-0}" 0)"
+  p+=', "units": ['
+  first=1
+  local bu bs
+  for bu in "${BS_UNITS[@]}"; do
+    ((first)) || p+=', '
+    first=0
+    p+="{\"name\": \"$(_jstr "$bu")\""
+    p+=", \"state\": \"$(_jstr "${BS_STATE[$bu]:-}")\""
+    p+=", \"sub\": \"$(_jstr "${BS_SUB[$bu]:-}")\""
+    p+=", \"restarts\": $(_jnum "${BS_RESTARTS[$bu]:-}")"
+    p+=", \"memory\": $(_jbig "${BS_MEM[$bu]:-}")"
+    bs=${BS_SINCE[$bu]:-}
+    if [[ $bs =~ ^[0-9]+$ ]] && ((${#bs} <= 15)) && ((bs > 0)) && ((${UPTIME_S:-0} > 0)); then
+      p+=", \"active_s\": $((UPTIME_S - bs / 1000000))"
+    else
+      p+=', "active_s": null'
+    fi
+    p+='}'
+  done
+  p+='], "failed_units": ['
+  first=1
+  local fu fn=0
+  for fu in "${FAILED_UNITS[@]}"; do
+    ((fn++ >= 16)) && break
+    ((first)) || p+=', '
+    first=0
+    p+="\"$(_jstr "$fu")\""
+  done
+  p+=']}'
+
+  # What Highway's installer menu would recommend, worked out from files the box
+  # already keeps (lib/highway.sh hw_operations). Scalars only. The backup block
+  # describes the local file: Highway's account copy can only be queried with its
+  # own mTLS client, so the portal must not claim to know about it.
+  if ((HW_PRESENT)); then
+    p+=", \"operations\": {\"box_state\": \"$(_jstr "${HW_OPS_STATE:-}")\""
+    p+=", \"action\": \"$(_jstr "${HW_OPS_ACTION:-none}")\""
+    p+=", \"action_why\": \"$(_jstr "${HW_OPS_WHY:-}")\""
+    p+=", \"renew_gate\": \"$(_jstr "${HW_OPS_GATE:-}")\""
+    p+=", \"overlay_left_s\": $(_jnum "${HW_OVERLAY_LEFT:-}")"
+    p+=", \"cert_days\": $(_jnum "${HW_CERT_DAYS:-}")"
+    p+=", \"killswitch\": $( ((HW_KILLSWITCH)) && printf true || printf false)"
+    p+=", \"held_down\": $( ((HW_HELD)) && printf true || printf false)"
+    p+=", \"network\": \"$(_jstr "${HW_NETWORK:-}")\""
+    p+=", \"os_version\": \"$(_jstr "${HW_OS_VERSION:-}")\""
+    p+=", \"relayer_version\": \"$(_jstr "${HW_RELAYER_VERSION:-}")\""
+    p+=", \"config_version\": $(_jnum "${HW_CONFIG_VERSION:-}")"
+    p+=", \"backup_present\": $( ((HW_BK_PRESENT)) && printf true || printf false)"
+    p+=", \"backup_age_s\": $(_jnum "${HW_BK_AGE:-}")"
+    p+=", \"backup_size\": $(_jnum "${HW_BK_SIZE:-}")"
+    p+=", \"backup_stale\": $( ((HW_BK_STALE)) && printf true || printf false)"
+    p+=", \"backup_perms_ok\": $( ((HW_BK_PERMS_OK)) && printf true || printf false)"
+    p+=", \"backup_magic_ok\": $( ((HW_BK_MAGIC_OK)) && printf true || printf false)"
+    p+=", \"maintenance\": $( ((HW_MAINT)) && printf true || printf false)"
+    p+=", \"maintenance_why\": \"$(_jstr "${HW_MAINT_WHY:-}")\"}"
+  fi
 
   # Every rule firing now, plus the ones the alert timer last recorded as firing
   # that are clear now, so the portal's event log is the same truth the email

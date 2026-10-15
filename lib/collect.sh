@@ -954,6 +954,76 @@ sys_failed_units() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# base-system services
+# ---------------------------------------------------------------------------
+# The Ubuntu services a box needs in order to be reachable, correctly timed and
+# loggable: sshd, cron, the network stack, time sync, the journal. They are
+# tracked apart from the Highway units on purpose -- a relay box with a dead sshd
+# or no time sync is unhealthy whatever the node is doing -- and they are on
+# whether or not a Highway node is installed.
+#
+# Strictly read-only, like highway.sh: `list-units` and `show` only, and the
+# selfcheck greps for a state-changing systemctl verb aimed at anything that is
+# not one of hyn's own units. The prefix is `bs_` (base services) because sys_*
+# is taken by the host-identity collectors above.
+#
+# Only units that exist are reported, so a patterns list can name both
+# systemd-timesyncd and chrony and a box simply shows whichever it runs.
+BS_UNIT_COUNT=0 BS_ACTIVE=0 BS_FAILED=0 BS_LAST=0
+declare -a BS_UNITS=()
+declare -A BS_STATE=() BS_SUB=() BS_RESTARTS=() BS_MEM=() BS_SINCE=()
+
+bs_units() {
+  local force=${1:-0} now=${EPOCHSECONDS:-0}
+  ((force == 0 && BS_LAST > 0 && now - BS_LAST < 10)) && return 0
+  BS_LAST=$now
+  BS_UNITS=() BS_STATE=() BS_SUB=() BS_RESTARTS=() BS_MEM=() BS_SINCE=()
+  BS_UNIT_COUNT=0 BS_ACTIVE=0 BS_FAILED=0
+  cfg_on base_track || return 0
+  have systemctl || return 1
+  local -a pats=()
+  local p oIFS=$IFS
+  IFS=,
+  for p in ${CFG[base_units]}; do
+    [[ -n $p ]] && pats+=("$p")
+  done
+  IFS=$oIFS
+  ((${#pats[@]} == 0)) && return 0
+
+  local unit load rest
+  while read -r unit load rest; do
+    # Services only. A timer or socket is not "the service is up".
+    [[ $unit == *.service ]] || continue
+    # `--all` with an exact name also lists units that do not exist, as
+    # `not-found`. Without this a box that runs ssh.service would also report
+    # sshd.service and NetworkManager.service as dead services it never had.
+    [[ $load == loaded ]] || continue
+    BS_UNITS+=("$unit")
+  done < <(systemctl list-units --all --no-legend --plain --no-pager "${pats[@]}" 2>/dev/null)
+  BS_UNIT_COUNT=${#BS_UNITS[@]}
+
+  local u line k v
+  for u in "${BS_UNITS[@]}"; do
+    while IFS= read -r line; do
+      k=${line%%=*} v=${line#*=}
+      case $k in
+        ActiveState) BS_STATE[$u]=$v ;;
+        SubState) BS_SUB[$u]=$v ;;
+        NRestarts) BS_RESTARTS[$u]=$v ;;
+        MemoryCurrent) BS_MEM[$u]=$v ;;
+        ExecMainStartTimestampMonotonic) BS_SINCE[$u]=$v ;;
+      esac
+    done < <(systemctl show -p ActiveState -p SubState -p NRestarts -p MemoryCurrent \
+      -p ExecMainStartTimestampMonotonic "$u" 2>/dev/null)
+    case ${BS_STATE[$u]:-} in
+      active) ((BS_ACTIVE++)) ;;
+      failed) ((BS_FAILED++)) ;;
+    esac
+  done
+  return 0
+}
+
 
 # ---------------------------------------------------------------------------
 # accounts and access

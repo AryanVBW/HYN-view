@@ -113,6 +113,7 @@ declare -A CFG=(
   [speedtest_history]=90
   [highway_track]=on
   [highway_update_check]=on
+  [hw_maint_grace_min]=30
   [highway_version_probe]=off
   # `hway*` is not redundant with `highway*` or `hw-*`, and leaving it out was a
   # real blind spot: Highway Relayer OS names its units hway-relayer.service,
@@ -122,6 +123,12 @@ declare -A CFG=(
   # units active" while hway-logrotate.service sat in `failed` and the relayer
   # itself was not being watched at all.
   [highway_units]='highway*,hway*,hw-*,nebula*,mosaic*'
+  # The base Ubuntu services a server needs to be reachable, correctly timed and
+  # loggable, reported to the portal apart from the Highway units. Only units that
+  # exist on the box are reported, so listing both systemd-timesyncd and chrony is
+  # fine. Exact unit names, not globs, so `ssh` does not drag in `ssh@.service`.
+  [base_track]=on
+  [base_units]='ssh.service,sshd.service,cron.service,rsyslog.service,dbus.service,systemd-networkd.service,NetworkManager.service,systemd-resolved.service,systemd-timesyncd.service,chrony.service,systemd-journald.service,systemd-logind.service,unattended-upgrades.service,qemu-guest-agent.service,ufw.service,fail2ban.service'
 
   # --- notification delivery -------------------------------------------------
   # There is nothing to configure here, and that is the point.
@@ -173,6 +180,7 @@ declare -A CFG=(
   [alert_speed_min_pct]=50
   [alert_fd_pct]=80
   [alert_hw_restarts]=3
+  [alert_hw_cert_days]=14
   [alert_hw_journal_err]=5
 
   # --- daily report ----------------------------------------------------------

@@ -925,6 +925,71 @@ opt into running `highway --version`.
 
 Turn the whole thing off with `highway_track=off`.
 
+### Highway installer menu, backup and repair
+
+`curl -fsSL get.highway.space | sudo -H bash` installs the `highway` tool, and on a
+box that already has a relayer it opens a menu. The agent works out which entry
+applies from files Highway leaves behind, so the portal can say "choose X" before
+anyone logs in. It is read-only: it never opens a key, never runs the installer and
+never restarts a unit.
+
+| Menu entry | What it does | The agent reports it when |
+|---|---|---|
+| `UPDATE & REPAIR` | refreshes the agent stack and timers; refuses without a valid overlay certificate | a newer `hw-os` release exists and nothing more urgent does |
+| `REPAIR CONNECT` | signs in again and issues new network credentials | the overlay certificate lapsed, the platform rejects it (`key_mismatch_401`), or the device is gone (`terminal_410`, `retired_403`) |
+| `REACTIVATE` | brings the box back with its existing registration | the certificate lapsed beyond the grace window (`beyond_grace_403`) |
+| `CREATE BACKUP` | seals the relayer keys with the manager mnemonic into `/root/highway-recovery-<name>.hrb` and uploads it to the account | no backup file exists, or a key file changed after it was made |
+| `START RELAYER` | undoes `STOP RELAYER`, which also writes `/etc/hway-relayer/relayer-held-down` | the relayer is not running |
+| `RESUME SETUP` | finishes an interrupted install | registration is pending, the unit is missing, or no keys exist |
+
+The recovery file is `HWRB` + version, then AES-256-GCM with a key derived from the
+mnemonic (scrypt), so it is useless without that phrase. What the agent checks is the
+**local file only**: present, age, size, owner-only mode, header, and whether
+`p2p_key` or `.env` are newer than it. Highway's account copy can only be queried
+with its own client certificate, so the dashboard says "local file" and does not
+claim to know about the account copy. Nothing from the file is ever sent; the
+payload carries those scalars and nothing else.
+
+While the `highway` installer process is open, `UPDATE & REPAIR` is restarting the
+very units that are watched. Unit alerts (`hw_failed`, `hw_inactive`,
+`hw_restarts`, `hw_tunnel_down`, `hw_not_running`, `hw_repair_needed`) are paused for
+`hw_maint_grace_min` minutes (default 30), then come back, so a terminal left open
+on a broken box still alerts. A relayer stopped with `STOP RELAYER` is reported as
+an info note (`hw_held_down`) rather than a critical outage.
+
+The overlay certificate lifetime is estimated from `host.crt`'s modification time
+(24h issue, renewed every 12h, one hour of margin) because the agent does not run
+the mesh tools.
+
+## Base system services
+
+A relay box that cannot be reached over ssh, has no time sync or has lost its journal
+is unhealthy whatever the node is doing, so the agent reports the base Ubuntu services
+as their own section, apart from the Highway units, whether or not a Highway node is
+installed.
+
+Default list (`base_units`, exact names, only units that exist are reported):
+`ssh`, `sshd`, `cron`, `rsyslog`, `dbus`, `systemd-networkd`, `NetworkManager`,
+`systemd-resolved`, `systemd-timesyncd`, `chrony`, `systemd-journald`,
+`systemd-logind`, `unattended-upgrades`, `qemu-guest-agent`, `ufw` and `fail2ban`.
+Both `ssh` and `sshd` can be listed because a name that does not exist (`not-found`)
+is skipped, which is how an alias or an uninstalled service stays out of the report.
+A unit that is stopped on purpose, such as `systemd-timesyncd` on a box that runs
+`chrony`, shows as muted rather than as an alarm. Only `failed` is red.
+
+The push also carries `failed_units`: the name of **every** unit systemd reports as
+failed, listed or not, capped at 16. A service nobody thought to track therefore shows
+up on the dashboard the moment it fails. Names only, never log text. Turn the section
+off with `base_track=off`. It is read-only, like the Highway tracking, and the
+self-check enforces that.
+
+**Rollout order matters.** The database keeps only the payload keys it knows, so an
+agent that sends `system` to a database that has not been upgraded has the section
+silently dropped. Apply `supabase/migrations/20261014120000_system_units.sql` first
+(it also raises the Highway unit cap from 32 to 48; a current relayer box already
+sends 27), then deploy the portal, then roll out the agent. The migration replaces one
+function and is safe to re-run.
+
 ## Configuration
 
 `/etc/hyn-view/config`, or `~/.config/hyn-view/config` for a single user. Run
@@ -950,6 +1015,10 @@ Keys worth knowing:
 | `speedtest_provider` | `auto` | prefers Ookla `speedtest`, then `speedtest-cli`, then `curl` |
 | `power_track` | `on` | RAPL, hwmon power rails and mains/battery state |
 | `highway_track` | `on` | node panel |
+| `hw_maint_grace_min` | `30` | minutes unit alerts stay paused while the Highway installer is open |
+| `alert_hw_cert_days` | `14` | warn when the Highway API certificate has this many days left and is not renewing |
+| `base_track` | `on` | report the base Ubuntu services (ssh, cron, network, time sync, journal) to the portal as their own section |
+| `base_units` | `ssh.service,cron.service,…` | exact unit names, comma separated; only units that exist on the box are reported |
 | `profile` | `best` | `best` or `performance` |
 | `notify_access_details` | `off` | set `on` only to include run-as/session usernames, session source IPs and the worst rejected-login IP in notifications |
 | `alert_min_severity` | `warn` | `crit`, `warn` or `info` |

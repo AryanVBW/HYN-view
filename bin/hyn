@@ -976,6 +976,52 @@ cmd_doctor() {
     else
       _chk warn 'version' 'not readable without executing the binary (see highway_version_probe)'
     fi
+    # What `sudo highway`'s menu would tell you to do, from the files it leaves
+    # behind. Read-only: nothing here opens a key or runs the installer.
+    # The release pointer first, so "nothing to do" is not said about a box that
+    # is two releases behind. The fetch runs in the background (10s cap per host);
+    # a second call reads what it wrote.
+    hw_latest_check
+    ((_HW_FETCH_PID > 0)) && wait "$_HW_FETCH_PID" 2>/dev/null
+    hw_latest_check
+    hw_operations 1
+    if [[ $HW_OPS_ACTION == none ]]; then
+      _chk ok 'installer menu' "${HW_OPS_STATE}: nothing to do"
+    else
+      _chk warn 'installer menu' "${HW_OPS_STATE}: choose ${HW_OPS_ACTION} in 'sudo highway' -- ${HW_OPS_WHY}"
+    fi
+    if ((HW_BK_PRESENT)); then
+      if ((!HW_BK_PERMS_OK)); then
+        _chk warn 'recovery backup' 'readable by others -- it holds the relayer keys: chmod 600 /root/highway-recovery-*.hrb'
+      elif ((!HW_BK_MAGIC_OK)); then
+        _chk warn 'recovery backup' 'file is not a Highway bundle -- choose CREATE BACKUP to make a new one'
+      elif ((HW_BK_STALE)); then
+        _chk warn 'recovery backup' "$(fmt_dur "$HW_BK_AGE") old, and the keys changed since -- choose CREATE BACKUP"
+      else
+        _chk ok 'recovery backup' "$(fmt_dur "$HW_BK_AGE") old, $(fmt_size "${HW_BK_SIZE:-0}"), owner-only (local file; the account copy cannot be checked from here)"
+      fi
+    else
+      _chk warn 'recovery backup' "none in ${HW_BK_DIR} -- choose CREATE BACKUP in 'sudo highway'; a lost machine otherwise means a lost relayer"
+    fi
+    if [[ $HW_OVERLAY_LEFT =~ ^-?[0-9]+$ ]]; then
+      if ((HW_OVERLAY_LEFT > 0)); then
+        _chk ok 'overlay certificate' "about $(fmt_dur "$HW_OVERLAY_LEFT") left (renewed every 12h)"
+      elif ((HW_OVERLAY_LEFT > -3600)); then
+        _chk ok 'overlay certificate' 'at its renewal boundary'
+      else
+        _chk warn 'overlay certificate' 'renewal has stopped -- choose REPAIR CONNECT in sudo highway'
+      fi
+    fi
+    if [[ $HW_CERT_DAYS =~ ^-?[0-9]+$ ]]; then
+      if ((HW_CERT_DAYS > ${CFG[alert_hw_cert_days]:-14})); then
+        _chk ok 'API certificate' "${HW_CERT_DAYS} days left"
+      else
+        _chk warn 'API certificate' "${HW_CERT_DAYS} days left and not renewing"
+      fi
+    fi
+    if ((HW_KILLSWITCH)); then _chk warn 'kill switch' 'engaged -- the platform told this relayer to stand down'; fi
+    if ((HW_HELD)); then _chk warn 'relayer' 'held down on purpose (STOP RELAYER); START RELAYER undoes it'; fi
+    if ((HW_MAINT)); then _chk warn 'installer' "$HW_MAINT_WHY"; fi
   else
     _chk warn 'binary' "not found at $HW_BIN"
   fi
